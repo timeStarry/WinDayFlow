@@ -1,0 +1,230 @@
+<Page
+    x:Class="WinDayFlow.App.Views.SettingsPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <ScrollViewer
+        HorizontalScrollBarVisibility="Disabled"
+        HorizontalScrollMode="Disabled"
+        VerticalScrollBarVisibility="Auto">
+        <Grid Padding="{StaticResource PagePadding}">
+            <StackPanel
+                MaxWidth="{StaticResource SettingsContentMaxWidth}"
+                HorizontalAlignment="Center"
+                Spacing="28">
+                <InfoBar
+                    x:Name="SettingsErrorInfoBar"
+                    IsClosable="False"
+                    Severity="Error"
+                    Title="无法完成设置操作" />
+
+                <StackPanel Spacing="12">
+                    <TextBlock Style="{StaticResource SectionTitleTextStyle}" Text="外观" />
+                    <Border Style="{StaticResource SettingsGroupBorderStyle}">
+                        <Grid
+                            x:Name="ThemeSettingLayout"
+                            Padding="20"
+                            ColumnSpacing="24">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="3*" />
+                                <ColumnDefinition Width="2*" />
+                            </Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+                            <StackPanel VerticalAlignment="Center" Spacing="2">
+                                <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}" Text="应用主题" />
+                                <TextBlock
+                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                    Text="选择 WinDayFlow 如何跟随 Windows 外观。"
+                                    TextWrapping="Wrap" />
+                            </StackPanel>
+                            <ComboBox
+                                x:Name="ThemePicker"
+                                Grid.Column="1"
+                                MaxWidth="260"
+                                HorizontalAlignment="Stretch"
+                                VerticalAlignment="Center"
+                                AutomationProperties.AutomationId="ThemePicker"
+                                AutomationProperties.Name="应用主题"
+                                SelectionChanged="OnThemeChanged">
+                                <ComboBoxItem Content="使用系统设置" Tag="System" />
+                                <ComboBoxItem Content="浅色" Tag="Light" />
+                                <ComboBoxItem Content="深色" Tag="Dark" />
+                            </ComboBox>
+                        </Grid>
+                    </Border>
+                </StackPanel>
+
+                <StackPanel Spacing="12">
+                    <TextBlock Style="{StaticResource SectionTitleTextStyle}" Text="录制" />
+                    <InfoBar
+                        x:Name="CaptureInfoBar"
+                        IsClosable="False"
+                        IsOpen="True"
+                        Message="{x:Bind ViewModel.CaptureAvailabilityText, Mode=OneWay}"
+                        Severity="Informational"
+                        Title="录制状态" />
+
+                    <Border Style="{StaticResource SettingsGroupBorderStyle}">
+                        <Grid
+                            x:Name="ConsentSettingLayout"
+                            Padding="20"
+                            ColumnSpacing="24">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="3*" />
+                                <ColumnDefinition Width="2*" />
+                            </Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+                            <StackPanel VerticalAlignment="Center" Spacing="2">
+                                <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}" Text="录制授权" />
+                                <TextBlock
+                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                    Text="{x:Bind ViewModel.ConsentStatusText, Mode=OneWay}"
+                                    TextWrapping="Wrap" />
+                                <TextBlock
+                                    Style="{StaticResource MetadataTextStyle}"
+                                    Text="{x:Bind ViewModel.ConsentDetailText, Mode=OneWay}"
+                                    TextWrapping="Wrap" />
+                            </StackPanel>
+                            <StackPanel
+                                x:Name="ConsentActionPanel"
+                                Grid.Column="1"
+                                HorizontalAlignment="Right"
+                                VerticalAlignment="Center"
+                                Orientation="Horizontal"
+                                Spacing="8">
+                                <Button
+                                    x:Name="GrantConsentButton"
+                                    Click="OnGrantConsent"
+                                    AutomationProperties.AutomationId="GrantRecordingConsentButton"
+                                    AutomationProperties.Name="查看录制说明并同意"
+                                    IsEnabled="{x:Bind ViewModel.CanGrantConsent, Mode=OneWay}"
+                                    Style="{StaticResource AccentButtonStyle}">
+                                    <TextBlock Text="查看并同意" TextWrapping="NoWrap" />
+                                </Button>
+                                <Button
+                                    x:Name="RevokeConsentButton"
+                                    Click="OnRevokeConsent"
+                                    AutomationProperties.AutomationId="RevokeRecordingConsentButton"
+                                    AutomationProperties.Name="撤回录制同意"
+                                    IsEnabled="{x:Bind ViewModel.CanRevokeConsent, Mode=OneWay}">
+                                    <TextBlock Text="撤回同意" TextWrapping="NoWrap" />
+                                </Button>
+                            </StackPanel>
+                        </Grid>
+                    </Border>
+
+                    <Border Style="{StaticResource SettingsGroupBorderStyle}">
+                        <Grid
+                            x:Name="CaptureSettingLayout"
+                            Padding="20"
+                            ColumnSpacing="24">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="3*" />
+                                <ColumnDefinition Width="2*" />
+                            </Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+                            <StackPanel VerticalAlignment="Center" Spacing="2">
+                                <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}" Text="记录屏幕活动" />
+                                <TextBlock
+                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                    Text="启用后，活动证据会保存在本机并用于生成时间线。"
+                                    TextWrapping="Wrap" />
+                            </StackPanel>
+                            <ToggleSwitch
+                                x:Name="CaptureToggle"
+                                Grid.Column="1"
+                                HorizontalAlignment="Right"
+                                VerticalAlignment="Center"
+                                AutomationProperties.AutomationId="CaptureToggle"
+                                AutomationProperties.Name="记录屏幕活动"
+                                IsEnabled="{x:Bind ViewModel.CanChangeCapture, Mode=OneWay}"
+                                IsOn="{x:Bind ViewModel.CaptureEnabled, Mode=OneWay}"
+                                OffContent="关闭"
+                                OnContent="开启"
+                                Toggled="OnCaptureToggled" />
+                        </Grid>
+                    </Border>
+                </StackPanel>
+
+                <StackPanel Spacing="12">
+                    <TextBlock Style="{StaticResource SectionTitleTextStyle}" Text="存储" />
+                    <Border Style="{StaticResource SettingsGroupBorderStyle}">
+                        <Grid
+                            x:Name="StorageSettingLayout"
+                            Padding="20"
+                            ColumnSpacing="24">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="2*" />
+                                <ColumnDefinition Width="3*" />
+                            </Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+                            <StackPanel VerticalAlignment="Center" Spacing="2">
+                                <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}" Text="本地数据目录" />
+                                <TextBlock
+                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                    Text="时间线、授权记录和设置保存在当前用户目录。"
+                                    TextWrapping="Wrap" />
+                            </StackPanel>
+                            <TextBox
+                                x:Name="DataFolderTextBox"
+                                Grid.Column="1"
+                                VerticalAlignment="Center"
+                                AutomationProperties.AutomationId="DataFolderPath"
+                                AutomationProperties.Name="本地数据目录"
+                                IsReadOnly="True" />
+                        </Grid>
+                    </Border>
+                </StackPanel>
+
+                <StackPanel Spacing="12">
+                    <TextBlock Style="{StaticResource SectionTitleTextStyle}" Text="隐私" />
+                    <Border Style="{StaticResource SettingsGroupBorderStyle}">
+                        <Grid
+                            x:Name="CloudSettingLayout"
+                            Padding="20"
+                            ColumnSpacing="24">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="3*" />
+                                <ColumnDefinition Width="2*" />
+                            </Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+                            <StackPanel VerticalAlignment="Center" Spacing="2">
+                                <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}" Text="允许云端分析" />
+                                <TextBlock
+                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                    Text="提供方尚未接入，当前数据仅保存在本机。"
+                                    TextWrapping="Wrap" />
+                            </StackPanel>
+                            <ToggleSwitch
+                                x:Name="CloudAnalysisToggle"
+                                Grid.Column="1"
+                                HorizontalAlignment="Right"
+                                VerticalAlignment="Center"
+                                AutomationProperties.AutomationId="CloudAnalysisToggle"
+                                AutomationProperties.HelpText="云分析提供方尚未接入"
+                                AutomationProperties.Name="允许云端分析"
+                                IsEnabled="False"
+                                IsOn="{x:Bind ViewModel.CloudAnalysisEnabled, Mode=OneWay}"
+                                OffContent="仅本地"
+                                OnContent="已启用云端" />
+                        </Grid>
+                    </Border>
+                </StackPanel>
+            </StackPanel>
+        </Grid>
+    </ScrollViewer>
+</Page>

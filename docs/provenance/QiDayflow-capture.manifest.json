@@ -1,0 +1,75 @@
+{
+  "schemaVersion": 1,
+  "source": {
+    "repository": "https://github.com/liujiaqi7998/QiDayflow.git",
+    "pinnedCommit": "8b82f8a3b23cb29f2b86ee1a6eff19b9343e2e1e"
+  },
+  "derivedFiles": [
+    {
+      "local": {
+        "path": "src/WinDayFlow.Capture.Native/internal/pixel_buffer.h",
+        "sha256": "6C9FD5370BDFB230300137F6046EEA37555214D0E4F5CD34508E597BE4FB8A05"
+      },
+      "upstream": {
+        "path": "windows/runner/capture_pixel_buffer.h",
+        "sha256": "4EDE4160ACACEAE291B62CB347A20DC3891356F6A6E487CCE98FD6EB9165199C",
+        "pinnedCommit": "8b82f8a3b23cb29f2b86ee1a6eff19b9343e2e1e"
+      }
+    },
+    {
+      "local": {
+        "path": "src/WinDayFlow.Capture.Native/internal/pixel_buffer.cpp",
+        "sha256": "2E2A2D55EA51FD25D0E3BEC875DE78F1480DFEE2FA1CD76108295DF1D6C67ADD"
+      },
+      "upstream": {
+        "path": "windows/runner/capture_pixel_buffer.cpp",
+        "sha256": "8955ADA13EDCCC15729D195D8548881CD8B554188DF40DFA0D164DF379AFACD3",
+        "pinnedCommit": "8b82f8a3b23cb29f2b86ee1a6eff19b9343e2e1e"
+      }
+    },
+    {
+      "local": {
+        "path": "src/WinDayFlow.Capture.Native/internal/capture_policy.h",
+        "sha256": "90C3A37EE700DFBC53E4F4FD05BEFFC2FC502852ADB5AA7188D91DC9764D05E2"
+      },
+      "upstream": {
+        "path": "windows/runner/capture_runtime.h",
+        "sha256": "C6269DD460B0461E0C962944648C075EC0B7D7DA544A3E3AC352C6EDAE221DF0",
+        "pinnedCommit": "8b82f8a3b23cb29f2b86ee1a6eff19b9343e2e1e"
+      }
+    },
+    {
+      "local": {
+        "path": "src/WinDayFlow.Capture.Native/internal/capture_policy.cpp",
+        "sha256": "51A526E9C101721CF0E54A675103665121A1373EC3C1C38BD9A5FA1080F8E69E"
+      },
+      "upstream": {
+        "path": "windows/runner/capture_runtime.cpp",
+        "sha256": "459928A5744C9AD2E1D30434FA41EBF5881E70D6D8AA6608CBA4C06400595DE3",
+        "pinnedCommit": "8b82f8a3b23cb29f2b86ee1a6eff19b9343e2e1e"
+      }
+    },
+    {
+      "local": {
+        "path": "src/WinDayFlow.Capture.Native/tests/pixel_buffer_tests.cpp",
+        "sha256": "7DD6C4A0215528265B8D8E453B51872F2E10452DDC4D818E3F6CD51AD49D8A7F"
+      },
+      "upstream": {
+        "path": "windows/runner/capture_pixel_buffer_test.cpp",
+        "sha256": "5D7D15389F0FB83CDA0B775225A47225A4B1D58A0A2C62EF8E48464FEC0016BF",
+        "pinnedCommit": "8b82f8a3b23cb29f2b86ee1a6eff19b9343e2e1e"
+      }
+    },
+    {
+      "local": {
+        "path": "src/WinDayFlow.Capture.Native/tests/capture_policy_tests.cpp",
+        "sha256": "06E1B9C0FD0D4A2C4CA35F61B536AEF0FF8BA2F933A2AD1163A16A5D933469DB"
+      },
+      "upstream": {
+        "path": "windows/runner/capture_runtime_test.cpp",
+        "sha256": "541193A401AC7CBD039DB9AB86C9B0AAD5CF41F3633619B6643CAC5EBECD1E0E",
+        "pinnedCommit": "8b82f8a3b23cb29f2b86ee1a6eff19b9343e2e1e"
+      }
+    }
+  ]
+}

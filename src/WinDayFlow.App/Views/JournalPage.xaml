@@ -1,0 +1,12 @@
+<Page
+    x:Class="WinDayFlow.App.Views.JournalPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:controls="using:WinDayFlow.App.Controls">
+    <Grid Padding="{StaticResource PagePadding}">
+        <controls:EmptyStateControl
+            Description="本地持久化接入后，可在这里记录当天的工作笔记。"
+            Icon="Edit"
+            Title="今天还没有日志" />
+    </Grid>
+</Page>
