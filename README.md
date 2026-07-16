@@ -49,18 +49,23 @@ contains:
 - a settings surface with persistent system/light/dark theme selection,
   capture-off and cloud-off defaults, consent policy v2, evidence-retention and
   conservative exclusion/session choices, and a gate that blocks capture
-  start/resume unless consent covers the current privacy revision;
+  start/resume unless capture is enabled and consent covers the current privacy
+  revision;
 - an x64 C++20 native-capture foundation with a versioned C ABI, stable status
   codes, a bounded polled event queue, fail-closed privacy inputs, and native
   pixel, scheduling, queue, and ABI contract tests;
+- a managed P/Invoke adapter with x64 ABI layout checks, safe-handle ownership,
+  bounded event polling, privacy-revision updates, capability negotiation, and
+  real-DLL integration tests; the App still fails closed because the native
+  binary does not yet advertise screen capture;
 - domain, application, infrastructure, presentation, and capture-interoperability
   project boundaries with automated persistence and mutation tests; and
 - an unpackaged, self-contained development bundle for manual UI verification.
 
 Manual activities, consent, and privacy settings are stored at
 `%LOCALAPPDATA%\WinDayFlow\Data\windayflow.db` and survive application restarts.
-The DXGI/WIC/Media Foundation engine and its managed adapter, analysis queue and
-providers, generated Daily and Weekly views, journal editing, and timeline-
+The DXGI/WIC/Media Foundation engine, platform privacy detectors, analysis queue
+and providers, generated Daily and Weekly views, journal editing, and timeline-
 grounded chat are **not integrated yet**. The native foundation deliberately
 advertises no screen-capture capability, and the app reports capture as
 unavailable even after consent is recorded. The development bundle can be used
@@ -173,10 +178,16 @@ notices of incorporated third-party material. See
 terms and [docs/provenance/QiDayflow-capture.md](docs/provenance/QiDayflow-capture.md)
 for capture-source provenance.
 
+WinUI 3 and Windows App SDK remain the project's selected UI stack. Dependency
+terms are handled by choosing an appropriate WinUI servicing release and by
+honoring its packaging and distribution conditions; they are not a reason to
+replace the native Windows architecture.
+
 The current self-contained bundle is for local development and manual
 verification only. Its transitive `Microsoft.WindowsAppSDK.WinUI` 2.2.1 package
 carries Engineering Preview terms that prohibit sharing, publishing,
 distribution, and live use. External testing and production release remain
 blocked until a production-redistributable WinUI version or explicit permission
-is verified. This binary-bundle restriction does not change the MIT license for
+is verified. That release gate applies to the concrete binary dependency, not
+to the choice of WinUI 3, and it does not change the MIT license for
 WinDayFlow-owned source code.

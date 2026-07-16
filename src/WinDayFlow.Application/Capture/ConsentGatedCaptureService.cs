@@ -7,7 +7,7 @@ public sealed class ConsentGatedCaptureService : ICaptureService, IDisposable
     private const string ConsentRequiredDetail =
         "请先在设置中确认录制授权。";
     private const string ConsentStopFailedDetail =
-        "录制授权已失效，但自动停止失败。请立即使用停止操作。";
+        "录制已关闭或授权已失效，但自动停止失败。请立即使用停止操作。";
 
     private readonly object _sync = new();
     private readonly ICaptureBackend _backend;
@@ -82,7 +82,9 @@ public sealed class ConsentGatedCaptureService : ICaptureService, IDisposable
 
     public Task StopAsync(CancellationToken cancellationToken = default) =>
         InvokeBackendAsync(
-            _backend.StopAsync,
+            token => ShouldInitiateConsentStop(_backend.CurrentStatus.State)
+                ? _backend.StopAsync(token)
+                : Task.CompletedTask,
             requiresConsent: false,
             cancellationToken);
 
@@ -121,7 +123,7 @@ public sealed class ConsentGatedCaptureService : ICaptureService, IDisposable
         try
         {
             ThrowIfDisposed();
-            if (requiresConsent && !_settings.HasValidRecordingConsent)
+            if (requiresConsent && !HasCaptureAuthorization())
             {
                 throw new RecordingConsentRequiredException();
             }
@@ -188,9 +190,26 @@ public sealed class ConsentGatedCaptureService : ICaptureService, IDisposable
     {
         ArgumentNullException.ThrowIfNull(backendStatus);
 
+        if (!HasCaptureAuthorization()
+            && MayRetainCaptureResources(backendStatus.State)
+            && current?.Sequence == backendStatus.Sequence
+            && string.Equals(
+                current.Detail,
+                ConsentStopFailedDetail,
+                StringComparison.Ordinal))
+        {
+            return backendStatus with { Detail = ConsentStopFailedDetail };
+        }
+
         if (backendStatus.State is CaptureState.Unavailable or CaptureState.Faulted
-            || _settings.HasValidRecordingConsent
+            || HasCaptureAuthorization()
             || MayRetainCaptureResources(backendStatus.State))
+        {
+            return backendStatus;
+        }
+
+        if (_settings.HasValidRecordingConsent
+            && !_settings.Current.CaptureEnabled)
         {
             return backendStatus;
         }
@@ -210,7 +229,7 @@ public sealed class ConsentGatedCaptureService : ICaptureService, IDisposable
 
     private void ScheduleConsentStopIfRequired(CaptureStatus backendStatus)
     {
-        if (_settings.HasValidRecordingConsent
+        if (HasCaptureAuthorization()
             || !ShouldInitiateConsentStop(backendStatus.State)
             || IsDisposed()
             || Interlocked.CompareExchange(ref _consentStopScheduled, 1, 0) != 0)
@@ -232,7 +251,7 @@ public sealed class ConsentGatedCaptureService : ICaptureService, IDisposable
                 .ConfigureAwait(false);
             entered = true;
 
-            if (!_settings.HasValidRecordingConsent
+            if (!HasCaptureAuthorization()
                 && ShouldInitiateConsentStop(_backend.CurrentStatus.State))
             {
                 await _backend
@@ -276,6 +295,12 @@ public sealed class ConsentGatedCaptureService : ICaptureService, IDisposable
     {
         return ShouldInitiateConsentStop(state)
             || state == CaptureState.Stopping;
+    }
+
+    private bool HasCaptureAuthorization()
+    {
+        return _settings.Current.CaptureEnabled
+            && _settings.HasValidRecordingConsent;
     }
 
     private bool IsDisposed()

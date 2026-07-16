@@ -148,14 +148,14 @@ public sealed partial class SettingsViewModel : ObservableObject, IDisposable
         return await RunMutationAsync(
             async token =>
             {
-                if (ShouldStopCapture(_captureService.CurrentStatus.State))
-                {
-                    await _captureService.StopAsync(token).ConfigureAwait(false);
-                }
-
+                var shouldStop = ShouldStopCapture(_captureService.CurrentStatus.State);
                 await _settingsService
                     .RevokeRecordingConsentAsync(token)
                     .ConfigureAwait(false);
+                if (shouldStop)
+                {
+                    await _captureService.StopAsync(token).ConfigureAwait(false);
+                }
             },
             CaptureErrorText,
             cancellationToken).ConfigureAwait(true);
@@ -187,14 +187,14 @@ public sealed partial class SettingsViewModel : ObservableObject, IDisposable
                 }
                 else
                 {
-                    if (ShouldStopCapture(_captureService.CurrentStatus.State))
-                    {
-                        await _captureService.StopAsync(token).ConfigureAwait(false);
-                    }
-
+                    var shouldStop = ShouldStopCapture(_captureService.CurrentStatus.State);
                     await _settingsService
                         .SetCaptureEnabledAsync(enabled: false, token)
                         .ConfigureAwait(false);
+                    if (shouldStop)
+                    {
+                        await _captureService.StopAsync(token).ConfigureAwait(false);
+                    }
                 }
             },
             CaptureErrorText,
@@ -220,11 +220,7 @@ public sealed partial class SettingsViewModel : ObservableObject, IDisposable
                     return;
                 }
 
-                if (ShouldStopCapture(_captureService.CurrentStatus.State))
-                {
-                    await _captureService.StopAsync(token).ConfigureAwait(false);
-                }
-
+                var shouldStop = ShouldStopCapture(_captureService.CurrentStatus.State);
                 await _settingsService.SetCapturePrivacyAsync(
                         evidenceRetentionDays,
                         excludeSensitiveApplications,
@@ -232,6 +228,10 @@ public sealed partial class SettingsViewModel : ObservableObject, IDisposable
                         pauseDuringScreenSharing,
                         token)
                     .ConfigureAwait(false);
+                if (shouldStop)
+                {
+                    await _captureService.StopAsync(token).ConfigureAwait(false);
+                }
             },
             CaptureErrorText,
             cancellationToken).ConfigureAwait(true);

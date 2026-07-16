@@ -64,7 +64,12 @@ Reference influence is separated into three categories:
   or other third-party assets. WinDayFlow uses its own identity and only ships
   assets with separately verified rights.
 
-### 2.1 Licensing and Production Release Gates
+### 2.1 Licensing and Distribution Gates
+
+WinUI 3 and Windows App SDK are fixed architecture choices for WinDayFlow.
+Third-party license review may constrain which concrete package version can be
+distributed and how a build is packaged, but it does not reopen the native
+Windows technology-stack decision. WinDayFlow-owned source remains MIT-licensed.
 
 - Every distributable bundle must include the repository-root `LICENSE`,
   `THIRD_PARTY_NOTICES.md`, the applicable provenance records, and the complete
@@ -78,6 +83,10 @@ Reference influence is separated into three categories:
   the build machine. External testing and production release are blocked until
   a production-redistributable WinUI version is selected and its terms are
   verified, or explicit permission is obtained.
+- Resolving that distribution gate must stay within the WinUI 3 and Windows App
+  SDK stack, normally by moving to a production-redistributable servicing
+  release. Replacing WinUI with a cross-platform UI framework is not a licensing
+  mitigation and is outside the product architecture.
 - Shipping license text records third-party obligations and restrictions; it
   does not grant rights beyond the applicable terms or remove a release block.
 
@@ -202,7 +211,7 @@ Serialization       System.Text.Json
 HTTP                 HttpClientFactory
 Logging              Microsoft.Extensions.Logging
 Native capture       C++20, DXGI, Media Foundation, WIC
-Native interop       Versioned C ABI v1 DLL; managed P/Invoke adapter planned
+Native interop       Versioned C ABI v1 DLL; managed P/Invoke adapter implemented
 Packaging            MSIX plus documented unpackaged development mode
 Tests                xUnit and native C/C++ test executables
 ```
@@ -237,7 +246,7 @@ src/
 |-- WinDayFlow.Application/         Use cases, orchestration, workers
 |-- WinDayFlow.Domain/              Models, value objects, policies, rules
 |-- WinDayFlow.Infrastructure/      SQLite, providers, logging, settings, update
-|-- WinDayFlow.Capture.Interop/     Managed boundary; unavailable adapter today
+|-- WinDayFlow.Capture.Interop/     P/Invoke boundary plus fail-closed adapter
 `-- WinDayFlow.Capture.Native/      x64 C++20 DLL, C ABI, policy, queue, pixel tests
     `-- tests/                      Five native CTest executable targets
 
@@ -262,17 +271,23 @@ Application -> Domain
 Infrastructure -> Application, Domain
 Capture.Interop -> Application
 
-Current: Capture.Native is built and tested independently; it is not loaded by App
-Phase 1: Capture.Interop <-> Capture.Native through C ABI v1 and managed P/Invoke
+Current: Capture.Interop <-> Capture.Native is built and integration-tested
+Runtime: App still registers UnavailableCaptureBackend until privacy detectors exist
 ```
 
 `ICaptureService` and `ICaptureBackend` are owned by Application. The
 Application-layer `ConsentGatedCaptureService` implements the feature-facing
-service, rejects Start/Resume without current recording consent, and always
-allows Pause/Stop to reach the backend. Capture.Interop currently supplies
-`UnavailableCaptureBackend`; the managed P/Invoke adapter is not implemented or
-registered yet. The native foundation does not reference managed UI or domain
-assemblies. The App project may reference concrete adapters for
+service, rejects Start/Resume unless capture is enabled and current recording
+consent covers the active privacy revision, and always allows Pause/Stop through
+the authorization gate. Redundant Stop calls are idempotent once the backend is
+already stopped. Capture.Interop supplies both
+`UnavailableCaptureBackend` and `NativeCaptureBackend`. The latter negotiates
+ABI/capabilities, owns the opaque handle through `SafeHandle`, updates versioned
+privacy context, and polls bounded native events without callbacks. It remains
+unregistered because lock, secure-desktop, Remote Desktop, presentation,
+application/window, and storage detectors are not complete. The native
+foundation does not reference managed UI or domain assemblies. The App project
+may reference concrete adapters for
 dependency-injection registration; feature code consumes their inward-facing
 contracts. The domain project must not reference WinUI, SQLite, HTTP, Windows
 App SDK, or the native capture implementation.
@@ -398,11 +413,12 @@ state-machine decisions use the stable fields.
 The current Application layer also defines the matching `ICaptureBackend`
 lifecycle contract. `ConsentGatedCaptureService` projects backend state while
 giving unavailable and faulted technology states priority over consent state.
-Phase 1 replaces the current unavailable backend and adds separate native-facing
-configuration and evidence-extraction interfaces under Capture.Interop. Capture
-options come from validated application settings; extraction is not added as an
-unrelated method on the lifecycle service. An adapter maps native events to
-`CaptureStatus` and `CaptureStatusChangedEventArgs`.
+Phase 1 activates the implemented native backend after platform privacy inputs
+and screen-capture capability are complete, then adds evidence-extraction
+interfaces under Capture.Interop. Capture options come from validated
+application settings; extraction is not added as an unrelated method on the
+lifecycle service. The adapter maps native events to `CaptureStatus` and
+`CaptureStatusChangedEventArgs`.
 
 Interop remains coarse-grained. There are no per-frame managed callbacks.
 Native events are queued and marshalled onto the appropriate managed
@@ -426,9 +442,10 @@ v1 foundation under `WinDayFlow.Capture.Native`. Its implemented boundary has:
   presentation, application/window exclusion, and storage decisions. Every
   value must be explicitly allowed; unknown or blocked state fails closed.
 
-This is a contract and safety foundation, not a usable recorder. Platform
-privacy-context detection, the managed P/Invoke adapter, DXGI acquisition,
-Media Foundation encoding, evidence persistence, and extraction are not wired.
+This is a contract and safety foundation, not a usable recorder. The managed
+P/Invoke adapter and real-DLL contract tests are implemented, but platform
+privacy-context detection, DXGI acquisition, Media Foundation encoding,
+evidence persistence, and extraction are not wired.
 `wdf_capture_get_capabilities` advertises only the privacy guard and event queue;
 the screen-capture, H.264, and extraction capability bits remain disabled.
 Start/Resume therefore return unavailable/not-implemented after policy checks,
@@ -610,8 +627,10 @@ The implemented persistence slice uses schema version 3. Version 1 contains
 `timeline_entry_tags`; version 2 adds the singleton `app_settings` row while
 preserving existing timeline data. Version 3 adds evidence-retention,
 sensitive-application exclusion, remote-session, screen-sharing, and privacy-
-revision fields. It preserves version 1 consent as an auditable stale record but
-forces capture off because that consent did not cover the new choices. The
+revision fields. It retains only the version and acceptance time of version 1
+consent as stale metadata, not its covered revision or a complete snapshot of
+the old privacy choices. It forces capture off because that consent did not
+cover the new choices. The
 application completes the idempotent migrations and initializes settings before
 creating the main window. Every timeline write plus its ordered child rows
 commits in one SQLite transaction, and each settings update is written and read
@@ -642,13 +661,18 @@ application-level database encryption.
   Capture cannot start until this consent and the initial privacy choices are
   persisted. A later release that expands collection scope requires renewed
   consent.
-- The current service enforces this gate for Start/Resume using consent policy
-  version 2; consent records the exact privacy revision it covered, and any
-  privacy change disables capture until renewed consent is persisted. Pause/Stop
-  remain available regardless of consent. Settings persist a 30-day conservative
+- The current service enforces this gate for Start/Resume using the persisted
+  capture-enabled choice and consent policy version 2; consent records the exact
+  privacy revision it covered, and disabling capture, revoking consent, or any
+  privacy change triggers an automatic stop. Privacy changes disable capture
+  until renewed consent is persisted. Pause/Stop remain available regardless of
+  consent. Settings persist a 30-day conservative
   default plus user-selectable retention, sensitive-application exclusion,
   remote-session pause, and screen-sharing pause choices. Full first-run
   onboarding and user-authored application/window rule lists remain Phase 1 work.
+- Consent history is not considered fully audit-ready until immutable snapshots
+  record the concrete disclosure and privacy values accepted at each revision.
+  The current stale metadata is sufficient only to reject superseded consent.
 - Capture state is always available from the window and tray. Pause is a
   one-action command, and the resulting state is distinguishable from stopped,
   excluded, failed, locked, and storage-constrained states.
@@ -868,8 +892,8 @@ Phases are release gates, not a claim of strict implementation order. As of
 schema v3, consent policy v2, and persistent retention/exclusion/session choices
 are implemented. Phase 1 also has Accepted ADR 0001, verified QiDayflow source
 provenance, the x64 C++20 C ABI v1 foundation, and five native tests in Debug and
-Release. Live capture and managed native integration remain disabled, so no
-phase exit criterion is met.
+Release. Live capture and managed-adapter runtime activation remain disabled,
+so no phase exit criterion is met.
 
 ### Phase 0: Foundation
 
@@ -1012,7 +1036,8 @@ assumption:
 - The exact production-redistributable Windows App SDK and WinUI version and
   servicing channel within the fixed Windows 10 version 1809-or-later baseline;
   the current WinUI 2.2.1 Engineering Preview dependency is not a candidate for
-  production release.
+  production release. This choice is between WinUI servicing releases, not UI
+  technology stacks.
 - MSIX-only distribution versus an additional unpackaged installer.
 - Exact local provider process lifecycle and sandboxing.
 - Whether embeddings materially improve retrieval beyond FTS5 and structured
@@ -1021,6 +1046,7 @@ assumption:
 
 The native boundary itself is no longer deferred: Accepted ADR 0001 establishes
 C ABI v1. Additive ABI evolution requires compatibility tests, while a breaking
-change requires a replacement ADR. The production WinUI selection is an
-explicit production-release blocker even though it does not prevent continued
-development and test packaging.
+change requires a replacement ADR. Selecting a redistributable WinUI servicing
+release is an explicit production-release blocker, not a reason to change the
+WinUI 3 architecture, and it does not prevent continued development and local
+test packaging.

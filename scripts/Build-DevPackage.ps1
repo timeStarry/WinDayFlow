@@ -52,6 +52,14 @@ else {
     (Get-Command dotnet -ErrorAction Stop).Source
 }
 
+$nativeDllPath = if ($RuntimeIdentifier -eq 'win-x64') {
+    Join-Path $repositoryRoot (
+        "artifacts\native\x64\$Configuration\WinDayFlow.Capture.Native.dll")
+}
+else {
+    $null
+}
+
 $distributionSourceFiles = @(
     Get-Item -LiteralPath (Join-Path $repositoryRoot 'LICENSE')
     Get-Item -LiteralPath (Join-Path $repositoryRoot 'THIRD_PARTY_NOTICES.md')
@@ -84,6 +92,16 @@ try {
         'LOCAL USE ONLY: the current WinUI Engineering Preview terms prohibit ' +
         'sharing, publishing, distributing, and live use of this development bundle.')
 
+    if ($null -ne $nativeDllPath)
+    {
+        & (Join-Path $PSScriptRoot 'Build-Native.ps1') -Configuration $Configuration |
+            Out-Host
+        if (-not (Test-Path -LiteralPath $nativeDllPath -PathType Leaf))
+        {
+            throw "Native capture build did not produce: $nativeDllPath"
+        }
+    }
+
     if (Test-Path -LiteralPath $stagingPath) {
         Remove-Item -LiteralPath $stagingPath -Recurse -Force
     }
@@ -106,6 +124,9 @@ try {
             'hostfxr.dll'
             'hostpolicy.dll'
             'Microsoft.ui.xaml.dll'
+            if ($null -ne $nativeDllPath) {
+                'WinDayFlow.Capture.Native.dll'
+            }
         ) + @($distributionRelativeFiles) |
             Sort-Object -Unique
     )

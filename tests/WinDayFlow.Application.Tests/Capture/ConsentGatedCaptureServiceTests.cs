@@ -28,6 +28,25 @@ public sealed class ConsentGatedCaptureServiceTests
     }
 
     [Fact]
+    public async Task CurrentConsentStillRequiresCaptureToBeEnabled()
+    {
+        using var settings = await CreateSettingsAsync();
+        await settings.GrantRecordingConsentAsync();
+        var backend = new StubCaptureBackend(CaptureState.Stopped);
+        using var service = new ConsentGatedCaptureService(backend, settings);
+
+        Assert.Equal(CaptureState.Stopped, service.CurrentStatus.State);
+
+        await Assert.ThrowsAsync<RecordingConsentRequiredException>(
+            () => service.StartAsync());
+        await Assert.ThrowsAsync<RecordingConsentRequiredException>(
+            () => service.ResumeAsync());
+
+        Assert.Equal(0, backend.StartCount);
+        Assert.Equal(0, backend.ResumeCount);
+    }
+
+    [Fact]
     public async Task CurrentConsentDelegatesEveryLifecycleCommand()
     {
         using var settings = await CreateConsentedSettingsAsync();
@@ -70,7 +89,7 @@ public sealed class ConsentGatedCaptureServiceTests
     }
 
     [Fact]
-    public async Task PauseAndStopDelegateEvenWhenConsentIsMissing()
+    public async Task PauseIsAllowedAndStopIsIdempotentWhenConsentIsMissing()
     {
         using var settings = await CreateSettingsAsync();
         var backend = new StubCaptureBackend(CaptureState.Stopped)
@@ -83,8 +102,119 @@ public sealed class ConsentGatedCaptureServiceTests
         await service.StopAsync();
 
         Assert.Equal(1, backend.PauseCount);
-        Assert.Equal(1, backend.StopCount);
+        Assert.Equal(0, backend.StopCount);
         Assert.Equal(CaptureState.BlockedByConsent, service.CurrentStatus.State);
+    }
+
+    [Fact]
+    public async Task DisablingCaptureStopsBackendAndBlocksResumeWithoutRevokingConsent()
+    {
+        using var settings = await CreateConsentedSettingsAsync();
+        var backend = new StubCaptureBackend(CaptureState.Recording);
+        using var service = new ConsentGatedCaptureService(backend, settings);
+
+        await settings.SetCaptureEnabledAsync(enabled: false);
+        await backend.StopCompleted.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.False(settings.Current.CaptureEnabled);
+        Assert.True(settings.HasValidRecordingConsent);
+        Assert.Equal(1, backend.StopCount);
+        Assert.Equal(CaptureState.Stopped, service.CurrentStatus.State);
+        await Assert.ThrowsAsync<RecordingConsentRequiredException>(
+            () => service.ResumeAsync());
+        Assert.Equal(0, backend.ResumeCount);
+    }
+
+    [Fact]
+    public async Task DisableStopFailureKeepsActualRecordingVisibleAndBlocksResume()
+    {
+        using var settings = await CreateConsentedSettingsAsync();
+        var backend = new StubCaptureBackend(CaptureState.Recording)
+        {
+            StopOperation = _ => throw new InvalidOperationException("stop failed"),
+        };
+        using var service = new ConsentGatedCaptureService(backend, settings);
+
+        await settings.SetCaptureEnabledAsync(enabled: false);
+        await backend.StopCompleted.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.False(settings.Current.CaptureEnabled);
+        Assert.True(settings.HasValidRecordingConsent);
+        Assert.Equal(CaptureState.Recording, service.CurrentStatus.State);
+        Assert.Equal(
+            "录制已关闭或授权已失效，但自动停止失败。请立即使用停止操作。",
+            service.CurrentStatus.Detail);
+        await Assert.ThrowsAsync<RecordingConsentRequiredException>(
+            () => service.ResumeAsync());
+        Assert.Equal(0, backend.ResumeCount);
+    }
+
+    [Fact]
+    public async Task ExplicitStopFailureDoesNotEraseAutomaticStopWarning()
+    {
+        using var settings = await CreateConsentedSettingsAsync();
+        var backend = new StubCaptureBackend(CaptureState.Recording)
+        {
+            StopOperation = _ => throw new InvalidOperationException("stop failed"),
+        };
+        using var service = new ConsentGatedCaptureService(backend, settings);
+
+        await settings.SetCaptureEnabledAsync(enabled: false);
+        await backend.StopCompleted.WaitAsync(TimeSpan.FromSeconds(5));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => service.StopAsync());
+
+        Assert.Equal(2, backend.StopCount);
+        Assert.Equal(CaptureState.Recording, service.CurrentStatus.State);
+        Assert.Equal(
+            "录制已关闭或授权已失效，但自动停止失败。请立即使用停止操作。",
+            service.CurrentStatus.Detail);
+    }
+
+    [Fact]
+    public async Task StopWarningPreservesLatestStateFromUnsequencedBackend()
+    {
+        using var settings = await CreateConsentedSettingsAsync();
+        var backend = new StubCaptureBackend(CaptureState.Recording)
+        {
+            StopOperation = _ => throw new InvalidOperationException("stop failed"),
+        };
+        using var service = new ConsentGatedCaptureService(backend, settings);
+
+        await settings.SetCaptureEnabledAsync(enabled: false);
+        await backend.StopCompleted.WaitAsync(TimeSpan.FromSeconds(5));
+        backend.TransitionTo(
+            CaptureState.Paused,
+            detail: null,
+            incrementSequence: false);
+
+        Assert.Equal(0UL, service.CurrentStatus.Sequence);
+        Assert.Equal(CaptureState.Paused, service.CurrentStatus.State);
+        Assert.Equal(
+            "录制已关闭或授权已失效，但自动停止失败。请立即使用停止操作。",
+            service.CurrentStatus.Detail);
+    }
+
+    [Fact]
+    public async Task ExplicitStopQueuesBehindAutomaticStopWithoutCallingBackendTwice()
+    {
+        using var settings = await CreateConsentedSettingsAsync();
+        var releaseStop = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var backend = new StubCaptureBackend(CaptureState.Recording)
+        {
+            StopOperation = token => releaseStop.Task.WaitAsync(token),
+        };
+        using var service = new ConsentGatedCaptureService(backend, settings);
+
+        await settings.SetCaptureEnabledAsync(enabled: false);
+        await backend.StopStarted.WaitAsync(TimeSpan.FromSeconds(5));
+        var explicitStop = service.StopAsync();
+
+        releaseStop.TrySetResult();
+        await explicitStop.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(1, backend.StopCount);
+        Assert.Equal(CaptureState.Stopped, service.CurrentStatus.State);
     }
 
     [Fact]
@@ -188,7 +318,7 @@ public sealed class ConsentGatedCaptureServiceTests
 
         Assert.Equal(CaptureState.Recording, service.CurrentStatus.State);
         Assert.Equal(
-            "录制授权已失效，但自动停止失败。请立即使用停止操作。",
+            "录制已关闭或授权已失效，但自动停止失败。请立即使用停止操作。",
             service.CurrentStatus.Detail);
         Assert.Equal(1, backend.StopCount);
     }
@@ -262,6 +392,7 @@ public sealed class ConsentGatedCaptureServiceTests
     {
         var settings = await CreateSettingsAsync();
         await settings.GrantRecordingConsentAsync();
+        await settings.SetCaptureEnabledAsync(enabled: true);
         return settings;
     }
 
@@ -400,10 +531,17 @@ public sealed class ConsentGatedCaptureServiceTests
             }
         }
 
-        public void TransitionTo(CaptureState state, string? detail = null)
+        public void TransitionTo(
+            CaptureState state,
+            string? detail = null,
+            bool incrementSequence = true)
         {
             var previous = CurrentStatus;
-            _statusSequence++;
+            if (incrementSequence)
+            {
+                _statusSequence++;
+            }
+
             CurrentStatus = CreateStatus(state, detail, _statusSequence);
             _statusChanged?.Invoke(
                 this,

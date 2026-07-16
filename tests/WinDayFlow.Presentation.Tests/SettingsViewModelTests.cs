@@ -96,7 +96,7 @@ public sealed class SettingsViewModelTests
     }
 
     [Fact]
-    public async Task PrivacyChangeStopsCaptureBeforePersistingAndRequiresRenewedConsent()
+    public async Task PrivacyChangePersistsFailClosedStateBeforeStoppingCapture()
     {
         var consent = CreateConsent();
         var repository = new TestSettingsRepository(
@@ -111,9 +111,9 @@ public sealed class SettingsViewModelTests
         {
             StopOperation = _ =>
             {
-                Assert.True(settings.Current.CaptureEnabled);
-                Assert.True(settings.HasValidRecordingConsent);
-                Assert.Equal(30, settings.Current.CapturePrivacy.EvidenceRetentionDays);
+                Assert.False(settings.Current.CaptureEnabled);
+                Assert.False(settings.HasValidRecordingConsent);
+                Assert.Equal(90, settings.Current.CapturePrivacy.EvidenceRetentionDays);
                 return Task.CompletedTask;
             },
         };
@@ -139,7 +139,7 @@ public sealed class SettingsViewModelTests
     }
 
     [Fact]
-    public async Task PrivacyChangeStopFailurePreservesSettingsAndConsent()
+    public async Task PrivacyChangeStopFailureStillPersistsFailClosedSettings()
     {
         var consent = CreateConsent();
         var initial = new AppSettings(
@@ -163,6 +163,40 @@ public sealed class SettingsViewModelTests
             pauseDuringScreenSharing: false));
 
         Assert.Equal(1, capture.StopCount);
+        Assert.False(settings.Current.CaptureEnabled);
+        Assert.False(settings.HasValidRecordingConsent);
+        Assert.Equal(7, settings.Current.CapturePrivacy.EvidenceRetentionDays);
+        Assert.False(settings.Current.CapturePrivacy.ExcludeSensitiveApplications);
+        Assert.Single(repository.SavedSettings);
+        Assert.Equal("无法更改录制状态，请稍后重试。", viewModel.ErrorMessage);
+    }
+
+    [Fact]
+    public async Task PrivacyChangeSaveFailureLeavesRuntimeAndSettingsConsistent()
+    {
+        var consent = CreateConsent();
+        var initial = new AppSettings(
+            AppThemePreference.System,
+            CaptureEnabled: true,
+            CloudAnalysisEnabled: false,
+            consent);
+        var repository = new TestSettingsRepository(initial)
+        {
+            SaveException = new InvalidOperationException("Sensitive storage detail."),
+        };
+        using var settings = new AppSettingsService(repository);
+        await settings.InitializeAsync();
+        var capture = new TestCaptureService(CaptureState.Recording);
+        using var viewModel = new SettingsViewModel(settings, capture);
+
+        Assert.False(await viewModel.SetCapturePrivacyAsync(
+            evidenceRetentionDays: 7,
+            excludeSensitiveApplications: false,
+            pauseInRemoteSessions: false,
+            pauseDuringScreenSharing: false));
+
+        Assert.Equal(0, capture.StopCount);
+        Assert.Equal(CaptureState.Recording, capture.CurrentStatus.State);
         Assert.Equal(initial, settings.Current);
         Assert.True(settings.HasValidRecordingConsent);
         Assert.Empty(repository.SavedSettings);
@@ -194,7 +228,7 @@ public sealed class SettingsViewModelTests
     }
 
     [Fact]
-    public async Task RevokeStopsActiveCaptureBeforeClearingConsent()
+    public async Task RevokePersistsFailClosedStateBeforeStoppingCapture()
     {
         var consent = CreateConsent();
         var repository = new TestSettingsRepository(
@@ -209,8 +243,8 @@ public sealed class SettingsViewModelTests
         {
             StopOperation = _ =>
             {
-                Assert.True(settings.Current.CaptureEnabled);
-                Assert.Same(consent, settings.Current.RecordingConsent);
+                Assert.False(settings.Current.CaptureEnabled);
+                Assert.Null(settings.Current.RecordingConsent);
                 return Task.CompletedTask;
             },
         };
@@ -230,7 +264,7 @@ public sealed class SettingsViewModelTests
     }
 
     [Fact]
-    public async Task RevokeStopFailurePreservesConsentAndReportsCaptureError()
+    public async Task RevokeStopFailureStillClearsConsentAndReportsCaptureError()
     {
         var consent = CreateConsent();
         var repository = new TestSettingsRepository(
@@ -251,8 +285,37 @@ public sealed class SettingsViewModelTests
         Assert.False(await viewModel.RevokeRecordingConsentAsync());
 
         Assert.Equal(1, capture.StopCount);
-        Assert.True(settings.Current.CaptureEnabled);
-        Assert.Same(consent, settings.Current.RecordingConsent);
+        Assert.False(settings.Current.CaptureEnabled);
+        Assert.Null(settings.Current.RecordingConsent);
+        Assert.False(settings.HasValidRecordingConsent);
+        Assert.Single(repository.SavedSettings);
+        Assert.Equal("无法更改录制状态，请稍后重试。", viewModel.ErrorMessage);
+    }
+
+    [Fact]
+    public async Task RevokeSaveFailureLeavesRuntimeAndSettingsConsistent()
+    {
+        var consent = CreateConsent();
+        var initial = new AppSettings(
+            AppThemePreference.System,
+            CaptureEnabled: true,
+            CloudAnalysisEnabled: false,
+            consent);
+        var repository = new TestSettingsRepository(initial)
+        {
+            SaveException = new InvalidOperationException("Sensitive storage detail."),
+        };
+        using var settings = new AppSettingsService(repository);
+        await settings.InitializeAsync();
+        var capture = new TestCaptureService(CaptureState.Recording);
+        using var viewModel = new SettingsViewModel(settings, capture);
+
+        Assert.False(await viewModel.RevokeRecordingConsentAsync());
+
+        Assert.Equal(0, capture.StopCount);
+        Assert.Equal(CaptureState.Recording, capture.CurrentStatus.State);
+        Assert.Equal(initial, settings.Current);
+        Assert.True(settings.HasValidRecordingConsent);
         Assert.Empty(repository.SavedSettings);
         Assert.Equal("无法更改录制状态，请稍后重试。", viewModel.ErrorMessage);
     }
@@ -277,7 +340,7 @@ public sealed class SettingsViewModelTests
             },
             StopOperation = _ =>
             {
-                Assert.True(settings.Current.CaptureEnabled);
+                Assert.False(settings.Current.CaptureEnabled);
                 return Task.CompletedTask;
             },
         };

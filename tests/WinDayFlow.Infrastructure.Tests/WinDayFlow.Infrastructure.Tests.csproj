@@ -19,6 +19,13 @@
     </PackageReference>
   </ItemGroup>
 
+  <ItemGroup Condition="'$(Platform)' == 'x64'">
+    <None Include="..\..\artifacts\native\x64\$(Configuration)\WinDayFlow.Capture.Native.dll"
+          Link="WinDayFlow.Capture.Native.dll"
+          CopyToOutputDirectory="PreserveNewest"
+          Condition="Exists('..\..\artifacts\native\x64\$(Configuration)\WinDayFlow.Capture.Native.dll')" />
+  </ItemGroup>
+
   <ItemGroup>
     <ProjectReference Include="..\..\src\WinDayFlow.Capture.Interop\WinDayFlow.Capture.Interop.csproj" />
     <ProjectReference Include="..\..\src\WinDayFlow.Infrastructure\WinDayFlow.Infrastructure.csproj" />
