@@ -5,7 +5,7 @@ namespace WinDayFlow.Infrastructure.Persistence;
 
 public sealed class SqliteDatabaseInitializer
 {
-    private const int LatestSchemaVersion = 3;
+    private const int LatestSchemaVersion = 4;
 
     private const string CreateMigrationTableSql = """
         CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -204,11 +204,76 @@ public sealed class SqliteDatabaseInitializer
         DROP TABLE app_settings_v2;
         """;
 
+    private const string MigrationVersion4Sql = """
+        CREATE TABLE capture_exclusion_rules (
+            settings_id INTEGER NOT NULL CHECK (settings_id = 1),
+            rule_id TEXT NOT NULL CHECK (
+                length(rule_id) = 36
+                AND rule_id = lower(rule_id)
+            ),
+            ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+            name TEXT NOT NULL CHECK (
+                length(name) BETWEEN 1 AND 80
+                AND name = trim(name)
+            ),
+            enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+            scope INTEGER NOT NULL CHECK (scope IN (0, 1)),
+            application_identity_kind INTEGER NOT NULL CHECK (
+                application_identity_kind IN (0, 1, 2)
+            ),
+            identity_value TEXT NOT NULL CHECK (
+                length(identity_value) BETWEEN 1 AND 260
+                AND identity_value = trim(identity_value)
+            ),
+            window_title_match_kind INTEGER NULL CHECK (
+                window_title_match_kind IS NULL
+                OR window_title_match_kind IN (0, 1, 2)
+            ),
+            pattern TEXT NULL CHECK (
+                pattern IS NULL
+                OR (
+                    length(pattern) BETWEEN 2 AND 256
+                )
+            ),
+            revision INTEGER NOT NULL CHECK (revision > 0),
+            PRIMARY KEY (settings_id, rule_id),
+            UNIQUE (settings_id, ordinal),
+            FOREIGN KEY (settings_id) REFERENCES app_settings(id) ON DELETE CASCADE,
+            CHECK (
+                (scope = 0
+                    AND window_title_match_kind IS NULL
+                    AND pattern IS NULL)
+                OR
+                (scope = 1
+                    AND window_title_match_kind IS NOT NULL
+                    AND pattern IS NOT NULL)
+            ),
+            CHECK (
+                (application_identity_kind = 0
+                    AND length(identity_value) BETWEEN 5 AND 260
+                    AND lower(substr(identity_value, -4)) = '.exe'
+                    AND instr(identity_value, char(92)) = 0
+                    AND instr(identity_value, '/') = 0
+                    AND instr(identity_value, ':') = 0
+                    AND instr(identity_value, '*') = 0
+                    AND instr(identity_value, '?') = 0)
+                OR
+                (application_identity_kind = 1
+                    AND length(identity_value) <= 255)
+                OR
+                (application_identity_kind = 2
+                    AND length(identity_value) = 64
+                    AND identity_value NOT GLOB '*[^0-9A-F]*')
+            )
+        );
+        """;
+
     private static readonly IReadOnlyList<Migration> Migrations =
     [
         new(1, MigrationVersion1Sql),
         new(2, MigrationVersion2Sql),
         new(3, MigrationVersion3Sql),
+        new(4, MigrationVersion4Sql),
     ];
 
     private readonly SqliteConnectionFactory _connectionFactory;

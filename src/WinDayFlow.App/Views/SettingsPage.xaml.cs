@@ -1,7 +1,9 @@
 using System.ComponentModel;
 using System.Globalization;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
 using WinDayFlow.Application.Settings;
 using WinDayFlow.Presentation.Settings;
 
@@ -12,10 +14,13 @@ public sealed partial class SettingsPage : Page
     private const double StackedLayoutMaximumWidth = 620;
 
     private bool _dialogOpen;
+    private ExclusionRuleItemViewModel? _editingExclusionRule;
     private bool _isSubscribed;
     private bool _isUpdatingCaptureToggle;
+    private bool _isUpdatingExclusionRuleControls;
     private bool _isUpdatingPrivacyControls;
     private bool _isUpdatingThemePicker;
+    private bool _useStackedExclusionRuleLayout;
 
     public SettingsPage()
     {
@@ -30,6 +35,7 @@ public sealed partial class SettingsPage : Page
         SynchronizePrivacyControls();
         UpdateConsentActions();
         UpdateCaptureInformation();
+        UpdateExclusionRuleInformation();
     }
 
     public SettingsViewModel ViewModel { get; }
@@ -48,6 +54,7 @@ public sealed partial class SettingsPage : Page
         SynchronizePrivacyControls();
         UpdateConsentActions();
         UpdateCaptureInformation();
+        UpdateExclusionRuleInformation();
         UpdateErrorInformation();
     }
 
@@ -216,6 +223,263 @@ public sealed partial class SettingsPage : Page
         UpdateErrorInformation();
     }
 
+    private async void OnAddExclusionRule(object sender, RoutedEventArgs e)
+    {
+        if (_dialogOpen || !ViewModel.CanAddExclusionRule)
+        {
+            return;
+        }
+
+        PrepareCreateExclusionRuleEditor();
+        await ShowExclusionRuleEditorAsync();
+    }
+
+    private async void OnEditExclusionRule(object sender, RoutedEventArgs e)
+    {
+        if (_dialogOpen
+            || !ViewModel.CanChangeExclusionRules
+            || !TryGetExclusionRuleItem(sender, out var item))
+        {
+            return;
+        }
+
+        PrepareEditExclusionRuleEditor(item);
+        await ShowExclusionRuleEditorAsync();
+    }
+
+    private async void OnDeleteExclusionRule(object sender, RoutedEventArgs e)
+    {
+        if (_dialogOpen
+            || !ViewModel.CanChangeExclusionRules
+            || !TryGetExclusionRuleItem(sender, out var item))
+        {
+            return;
+        }
+
+        var originalIndex = item.Index;
+        var dialog = new ContentDialog
+        {
+            XamlRoot = XamlRoot,
+            Title = $"删除“{item.Name}”？",
+            Content = CreateDialogText(
+                "删除后，这条规则不会再定义排除边界。若它当前已启用，隐私选择会更新，录制会保持关闭并需要重新确认授权。"),
+            PrimaryButtonText = "删除",
+            CloseButtonText = "取消",
+            DefaultButton = ContentDialogButton.Close,
+        };
+
+        if (await ShowDialogAsync(dialog) != ContentDialogResult.Primary)
+        {
+            return;
+        }
+
+        bool deleted;
+        string? fallbackError = null;
+        try
+        {
+            deleted = await ViewModel.DeleteExclusionRuleAsync(item);
+        }
+        catch (Exception)
+        {
+            deleted = false;
+            fallbackError = "无法删除排除规则，请稍后重试。";
+        }
+
+        UpdateErrorInformation();
+        UpdateExclusionRuleInformation();
+        if (fallbackError is not null)
+        {
+            ShowPageError(fallbackError);
+        }
+
+        if (!deleted)
+        {
+            FocusExclusionRuleControl(item.Id);
+            return;
+        }
+
+        await Task.Yield();
+        if (ViewModel.ExclusionRules.Count == 0)
+        {
+            AddExclusionRuleButton.Focus(FocusState.Programmatic);
+            return;
+        }
+
+        var nextIndex = Math.Min(originalIndex, ViewModel.ExclusionRules.Count - 1);
+        FocusExclusionRuleControl(ViewModel.ExclusionRules[nextIndex].Id);
+    }
+
+    private async void OnExclusionRuleToggled(object sender, RoutedEventArgs e)
+    {
+        if (_isUpdatingExclusionRuleControls
+            || sender is not ToggleSwitch toggle
+            || !TryGetExclusionRuleItem(sender, out var item)
+            || toggle.IsOn == item.IsEnabled)
+        {
+            return;
+        }
+
+        var changed = false;
+        string? fallbackError = null;
+        if (ViewModel.CanChangeExclusionRules)
+        {
+            try
+            {
+                changed = await ViewModel.SetExclusionRuleEnabledAsync(item, toggle.IsOn);
+            }
+            catch (Exception)
+            {
+                fallbackError = "无法更改排除规则，请稍后重试。";
+            }
+        }
+
+        if (!changed || toggle.IsOn != item.IsEnabled)
+        {
+            _isUpdatingExclusionRuleControls = true;
+            toggle.IsOn = item.IsEnabled;
+            _isUpdatingExclusionRuleControls = false;
+        }
+
+        UpdateErrorInformation();
+        UpdateExclusionRuleInformation();
+        if (fallbackError is not null)
+        {
+            ShowPageError(fallbackError);
+        }
+    }
+
+    private async void OnMoveExclusionRuleUp(object sender, RoutedEventArgs e)
+    {
+        await MoveExclusionRuleAsync(sender, offset: -1);
+    }
+
+    private async void OnMoveExclusionRuleDown(object sender, RoutedEventArgs e)
+    {
+        await MoveExclusionRuleAsync(sender, offset: 1);
+    }
+
+    private async Task MoveExclusionRuleAsync(object sender, int offset)
+    {
+        if (!ViewModel.CanChangeExclusionRules
+            || !TryGetExclusionRuleItem(sender, out var item))
+        {
+            return;
+        }
+
+        var moved = false;
+        string? fallbackError = null;
+        try
+        {
+            moved = await ViewModel.MoveExclusionRuleAsync(item, offset);
+        }
+        catch (Exception)
+        {
+            fallbackError = "无法调整排除规则顺序，请稍后重试。";
+        }
+
+        UpdateErrorInformation();
+        UpdateExclusionRuleInformation();
+        if (fallbackError is not null)
+        {
+            ShowPageError(fallbackError);
+        }
+
+        if (!moved)
+        {
+            return;
+        }
+
+        await Task.Yield();
+        FocusExclusionRuleControl(
+            item.Id,
+            offset < 0 ? "MoveExclusionRuleUpButton" : "MoveExclusionRuleDownButton",
+            offset < 0 ? "MoveExclusionRuleDownButton" : "MoveExclusionRuleUpButton",
+            "EditExclusionRuleButton");
+    }
+
+    private void OnExclusionRuleRowLoaded(object sender, RoutedEventArgs e)
+    {
+        if (sender is Control rowRoot)
+        {
+            ApplyExclusionRuleRowLayout(rowRoot);
+        }
+    }
+
+    private void OnExclusionRuleEditorSelectionChanged(
+        object sender,
+        SelectionChangedEventArgs e)
+    {
+        UpdateExclusionRuleEditorFields();
+    }
+
+    private void OnExclusionRuleMutationInfoBarClosed(
+        InfoBar sender,
+        InfoBarClosedEventArgs args)
+    {
+        ViewModel.ClearRuleMutationNotice();
+    }
+
+    private async void OnExclusionRuleEditorPrimaryButtonClick(
+        ContentDialog sender,
+        ContentDialogButtonClickEventArgs args)
+    {
+        if (!TryReadExclusionRuleEditor(out var values))
+        {
+            args.Cancel = true;
+            return;
+        }
+
+        var deferral = args.GetDeferral();
+        SetExclusionRuleEditorSavingState(saving: true);
+        try
+        {
+            var saved = _editingExclusionRule is null
+                ? await ViewModel.AddExclusionRuleAsync(
+                    values.Name,
+                    values.Enabled,
+                    values.Scope,
+                    values.ApplicationIdentityKind,
+                    values.IdentityValue,
+                    values.WindowTitleMatchKind,
+                    values.Pattern)
+                : await ViewModel.UpdateExclusionRuleAsync(
+                    _editingExclusionRule,
+                    values.Name,
+                    values.Scope,
+                    values.ApplicationIdentityKind,
+                    values.IdentityValue,
+                    values.WindowTitleMatchKind,
+                    values.Pattern);
+            if (!saved)
+            {
+                args.Cancel = true;
+                ShowExclusionRuleEditorError(
+                    ViewModel.HasError
+                        ? ViewModel.ErrorMessage
+                        : "无法保存排除规则，请稍后重试。",
+                    "保存失败");
+                return;
+            }
+
+            var focusId = _editingExclusionRule?.Id
+                ?? ViewModel.ExclusionRules.LastOrDefault()?.Id;
+            if (focusId is not null)
+            {
+                ExclusionRuleEditorDialog.Tag = focusId.Value;
+            }
+        }
+        catch (Exception)
+        {
+            args.Cancel = true;
+            ShowExclusionRuleEditorError("无法保存排除规则，请稍后重试。", "保存失败");
+        }
+        finally
+        {
+            SetExclusionRuleEditorSavingState(saving: false);
+            deferral.Complete();
+        }
+    }
+
     private void OnViewModelPropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
         if (e.PropertyName == nameof(SettingsViewModel.Theme))
@@ -256,10 +520,381 @@ public sealed partial class SettingsPage : Page
             UpdateErrorInformation();
         }
 
+        if (e.PropertyName is nameof(SettingsViewModel.HasExclusionRules)
+            or nameof(SettingsViewModel.ExclusionRuleCount)
+            or nameof(SettingsViewModel.EnabledExclusionRuleCount)
+            or nameof(SettingsViewModel.ExclusionRuleSummaryText)
+            or nameof(SettingsViewModel.ExclusionEngineStatusText)
+            or nameof(SettingsViewModel.RuleMutationNoticeText)
+            or nameof(SettingsViewModel.HasRuleMutationNotice))
+        {
+            UpdateExclusionRuleInformation();
+        }
+
         if (e.PropertyName == nameof(SettingsViewModel.IsBusy))
         {
             ThemePicker.IsEnabled = !ViewModel.IsBusy;
         }
+    }
+
+    private void PrepareCreateExclusionRuleEditor()
+    {
+        _editingExclusionRule = null;
+        ExclusionRuleEditorDialog.Title = "添加排除规则";
+        ExclusionRuleEditorDialog.PrimaryButtonText = "添加";
+        ExclusionRuleEditorDialog.Tag = null;
+        ExclusionRuleNameTextBox.Text = string.Empty;
+        ExclusionRuleIdentityTextBox.Text = string.Empty;
+        ExclusionRuleWindowPatternTextBox.Text = string.Empty;
+        ExclusionRuleEnabledToggle.Visibility = Visibility.Visible;
+        ExclusionRuleEnabledToggle.IsOn = true;
+        SelectComboBoxValue(ExclusionRuleScopePicker, CaptureExclusionRuleScope.Application);
+        SelectComboBoxValue(
+            ExclusionRuleIdentityKindPicker,
+            ApplicationIdentityKind.ExecutableName);
+        SelectComboBoxValue(
+            ExclusionRuleWindowMatchKindPicker,
+            WindowTitleMatchKind.Contains);
+        ResetExclusionRuleEditorState();
+        UpdateExclusionRuleEditorFields();
+    }
+
+    private void PrepareEditExclusionRuleEditor(ExclusionRuleItemViewModel item)
+    {
+        _editingExclusionRule = item;
+        ExclusionRuleEditorDialog.Title = "编辑排除规则";
+        ExclusionRuleEditorDialog.PrimaryButtonText = "保存";
+        ExclusionRuleEditorDialog.Tag = null;
+        ExclusionRuleNameTextBox.Text = item.Name;
+        ExclusionRuleIdentityTextBox.Text = item.IdentityValue;
+        ExclusionRuleWindowPatternTextBox.Text = item.Pattern ?? string.Empty;
+        ExclusionRuleEnabledToggle.Visibility = Visibility.Collapsed;
+        ExclusionRuleEnabledToggle.IsOn = item.IsEnabled;
+        SelectComboBoxValue(ExclusionRuleScopePicker, item.Scope);
+        SelectComboBoxValue(
+            ExclusionRuleIdentityKindPicker,
+            item.ApplicationIdentityKind);
+        SelectComboBoxValue(
+            ExclusionRuleWindowMatchKindPicker,
+            item.WindowTitleMatchKind ?? WindowTitleMatchKind.Contains);
+        ResetExclusionRuleEditorState();
+        UpdateExclusionRuleEditorFields();
+    }
+
+    private async Task ShowExclusionRuleEditorAsync()
+    {
+        _dialogOpen = true;
+        try
+        {
+            ExclusionRuleEditorDialog.XamlRoot = XamlRoot;
+            await ExclusionRuleEditorDialog.ShowAsync();
+        }
+        catch (Exception)
+        {
+            ShowPageError("无法打开排除规则编辑器，请稍后重试。");
+        }
+        finally
+        {
+            _dialogOpen = false;
+            SetExclusionRuleEditorSavingState(saving: false);
+        }
+
+        if (ExclusionRuleEditorDialog.Tag is Guid focusId)
+        {
+            ExclusionRuleEditorDialog.Tag = null;
+            await Task.Yield();
+            FocusExclusionRuleControl(focusId);
+        }
+    }
+
+    private void UpdateExclusionRuleEditorFields()
+    {
+        var isWindowRule = TryGetSelectedEnum(
+                ExclusionRuleScopePicker,
+                out CaptureExclusionRuleScope scope)
+            && scope == CaptureExclusionRuleScope.Window;
+        ExclusionRuleWindowMatchPanel.Visibility = isWindowRule
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+
+        if (!TryGetSelectedEnum(
+                ExclusionRuleIdentityKindPicker,
+                out ApplicationIdentityKind identityKind))
+        {
+            return;
+        }
+
+        switch (identityKind)
+        {
+            case ApplicationIdentityKind.ExecutableName:
+                ExclusionRuleIdentityTextBox.Header = "可执行文件名";
+                ExclusionRuleIdentityTextBox.PlaceholderText = "例如：KeePassXC.exe";
+                ExclusionRuleIdentityTextBox.MaxLength =
+                    CaptureExclusionRule.MaximumExecutableNameLength;
+                ExclusionRuleIdentityHelpText.Text =
+                    "只接受以 .exe 结尾的文件名，不接受完整路径、驱动器号或通配符。";
+                AutomationProperties.SetName(ExclusionRuleIdentityTextBox, "可执行文件名");
+                break;
+            case ApplicationIdentityKind.PackageFamilyName:
+                ExclusionRuleIdentityTextBox.Header = "包系列名称 (PFN)";
+                ExclusionRuleIdentityTextBox.PlaceholderText =
+                    "例如：Publisher.Application_abc123def4567";
+                ExclusionRuleIdentityTextBox.MaxLength =
+                    CaptureExclusionRule.MaximumPackageFamilyNameLength;
+                ExclusionRuleIdentityHelpText.Text =
+                    "输入包名称、下划线和 13 位发布者 ID；不读取当前运行的窗口。";
+                AutomationProperties.SetName(ExclusionRuleIdentityTextBox, "包系列名称");
+                break;
+            case ApplicationIdentityKind.PublisherCertificateSha256:
+                ExclusionRuleIdentityTextBox.Header = "发布者证书 SHA-256";
+                ExclusionRuleIdentityTextBox.PlaceholderText = "输入 64 位十六进制摘要";
+                ExclusionRuleIdentityTextBox.MaxLength =
+                    CaptureExclusionRule.PublisherCertificateSha256Length;
+                ExclusionRuleIdentityHelpText.Text =
+                    "输入发布者签名证书的 SHA-256 摘要，不接受证书文件路径。";
+                AutomationProperties.SetName(
+                    ExclusionRuleIdentityTextBox,
+                    "发布者证书 SHA-256");
+                break;
+        }
+    }
+
+    private bool TryReadExclusionRuleEditor(out ExclusionRuleEditorValues values)
+    {
+        values = null!;
+        var nameInput = ExclusionRuleNameTextBox.Text;
+        if (nameInput.Any(char.IsControl))
+        {
+            ShowExclusionRuleEditorError("规则名称应为 1 到 80 个不含控制字符的文字。");
+            ExclusionRuleNameTextBox.Focus(FocusState.Programmatic);
+            return false;
+        }
+
+        var name = nameInput.Trim();
+        if (name.Length == 0
+            || name.Length > CaptureExclusionRule.MaximumNameLength)
+        {
+            ShowExclusionRuleEditorError("规则名称应为 1 到 80 个不含控制字符的文字。");
+            ExclusionRuleNameTextBox.Focus(FocusState.Programmatic);
+            return false;
+        }
+
+        if (!TryGetSelectedEnum(
+                ExclusionRuleScopePicker,
+                out CaptureExclusionRuleScope scope))
+        {
+            ShowExclusionRuleEditorError("请选择排除范围。");
+            ExclusionRuleScopePicker.Focus(FocusState.Programmatic);
+            return false;
+        }
+
+        if (!TryGetSelectedEnum(
+                ExclusionRuleIdentityKindPicker,
+                out ApplicationIdentityKind identityKind))
+        {
+            ShowExclusionRuleEditorError("请选择应用身份类型。");
+            ExclusionRuleIdentityKindPicker.Focus(FocusState.Programmatic);
+            return false;
+        }
+
+        if (!IsValidApplicationIdentity(
+                identityKind,
+                ExclusionRuleIdentityTextBox.Text,
+                out var identity,
+                out var identityError))
+        {
+            ShowExclusionRuleEditorError(identityError);
+            ExclusionRuleIdentityTextBox.Focus(FocusState.Programmatic);
+            return false;
+        }
+
+        WindowTitleMatchKind? windowTitleMatchKind = null;
+        string? pattern = null;
+        if (scope == CaptureExclusionRuleScope.Window)
+        {
+            if (!TryGetSelectedEnum(
+                    ExclusionRuleWindowMatchKindPicker,
+                    out WindowTitleMatchKind selectedMatchKind))
+            {
+                ShowExclusionRuleEditorError("请选择窗口标题匹配方式。");
+                ExclusionRuleWindowMatchKindPicker.Focus(FocusState.Programmatic);
+                return false;
+            }
+
+            pattern = ExclusionRuleWindowPatternTextBox.Text;
+            if (string.IsNullOrWhiteSpace(pattern)
+                || pattern.Length < 2
+                || pattern.Length > CaptureExclusionRule.MaximumWindowTitlePatternLength
+                || pattern.Any(char.IsControl))
+            {
+                ShowExclusionRuleEditorError("匹配文字应为 2 到 256 个不含控制字符的文字。");
+                ExclusionRuleWindowPatternTextBox.Focus(FocusState.Programmatic);
+                return false;
+            }
+
+            windowTitleMatchKind = selectedMatchKind;
+        }
+
+        values = new ExclusionRuleEditorValues(
+            name,
+            ExclusionRuleEnabledToggle.IsOn,
+            scope,
+            identityKind,
+            identity,
+            windowTitleMatchKind,
+            pattern);
+        ExclusionRuleEditorErrorInfoBar.IsOpen = false;
+        return true;
+    }
+
+    private static bool IsValidApplicationIdentity(
+        ApplicationIdentityKind identityKind,
+        string identityInput,
+        out string identity,
+        out string error)
+    {
+        if (CaptureExclusionRule.TryNormalizeApplicationIdentity(
+                identityKind,
+                identityInput,
+                out identity))
+        {
+            error = string.Empty;
+            return true;
+        }
+
+        error = identityKind switch
+        {
+            ApplicationIdentityKind.ExecutableName =>
+                "请输入以 .exe 结尾的文件名，不要输入完整路径、驱动器号或通配符。",
+            ApplicationIdentityKind.PackageFamilyName =>
+                "包系列名称应由 3 到 50 位包名称、下划线和 13 位发布者 ID 组成。",
+            ApplicationIdentityKind.PublisherCertificateSha256 =>
+                "发布者证书 SHA-256 必须是 64 位十六进制摘要。",
+            _ => "不支持此应用身份类型。",
+        };
+        return false;
+    }
+
+    private void ResetExclusionRuleEditorState()
+    {
+        ExclusionRuleEditorErrorInfoBar.IsOpen = false;
+        ExclusionRuleEditorErrorInfoBar.Message = string.Empty;
+        SetExclusionRuleEditorSavingState(saving: false);
+    }
+
+    private void SetExclusionRuleEditorSavingState(bool saving)
+    {
+        ExclusionRuleEditorDialog.IsPrimaryButtonEnabled = !saving;
+        ExclusionRuleEditorDialog.IsSecondaryButtonEnabled = !saving;
+        ExclusionRuleNameTextBox.IsEnabled = !saving;
+        ExclusionRuleScopePicker.IsEnabled = !saving;
+        ExclusionRuleIdentityKindPicker.IsEnabled = !saving;
+        ExclusionRuleIdentityTextBox.IsEnabled = !saving;
+        ExclusionRuleWindowMatchKindPicker.IsEnabled = !saving;
+        ExclusionRuleWindowPatternTextBox.IsEnabled = !saving;
+        ExclusionRuleEnabledToggle.IsEnabled = !saving;
+        ExclusionRuleEditorProgressBar.Visibility = saving
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+    }
+
+    private void ShowExclusionRuleEditorError(
+        string message,
+        string title = "请检查规则信息")
+    {
+        ExclusionRuleEditorErrorInfoBar.Title = title;
+        ExclusionRuleEditorErrorInfoBar.Message = message;
+        ExclusionRuleEditorErrorInfoBar.IsOpen = true;
+    }
+
+    private void UpdateExclusionRuleInformation()
+    {
+        ExclusionRuleSummaryTextBlock.Text = ViewModel.ExclusionRuleSummaryText;
+        ExclusionRuleAvailabilityTextBlock.Text = ViewModel.ExclusionEngineStatusText;
+        ExclusionRuleEmptyState.Visibility = ViewModel.HasExclusionRules
+            ? Visibility.Collapsed
+            : Visibility.Visible;
+        ExclusionRuleList.Visibility = ViewModel.HasExclusionRules
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+        ExclusionRuleMutationInfoBar.Message = ViewModel.RuleMutationNoticeText;
+        ExclusionRuleMutationInfoBar.IsOpen = ViewModel.HasRuleMutationNotice;
+    }
+
+    private static bool TryGetExclusionRuleItem(
+        object sender,
+        out ExclusionRuleItemViewModel item)
+    {
+        item = (sender as FrameworkElement)?.DataContext as ExclusionRuleItemViewModel
+            ?? null!;
+        return item is not null;
+    }
+
+    private void FocusExclusionRuleControl(Guid id, params string[] preferredControlNames)
+    {
+        var row = FindExclusionRuleRow(ExclusionRuleList, id);
+        if (row is not null)
+        {
+            var controlNames = preferredControlNames.Length == 0
+                ? ["EditExclusionRuleButton"]
+                : preferredControlNames;
+            foreach (var controlName in controlNames)
+            {
+                var control = FindNamedDescendant<Control>(row, controlName);
+                if (control is { IsEnabled: true, Visibility: Visibility.Visible }
+                    && control.Focus(FocusState.Programmatic))
+                {
+                    return;
+                }
+            }
+        }
+
+        if (!ExclusionRuleList.Focus(FocusState.Programmatic))
+        {
+            AddExclusionRuleButton.Focus(FocusState.Programmatic);
+        }
+    }
+
+    private static Control? FindExclusionRuleRow(DependencyObject root, Guid id)
+    {
+        if (root is Control { Name: "ExclusionRuleRowRoot", DataContext: ExclusionRuleItemViewModel item }
+            && item.Id == id)
+        {
+            return (Control)root;
+        }
+
+        var childCount = VisualTreeHelper.GetChildrenCount(root);
+        for (var index = 0; index < childCount; index++)
+        {
+            var match = FindExclusionRuleRow(VisualTreeHelper.GetChild(root, index), id);
+            if (match is not null)
+            {
+                return match;
+            }
+        }
+
+        return null;
+    }
+
+    private static bool TryGetSelectedEnum<TEnum>(ComboBox picker, out TEnum value)
+        where TEnum : struct, Enum
+    {
+        value = default;
+        return picker.SelectedItem is ComboBoxItem { Tag: string tag }
+            && Enum.TryParse(tag, out value)
+            && Enum.IsDefined(value);
+    }
+
+    private static void SelectComboBoxValue<TEnum>(ComboBox picker, TEnum value)
+        where TEnum : struct, Enum
+    {
+        var tag = value.ToString();
+        picker.SelectedItem = picker.Items
+            .OfType<ComboBoxItem>()
+            .FirstOrDefault(item => string.Equals(
+                item.Tag as string,
+                tag,
+                StringComparison.Ordinal));
     }
 
     private async Task<ContentDialogResult> ShowDialogAsync(ContentDialog dialog)
@@ -391,6 +1026,10 @@ public sealed partial class SettingsPage : Page
             SensitiveApplicationSettingLayout,
             SensitiveApplicationToggle,
             useStackedLayout);
+        UpdateSettingLayout(
+            ExclusionRulesHeaderLayout,
+            AddExclusionRuleButton,
+            useStackedLayout);
         UpdateSettingLayout(RemoteSessionSettingLayout, RemoteSessionToggle, useStackedLayout);
         UpdateSettingLayout(ScreenSharingSettingLayout, ScreenSharingToggle, useStackedLayout);
         UpdateSettingLayout(CloudSettingLayout, CloudAnalysisToggle, useStackedLayout);
@@ -404,6 +1043,87 @@ public sealed partial class SettingsPage : Page
         RevokeConsentButton.HorizontalAlignment = useStackedLayout
             ? HorizontalAlignment.Stretch
             : HorizontalAlignment.Left;
+
+        if (_useStackedExclusionRuleLayout != useStackedLayout)
+        {
+            _useStackedExclusionRuleLayout = useStackedLayout;
+            ApplyRealizedExclusionRuleLayouts(ExclusionRuleList);
+        }
+    }
+
+    private void ApplyRealizedExclusionRuleLayouts(DependencyObject root)
+    {
+        if (root is Control { Name: "ExclusionRuleRowRoot" } rowRoot)
+        {
+            ApplyExclusionRuleRowLayout(rowRoot);
+        }
+
+        var childCount = VisualTreeHelper.GetChildrenCount(root);
+        for (var index = 0; index < childCount; index++)
+        {
+            ApplyRealizedExclusionRuleLayouts(VisualTreeHelper.GetChild(root, index));
+        }
+    }
+
+    private void ApplyExclusionRuleRowLayout(Control rowRoot)
+    {
+        var grid = FindNamedDescendant<Grid>(rowRoot, "ExclusionRuleRowGrid");
+        var content = FindNamedDescendant<StackPanel>(rowRoot, "ExclusionRuleContentStack");
+        var actions = FindNamedDescendant<Grid>(rowRoot, "ExclusionRuleActionPanel");
+        var stateActions = FindNamedDescendant<StackPanel>(
+            rowRoot,
+            "ExclusionRuleStateActionPanel");
+        var editActions = FindNamedDescendant<StackPanel>(
+            rowRoot,
+            "ExclusionRuleEditActionPanel");
+        if (grid is null
+            || content is null
+            || actions is null
+            || stateActions is null
+            || editActions is null)
+        {
+            return;
+        }
+
+        grid.ColumnSpacing = _useStackedExclusionRuleLayout ? 0 : 8;
+        grid.RowSpacing = _useStackedExclusionRuleLayout ? 12 : 0;
+        Grid.SetRow(content, 0);
+        Grid.SetColumn(content, 0);
+        Grid.SetColumnSpan(content, _useStackedExclusionRuleLayout ? 2 : 1);
+        Grid.SetRow(actions, _useStackedExclusionRuleLayout ? 1 : 0);
+        Grid.SetColumn(actions, _useStackedExclusionRuleLayout ? 0 : 1);
+        Grid.SetColumnSpan(actions, _useStackedExclusionRuleLayout ? 2 : 1);
+        actions.ColumnSpacing = _useStackedExclusionRuleLayout ? 0 : 8;
+        actions.RowSpacing = _useStackedExclusionRuleLayout ? 4 : 0;
+        actions.HorizontalAlignment = HorizontalAlignment.Right;
+        Grid.SetRow(stateActions, 0);
+        Grid.SetColumn(stateActions, 0);
+        Grid.SetColumnSpan(stateActions, _useStackedExclusionRuleLayout ? 2 : 1);
+        Grid.SetRow(editActions, _useStackedExclusionRuleLayout ? 1 : 0);
+        Grid.SetColumn(editActions, _useStackedExclusionRuleLayout ? 0 : 1);
+        Grid.SetColumnSpan(editActions, _useStackedExclusionRuleLayout ? 2 : 1);
+    }
+
+    private static T? FindNamedDescendant<T>(DependencyObject root, string name)
+        where T : FrameworkElement
+    {
+        if (root is T { Name: var elementName } element
+            && string.Equals(elementName, name, StringComparison.Ordinal))
+        {
+            return element;
+        }
+
+        var childCount = VisualTreeHelper.GetChildrenCount(root);
+        for (var index = 0; index < childCount; index++)
+        {
+            var match = FindNamedDescendant<T>(VisualTreeHelper.GetChild(root, index), name);
+            if (match is not null)
+            {
+                return match;
+            }
+        }
+
+        return null;
     }
 
     private static void UpdateSettingLayout(
@@ -430,4 +1150,13 @@ public sealed partial class SettingsPage : Page
             TextWrapping = TextWrapping.Wrap,
         };
     }
+
+    private sealed record ExclusionRuleEditorValues(
+        string Name,
+        bool Enabled,
+        CaptureExclusionRuleScope Scope,
+        ApplicationIdentityKind ApplicationIdentityKind,
+        string IdentityValue,
+        WindowTitleMatchKind? WindowTitleMatchKind,
+        string? Pattern);
 }

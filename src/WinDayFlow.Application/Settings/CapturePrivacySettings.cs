@@ -5,7 +5,8 @@ public sealed record CapturePrivacySettings(
     bool ExcludeSensitiveApplications,
     bool PauseInRemoteSessions,
     bool PauseDuringScreenSharing,
-    long Revision)
+    long Revision,
+    CaptureExclusionRuleSet ExclusionRules)
 {
     public const int MinimumRetentionDays = 1;
     public const int MaximumRetentionDays = 365;
@@ -16,7 +17,24 @@ public sealed record CapturePrivacySettings(
         ExcludeSensitiveApplications: true,
         PauseInRemoteSessions: true,
         PauseDuringScreenSharing: true,
-        Revision: 1);
+        Revision: 1,
+        ExclusionRules: CaptureExclusionRuleSet.Empty);
+
+    public CapturePrivacySettings(
+        int EvidenceRetentionDays,
+        bool ExcludeSensitiveApplications,
+        bool PauseInRemoteSessions,
+        bool PauseDuringScreenSharing,
+        long Revision)
+        : this(
+            EvidenceRetentionDays,
+            ExcludeSensitiveApplications,
+            PauseInRemoteSessions,
+            PauseDuringScreenSharing,
+            Revision,
+            CaptureExclusionRuleSet.Empty)
+    {
+    }
 
     public int EvidenceRetentionDays { get; } =
         ValidateRetentionDays(EvidenceRetentionDays);
@@ -28,6 +46,9 @@ public sealed record CapturePrivacySettings(
     public bool PauseDuringScreenSharing { get; } = PauseDuringScreenSharing;
 
     public long Revision { get; } = ValidateRevision(Revision);
+
+    public CaptureExclusionRuleSet ExclusionRules { get; } = ExclusionRules
+        ?? throw new ArgumentNullException(nameof(ExclusionRules));
 
     public CapturePrivacySettings Change(
         int evidenceRetentionDays,
@@ -55,7 +76,49 @@ public sealed record CapturePrivacySettings(
             excludeSensitiveApplications,
             pauseInRemoteSessions,
             pauseDuringScreenSharing,
-            Revision + 1);
+            Revision + 1,
+            ExclusionRules);
+    }
+
+    public CapturePrivacySettings ChangeRules(CaptureExclusionRuleSet exclusionRules)
+    {
+        ArgumentNullException.ThrowIfNull(exclusionRules);
+        if (ExclusionRules.Equals(exclusionRules))
+        {
+            return this;
+        }
+
+        var revision = ExclusionRules.HasSameEffectivePolicy(exclusionRules)
+            ? Revision
+            : NextRevision();
+        return new CapturePrivacySettings(
+            EvidenceRetentionDays,
+            ExcludeSensitiveApplications,
+            PauseInRemoteSessions,
+            PauseDuringScreenSharing,
+            revision,
+            exclusionRules);
+    }
+
+    public bool HasSameEffectivePolicy(CapturePrivacySettings other)
+    {
+        ArgumentNullException.ThrowIfNull(other);
+        return EvidenceRetentionDays == other.EvidenceRetentionDays
+            && ExcludeSensitiveApplications == other.ExcludeSensitiveApplications
+            && PauseInRemoteSessions == other.PauseInRemoteSessions
+            && PauseDuringScreenSharing == other.PauseDuringScreenSharing
+            && ExclusionRules.HasSameEffectivePolicy(other.ExclusionRules);
+    }
+
+    private long NextRevision()
+    {
+        if (Revision == long.MaxValue)
+        {
+            throw new InvalidOperationException(
+                "The capture privacy settings revision has been exhausted.");
+        }
+
+        return Revision + 1;
     }
 
     private static int ValidateRetentionDays(int evidenceRetentionDays)

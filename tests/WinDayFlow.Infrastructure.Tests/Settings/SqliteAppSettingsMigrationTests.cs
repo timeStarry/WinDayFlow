@@ -1,4 +1,5 @@
 using System.Globalization;
+using Microsoft.Data.Sqlite;
 using WinDayFlow.Application.Settings;
 using WinDayFlow.Domain;
 using WinDayFlow.Infrastructure.Persistence;
@@ -34,6 +35,7 @@ public sealed class SqliteAppSettingsMigrationTests
         await using (var command = connection.CreateCommand())
         {
             command.CommandText = """
+                DROP TABLE capture_exclusion_rules;
                 DROP TABLE app_settings;
                 DELETE FROM schema_migrations WHERE version >= 2;
                 """;
@@ -84,50 +86,171 @@ public sealed class SqliteAppSettingsMigrationTests
         Assert.True(await reader.ReadAsync());
         Assert.Equal(3, reader.GetInt32(0));
         Assert.Equal(1, reader.GetInt32(1));
+        Assert.True(await reader.ReadAsync());
+        Assert.Equal(4, reader.GetInt32(0));
+        Assert.Equal(1, reader.GetInt32(1));
         Assert.False(await reader.ReadAsync());
     }
 
     [Fact]
-    public async Task VersionThreeCreatesPrivacyPreservingDefaultSettings()
+    public async Task VersionFourPreservesPatternWhitespaceButRejectsPaddedMetadata()
     {
         using var database = new TemporaryDatabase();
         var factory = new SqliteConnectionFactory(database.DatabasePath);
         await new SqliteDatabaseInitializer(factory).InitializeAsync();
-
         await using var connection = await factory.OpenConnectionAsync();
-        await using var command = connection.CreateCommand();
-        command.CommandText = """
-            SELECT
-                id,
-                theme,
-                capture_enabled,
-                cloud_analysis_enabled,
-                capture_consent_version,
-                capture_consent_granted_at_utc,
-                capture_consent_privacy_revision,
-                evidence_retention_days,
-                exclude_sensitive_applications,
-                pause_in_remote_sessions,
-                pause_during_screen_sharing,
-                capture_privacy_revision
-            FROM app_settings;
-            """;
-        await using var reader = await command.ExecuteReaderAsync();
 
-        Assert.True(await reader.ReadAsync());
-        Assert.Equal(1, reader.GetInt32(0));
-        Assert.Equal(0, reader.GetInt32(1));
-        Assert.Equal(0, reader.GetInt32(2));
-        Assert.Equal(0, reader.GetInt32(3));
-        Assert.True(reader.IsDBNull(4));
-        Assert.True(reader.IsDBNull(5));
-        Assert.True(reader.IsDBNull(6));
-        Assert.Equal(30, reader.GetInt32(7));
-        Assert.Equal(1, reader.GetInt32(8));
-        Assert.Equal(1, reader.GetInt32(9));
-        Assert.Equal(1, reader.GetInt32(10));
-        Assert.Equal(1, reader.GetInt64(11));
-        Assert.False(await reader.ReadAsync());
+        await using (var insertPattern = connection.CreateCommand())
+        {
+            insertPattern.CommandText = """
+                INSERT INTO capture_exclusion_rules(
+                    settings_id,
+                    rule_id,
+                    ordinal,
+                    name,
+                    enabled,
+                    scope,
+                    application_identity_kind,
+                    identity_value,
+                    window_title_match_kind,
+                    pattern,
+                    revision)
+                VALUES (
+                    1,
+                    'b330ea53-4180-4855-892a-f373b00b6bad',
+                    0,
+                    'Exact window',
+                    0,
+                    1,
+                    0,
+                    'browser.exe',
+                    0,
+                    ' Secret ',
+                    1);
+                """;
+            await insertPattern.ExecuteNonQueryAsync();
+        }
+
+        await using (var readPattern = connection.CreateCommand())
+        {
+            readPattern.CommandText = """
+                SELECT pattern
+                FROM capture_exclusion_rules
+                WHERE rule_id = 'b330ea53-4180-4855-892a-f373b00b6bad';
+                """;
+            Assert.Equal(" Secret ", await readPattern.ExecuteScalarAsync());
+        }
+
+        await using (var insertPaddedName = connection.CreateCommand())
+        {
+            insertPaddedName.CommandText = """
+                INSERT INTO capture_exclusion_rules(
+                    settings_id, rule_id, ordinal, name, enabled, scope,
+                    application_identity_kind, identity_value,
+                    window_title_match_kind, pattern, revision)
+                VALUES (
+                    1, 'b482058a-348e-426d-9935-b460a606af41', 1,
+                    ' Padded name ', 0, 0, 0, 'other.exe', NULL, NULL, 1);
+                """;
+            await Assert.ThrowsAsync<SqliteException>(
+                () => insertPaddedName.ExecuteNonQueryAsync());
+        }
+
+        await using var insertPaddedIdentity = connection.CreateCommand();
+        insertPaddedIdentity.CommandText = """
+            INSERT INTO capture_exclusion_rules(
+                settings_id, rule_id, ordinal, name, enabled, scope,
+                application_identity_kind, identity_value,
+                window_title_match_kind, pattern, revision)
+            VALUES (
+                1, '860a2f58-97c3-42e8-8a27-d89a174a4046', 1,
+                'Padded identity', 0, 0, 0, ' other.exe ', NULL, NULL, 1);
+            """;
+        await Assert.ThrowsAsync<SqliteException>(
+            () => insertPaddedIdentity.ExecuteNonQueryAsync());
+    }
+
+    [Fact]
+    public async Task VersionThreeDatabaseUpgradesWithoutChangingSettingsOrTimelineData()
+    {
+        using var database = new TemporaryDatabase();
+        var factory = new SqliteConnectionFactory(database.DatabasePath);
+        var initializer = new SqliteDatabaseInitializer(factory);
+        await initializer.InitializeAsync();
+        var timelineRepository = new SqliteTimelineRepository(factory);
+        var start = new DateTimeOffset(2026, 7, 16, 9, 15, 0, TimeSpan.FromHours(8));
+        var entry = TimelineEntry.CreateManual(
+            Guid.Parse("2f7bc346-9023-4e09-8671-e00ab43811d3"),
+            new TimeRange(start, start.AddMinutes(30)),
+            "Version three sentinel",
+            "Schema v4 must not alter existing timeline data.",
+            ActivityCategory.Communication,
+            ProductivityKind.Neutral,
+            ["schema-v3"],
+            start.AddHours(1));
+        await timelineRepository.AddAsync(entry);
+        const string acceptedAt = "2026-07-16T01:02:03.0000000+00:00";
+
+        await using (var connection = await factory.OpenConnectionAsync())
+        await using (var command = connection.CreateCommand())
+        {
+            command.CommandText = """
+                DROP TABLE capture_exclusion_rules;
+                DELETE FROM schema_migrations WHERE version = 4;
+                UPDATE app_settings
+                SET theme = 2,
+                    capture_enabled = 1,
+                    cloud_analysis_enabled = 1,
+                    capture_consent_version = 2,
+                    capture_consent_granted_at_utc = '2026-07-16T01:02:03.0000000+00:00',
+                    capture_consent_privacy_revision = 7,
+                    evidence_retention_days = 90,
+                    exclude_sensitive_applications = 0,
+                    pause_in_remote_sessions = 0,
+                    pause_during_screen_sharing = 1,
+                    capture_privacy_revision = 7
+                WHERE id = 1;
+                """;
+            await command.ExecuteNonQueryAsync();
+        }
+
+        await initializer.InitializeAsync();
+
+        var expectedPrivacy = new CapturePrivacySettings(
+            EvidenceRetentionDays: 90,
+            ExcludeSensitiveApplications: false,
+            PauseInRemoteSessions: false,
+            PauseDuringScreenSharing: true,
+            Revision: 7);
+        var expected = new AppSettings(
+            AppThemePreference.Dark,
+            CaptureEnabled: true,
+            CloudAnalysisEnabled: true,
+            new RecordingConsent(
+                AppSettingsService.CurrentRecordingConsentVersion,
+                DateTimeOffset.ParseExact(
+                    acceptedAt,
+                    "O",
+                    CultureInfo.InvariantCulture,
+                    DateTimeStyles.None),
+                PrivacyRevision: 7),
+            expectedPrivacy);
+        var settings = await new SqliteAppSettingsRepository(factory).GetAsync();
+        Assert.Equal(expected, settings);
+        Assert.Empty(settings.CapturePrivacy.ExclusionRules.Rules);
+
+        var restored = await timelineRepository.GetByIdAsync(entry.Id);
+        Assert.NotNull(restored);
+        Assert.Equal(entry.Id, restored.Id);
+        Assert.Equal(entry.Range, restored.Range);
+        Assert.Equal(entry.Title, restored.Title);
+        Assert.Equal(entry.Summary, restored.Summary);
+        Assert.Equal(entry.Tags, restored.Tags);
+
+        await using var migratedConnection = await factory.OpenConnectionAsync();
+        await using var countRules = migratedConnection.CreateCommand();
+        countRules.CommandText = "SELECT COUNT(*) FROM capture_exclusion_rules;";
+        Assert.Equal(0L, await countRules.ExecuteScalarAsync());
     }
 
     [Fact]
@@ -143,6 +266,7 @@ public sealed class SqliteAppSettingsMigrationTests
         await using (var command = connection.CreateCommand())
         {
             command.CommandText = """
+                DROP TABLE capture_exclusion_rules;
                 ALTER TABLE app_settings RENAME TO app_settings_v3;
                 CREATE TABLE app_settings (
                     id INTEGER NOT NULL PRIMARY KEY CHECK (id = 1),
@@ -172,7 +296,7 @@ public sealed class SqliteAppSettingsMigrationTests
                     capture_consent_granted_at_utc)
                 VALUES (1, 2, 1, 1, 1, '2026-07-16T03:04:05.0000000+00:00');
                 DROP TABLE app_settings_v3;
-                DELETE FROM schema_migrations WHERE version = 3;
+                DELETE FROM schema_migrations WHERE version >= 3;
                 """;
             await command.ExecuteNonQueryAsync();
         }

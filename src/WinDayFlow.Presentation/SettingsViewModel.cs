@@ -1,3 +1,4 @@
+using System.Collections.ObjectModel;
 using CommunityToolkit.Mvvm.ComponentModel;
 using WinDayFlow.Application.Capture;
 using WinDayFlow.Application.Settings;
@@ -8,12 +9,15 @@ public sealed partial class SettingsViewModel : ObservableObject, IDisposable
 {
     private const string SaveErrorText = "无法保存设置，请稍后重试。";
     private const string CaptureErrorText = "无法更改录制状态，请稍后重试。";
+    private const string ExclusionRuleErrorText = "无法更改排除规则，请稍后重试。";
 
     private readonly AppSettingsService _settingsService;
     private readonly ICaptureService _captureService;
+    private readonly ObservableCollection<ExclusionRuleItemViewModel> _exclusionRules = [];
     private readonly SynchronizationContext? _synchronizationContext;
     private readonly SemaphoreSlim _mutationGate = new(1, 1);
     private readonly CancellationTokenSource _lifetimeCancellation = new();
+    private readonly bool _isExclusionEngineAvailable;
     private bool _disposed;
 
     [ObservableProperty]
@@ -21,11 +25,17 @@ public sealed partial class SettingsViewModel : ObservableObject, IDisposable
     [NotifyPropertyChangedFor(nameof(CanGrantConsent))]
     [NotifyPropertyChangedFor(nameof(CanRevokeConsent))]
     [NotifyPropertyChangedFor(nameof(CanChangePrivacy))]
+    [NotifyPropertyChangedFor(nameof(CanAddExclusionRule))]
+    [NotifyPropertyChangedFor(nameof(CanChangeExclusionRules))]
     private bool _isBusy;
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(HasError))]
     private string _errorMessage = string.Empty;
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HasRuleMutationNotice))]
+    private string _ruleMutationNoticeText = string.Empty;
 
     public SettingsViewModel(
         AppSettingsService settingsService,
@@ -35,10 +45,16 @@ public sealed partial class SettingsViewModel : ObservableObject, IDisposable
             ?? throw new ArgumentNullException(nameof(settingsService));
         _captureService = captureService
             ?? throw new ArgumentNullException(nameof(captureService));
+        _isExclusionEngineAvailable = false;
+        ExclusionRules = new ReadOnlyObservableCollection<ExclusionRuleItemViewModel>(
+            _exclusionRules);
         _synchronizationContext = SynchronizationContext.Current;
         _settingsService.SettingsChanged += OnSettingsChanged;
         _captureService.StatusChanged += OnCaptureStatusChanged;
+        SynchronizeExclusionRules();
     }
+
+    public ReadOnlyObservableCollection<ExclusionRuleItemViewModel> ExclusionRules { get; }
 
     public AppThemePreference Theme => _settingsService.Current.Theme;
 
@@ -67,6 +83,16 @@ public sealed partial class SettingsViewModel : ObservableObject, IDisposable
     public long CapturePrivacyRevision =>
         _settingsService.Current.CapturePrivacy.Revision;
 
+    public bool HasExclusionRules => _exclusionRules.Count > 0;
+
+    public int ExclusionRuleCount => _exclusionRules.Count;
+
+    public int EnabledExclusionRuleCount => _exclusionRules.Count(static rule => rule.IsEnabled);
+
+    public string ExclusionRuleSummaryText => ExclusionRuleCount == 0
+        ? "没有自定义规则"
+        : $"{ExclusionRuleCount} 条规则 · {EnabledExclusionRuleCount} 条已启用";
+
     public bool IsCaptureBackendAvailable =>
         _captureService.CurrentStatus.State != CaptureState.Unavailable;
 
@@ -81,7 +107,20 @@ public sealed partial class SettingsViewModel : ObservableObject, IDisposable
 
     public bool CanChangePrivacy => !IsBusy;
 
+    public bool CanAddExclusionRule =>
+        !IsBusy && ExclusionRuleCount < CaptureExclusionRuleSet.MaximumRuleCount;
+
+    public bool CanChangeExclusionRules => !IsBusy;
+
     public bool HasError => ErrorMessage.Length > 0;
+
+    public bool HasRuleMutationNotice => RuleMutationNoticeText.Length > 0;
+
+    public bool IsExclusionEngineAvailable => _isExclusionEngineAvailable;
+
+    public string ExclusionEngineStatusText => IsExclusionEngineAvailable
+        ? "排除规则监视器已就绪；规则本身不会开启录制。"
+        : "规则已保存到本机，尚未接入录制监视器；当前不会用于录制。";
 
     public string ConsentStatusText => HasValidRecordingConsent
         ? "已同意当前录制说明"
@@ -237,9 +276,142 @@ public sealed partial class SettingsViewModel : ObservableObject, IDisposable
             cancellationToken).ConfigureAwait(true);
     }
 
+    public async Task<bool> AddExclusionRuleAsync(
+        string name,
+        bool enabled,
+        CaptureExclusionRuleScope scope,
+        ApplicationIdentityKind applicationIdentityKind,
+        string identityValue,
+        WindowTitleMatchKind? windowTitleMatchKind,
+        string? pattern,
+        CancellationToken cancellationToken = default)
+    {
+        return await RunExclusionRuleMutationAsync(
+                async token =>
+                {
+                    var rule = CaptureExclusionRule.Create(
+                        Guid.NewGuid(),
+                        name,
+                        enabled,
+                        scope,
+                        applicationIdentityKind,
+                        identityValue,
+                        windowTitleMatchKind,
+                        pattern);
+                    _ = await _settingsService
+                        .AddCaptureExclusionRuleAsync(rule, token)
+                        .ConfigureAwait(false);
+                },
+                "排除规则已添加。",
+                cancellationToken)
+            .ConfigureAwait(true);
+    }
+
+    public async Task<bool> UpdateExclusionRuleAsync(
+        ExclusionRuleItemViewModel item,
+        string name,
+        CaptureExclusionRuleScope scope,
+        ApplicationIdentityKind applicationIdentityKind,
+        string identityValue,
+        WindowTitleMatchKind? windowTitleMatchKind,
+        string? pattern,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(item);
+        return await RunExclusionRuleMutationAsync(
+                async token =>
+                {
+                    _ = await _settingsService
+                        .UpdateCaptureExclusionRuleAsync(
+                            item.Id,
+                            item.Revision,
+                            name,
+                            scope,
+                            applicationIdentityKind,
+                            identityValue,
+                            windowTitleMatchKind,
+                            pattern,
+                            token)
+                        .ConfigureAwait(false);
+                },
+                "排除规则已保存。",
+                cancellationToken)
+            .ConfigureAwait(true);
+    }
+
+    public async Task<bool> SetExclusionRuleEnabledAsync(
+        ExclusionRuleItemViewModel item,
+        bool enabled,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(item);
+        return await RunExclusionRuleMutationAsync(
+                async token =>
+                {
+                    _ = await _settingsService
+                        .SetCaptureExclusionRuleEnabledAsync(
+                            item.Id,
+                            item.Revision,
+                            enabled,
+                            token)
+                        .ConfigureAwait(false);
+                },
+                enabled ? "排除规则已启用。" : "排除规则已停用。",
+                cancellationToken)
+            .ConfigureAwait(true);
+    }
+
+    public async Task<bool> MoveExclusionRuleAsync(
+        ExclusionRuleItemViewModel item,
+        int offset,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(item);
+        var newIndex = item.Index + offset;
+        if (newIndex < 0 || newIndex >= ExclusionRuleCount)
+        {
+            return false;
+        }
+
+        return await RunExclusionRuleMutationAsync(
+                async token =>
+                {
+                    _ = await _settingsService
+                        .MoveCaptureExclusionRuleAsync(
+                            item.Id,
+                            item.Revision,
+                            newIndex,
+                            token)
+                        .ConfigureAwait(false);
+                },
+                "排除规则顺序已更新。",
+                cancellationToken)
+            .ConfigureAwait(true);
+    }
+
+    public async Task<bool> DeleteExclusionRuleAsync(
+        ExclusionRuleItemViewModel item,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(item);
+        return await RunExclusionRuleMutationAsync(
+                token => _settingsService.DeleteCaptureExclusionRuleAsync(
+                    item.Id,
+                    item.Revision,
+                    token),
+                "排除规则已删除。",
+                cancellationToken)
+            .ConfigureAwait(true);
+    }
+
     public void ClearError()
     {
         ErrorMessage = string.Empty;
+    }
+
+    public void ClearRuleMutationNotice()
+    {
+        RuleMutationNoticeText = string.Empty;
     }
 
     public void Dispose()
@@ -253,6 +425,48 @@ public sealed partial class SettingsViewModel : ObservableObject, IDisposable
         _lifetimeCancellation.Cancel();
         _settingsService.SettingsChanged -= OnSettingsChanged;
         _captureService.StatusChanged -= OnCaptureStatusChanged;
+    }
+
+    private async Task<bool> RunExclusionRuleMutationAsync(
+        Func<CancellationToken, Task> mutation,
+        string successText,
+        CancellationToken cancellationToken)
+    {
+        if (_disposed)
+        {
+            return false;
+        }
+
+        RuleMutationNoticeText = string.Empty;
+        var changed = await RunMutationAsync(
+                async token =>
+                {
+                    var captureWasEnabled = _settingsService.Current.CaptureEnabled;
+                    var shouldStop = captureWasEnabled
+                        && ShouldStopCapture(_captureService.CurrentStatus.State);
+                    await mutation(token).ConfigureAwait(false);
+                    if (shouldStop && !_settingsService.Current.CaptureEnabled)
+                    {
+                        await _captureService.StopAsync(token).ConfigureAwait(false);
+                    }
+                },
+                ExclusionRuleErrorText,
+                cancellationToken)
+            .ConfigureAwait(true);
+
+        if (!changed || _disposed)
+        {
+            return false;
+        }
+
+        SynchronizeExclusionRules();
+        if (_disposed)
+        {
+            return false;
+        }
+
+        RuleMutationNoticeText = successText;
+        return true;
     }
 
     private async Task<bool> RunMutationAsync(
@@ -358,6 +572,7 @@ public sealed partial class SettingsViewModel : ObservableObject, IDisposable
 
     private void NotifySettingsChanged()
     {
+        SynchronizeExclusionRules();
         OnPropertyChanged(nameof(Theme));
         OnPropertyChanged(nameof(CaptureEnabled));
         OnPropertyChanged(nameof(CloudAnalysisEnabled));
@@ -376,6 +591,11 @@ public sealed partial class SettingsViewModel : ObservableObject, IDisposable
         OnPropertyChanged(nameof(ConsentDetailText));
         OnPropertyChanged(nameof(RetentionSummaryText));
         OnPropertyChanged(nameof(PrivacySummaryText));
+        OnPropertyChanged(nameof(HasExclusionRules));
+        OnPropertyChanged(nameof(ExclusionRuleCount));
+        OnPropertyChanged(nameof(EnabledExclusionRuleCount));
+        OnPropertyChanged(nameof(ExclusionRuleSummaryText));
+        OnPropertyChanged(nameof(CanAddExclusionRule));
     }
 
     private void NotifyCaptureStatusChanged()
@@ -383,6 +603,56 @@ public sealed partial class SettingsViewModel : ObservableObject, IDisposable
         OnPropertyChanged(nameof(IsCaptureBackendAvailable));
         OnPropertyChanged(nameof(CanChangeCapture));
         OnPropertyChanged(nameof(CaptureAvailabilityText));
+        OnPropertyChanged(nameof(IsExclusionEngineAvailable));
+        OnPropertyChanged(nameof(ExclusionEngineStatusText));
+    }
+
+    private void SynchronizeExclusionRules()
+    {
+        var rules = _settingsService.Current.CapturePrivacy.ExclusionRules.Rules;
+        var identifiers = rules.Select(static rule => rule.Id).ToHashSet();
+        for (var index = _exclusionRules.Count - 1; index >= 0; index--)
+        {
+            if (!identifiers.Contains(_exclusionRules[index].Id))
+            {
+                _exclusionRules.RemoveAt(index);
+            }
+        }
+
+        for (var index = 0; index < rules.Count; index++)
+        {
+            var rule = rules[index];
+            var existingIndex = -1;
+            for (var candidate = index; candidate < _exclusionRules.Count; candidate++)
+            {
+                if (_exclusionRules[candidate].Id == rule.Id)
+                {
+                    existingIndex = candidate;
+                    break;
+                }
+            }
+
+            if (existingIndex < 0)
+            {
+                _exclusionRules.Insert(
+                    index,
+                    new ExclusionRuleItemViewModel(rule, index, rules.Count));
+            }
+            else
+            {
+                if (existingIndex != index)
+                {
+                    _exclusionRules.Move(existingIndex, index);
+                }
+
+                _exclusionRules[index].Update(rule, index, rules.Count);
+            }
+        }
+
+        for (var index = 0; index < _exclusionRules.Count; index++)
+        {
+            _exclusionRules[index].Update(rules[index], index, rules.Count);
+        }
     }
 
     private static bool ShouldStopCapture(CaptureState state)

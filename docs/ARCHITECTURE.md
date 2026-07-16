@@ -386,6 +386,12 @@ public interface ICaptureService
 }
 ```
 
+[ADR 0002](adr/0002-capture-exclusion-rules.md), "Typed, Ordered Capture
+Exclusion Rules," is also Accepted. It defines application-anchored identities,
+bounded window-title operators, ordered first-match reporting, complete-snapshot
+concurrency, and the atomic capture-off/privacy-revision transition. It does not
+authorize live capture or live window enumeration.
+
 `CaptureStatus` is a stable machine-readable contract, not just display text.
 It carries an unsigned 64-bit `Sequence`, `CaptureReasonCode`, and
 `CaptureErrorCode` in addition to state, timestamp, and optional localized
@@ -430,9 +436,13 @@ The inactive `WindowsCapturePrivacyProbe` can synchronously sample documented
 Windows 10 1809+ signals for session unlock, input desktop, RDP/remote control,
 Windows Presentation Mode, and storage headroom. API failure or ambiguity is
 isolated per signal and becomes Unknown while later signals continue sampling;
-application/window identity remains Unknown and no window title is read.
-Event-driven Windows signal monitoring, write-time revalidation, and App
-registration remain pending.
+application/window identity remains Unknown and no window title is read. A pure
+typed matcher now evaluates persisted application and window rule scopes
+independently and returns only a matched rule ID. Each observed identity and
+title is `Unknown`, known `Absent`, or `Present`; Unknown and malformed present
+identities fail closed when a rule requires them, while Absent is a conclusive
+non-match. Live identity acquisition, event-driven Windows signal monitoring,
+write-time revalidation, and App registration remain pending.
 Phase 1 activates the implemented native backend after platform privacy inputs
 and screen-capture capability are complete, then adds evidence-extraction
 interfaces under Capture.Interop. Capture options come from validated
@@ -638,6 +648,7 @@ conversations
 conversation_messages
 ai_provider_profiles
 app_settings
+capture_exclusion_rules
 schema_migrations
 ```
 
@@ -657,7 +668,7 @@ Persistence rules:
 
 ### 14.1 Current Persistence Slice
 
-The implemented persistence slice uses schema version 3. Version 1 contains
+The implemented persistence slice uses schema version 4. Version 1 contains
 `schema_migrations`, `timeline_entries`, `timeline_entry_apps`, and
 `timeline_entry_tags`; version 2 adds the singleton `app_settings` row while
 preserving existing timeline data. Version 3 adds evidence-retention,
@@ -665,20 +676,27 @@ sensitive-application exclusion, remote-session, screen-sharing, and privacy-
 revision fields. It retains only the version and acceptance time of version 1
 consent as stale metadata, not its covered revision or a complete snapshot of
 the old privacy choices. It forces capture off because that consent did not
-cover the new choices. The
-application completes the idempotent migrations and initializes settings before
-creating the main window. Every timeline write plus its ordered child rows
-commits in one SQLite transaction, and each settings update is written and read
-back in one transaction.
+cover the new choices. Version 4 adds an initially empty, ordered
+`capture_exclusion_rules` child table without changing capture state or privacy
+revision during migration. The application completes the idempotent migrations
+and initializes settings before creating the main window. Every timeline write
+plus its ordered child rows commits in one SQLite transaction. Settings writes
+use `BEGIN IMMEDIATE`, compare the complete expected snapshot, and atomically
+persist and read back the singleton settings row plus the complete ordered rule
+snapshot. An effective rule change also disables capture and advances the
+privacy revision exactly once in that transaction. New rules must begin at
+revision 1; changed or explicitly moved rules advance their own revision exactly
+once, and revisions cannot be rolled back or skipped.
 
 Manual entries are explicitly identified as user-authored. They do not invent
 capture evidence, model confidence, or an analysis version, and all editable
 fields carry user provenance timestamps. The WinUI timeline loads durable
 entries from this repository and supports create, edit, and delete; date-scoped
-results are searched and filtered in the ViewModel. The settings row persists
+results are searched and filtered in the ViewModel. The settings store persists
 theme, capture-enabled, cloud-analysis, consent version/timestamp/privacy
-revision, evidence-retention days, conservative exclusion/session choices, and
-the current privacy revision with database constraints. Capture evidence,
+revision, evidence-retention days, conservative exclusion/session choices, the
+current privacy revision, and typed ordered application/window rules with
+database constraints. Capture evidence,
 unprocessed intervals, analysis jobs, generated projections, and the remaining
 table groups in this section are still pending.
 
@@ -687,7 +705,8 @@ table groups in this section are still pending.
 The following are mandatory release requirements. The current build implements
 the persistent, versioned recording-consent gate and defaults capture and cloud
 analysis to off. Native capture and cloud providers remain unavailable. Schema
-version 3 stores manual timeline content and settings locally without
+version 4 stores manual timeline content, settings, and user-authored exclusion
+rules locally without
 application-level database encryption.
 
 - Recording is opt-in. Before the first capture, onboarding explains the data
@@ -703,8 +722,9 @@ application-level database encryption.
   until renewed consent is persisted. Pause/Stop remain available regardless of
   consent. Settings persist a 30-day conservative
   default plus user-selectable retention, sensitive-application exclusion,
-  remote-session pause, and screen-sharing pause choices. Full first-run
-  onboarding and user-authored application/window rule lists remain Phase 1 work.
+  remote-session pause, screen-sharing pause choices, and typed ordered
+  application/window rule lists. Full first-run onboarding and live
+  application/window identity monitoring remain Phase 1 work.
 - The current `pause_during_screen_sharing` storage name is retained for schema
   compatibility, but the Windows UI describes only Windows Presentation Mode.
   Windows has no public, universal signal for arbitrary third-party screen
@@ -932,15 +952,16 @@ the user explicitly enables a future telemetry feature.
 
 Phases are release gates, not a claim of strict implementation order. As of
 2026-07-16, the no-capture manual-timeline portions of Phases 2 and 3 plus
-schema v3, consent policy v2, and persistent retention/exclusion/session choices
-are implemented. Phase 1 also has Accepted ADR 0001, verified QiDayflow source
-provenance, the x64 C++20 C ABI v1 foundation, five native tests in Debug and
-Release, the managed adapter, the inactive runtime privacy coordinator, and the
-on-demand Windows privacy probe. The coordinator now includes cancellable-call
-hardening and sticky invalidation generations, but native target ownership and
-write-time persistence revalidation remain open activation gates. Live capture
-and managed-adapter runtime activation remain disabled, so no phase exit
-criterion is met.
+schema v4, consent policy v2, persistent retention/exclusion/session choices,
+and user-authored typed exclusion rules are implemented. Phase 1 also has
+Accepted ADRs 0001 and 0002, verified QiDayflow source provenance, the x64 C++20
+C ABI v1 foundation, five native tests in Debug and Release, the managed
+adapter, the inactive runtime privacy coordinator, the pure exclusion matcher,
+and the on-demand Windows privacy probe. The coordinator includes cancellable-
+call hardening and sticky invalidation generations, but live identity
+acquisition, native target ownership, and write-time persistence revalidation
+remain open activation gates. Live capture and managed-adapter runtime
+activation remain disabled, so no phase exit criterion is met.
 
 ### Phase 0: Foundation
 

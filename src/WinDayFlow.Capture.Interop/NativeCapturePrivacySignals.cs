@@ -16,7 +16,8 @@ public sealed record NativeCapturePrivacySignals(
     NativeCaptureConditionState PresentationMode,
     NativeCapturePolicyDecision ApplicationAllowed,
     NativeCapturePolicyDecision WindowAllowed,
-    NativeCapturePolicyDecision StorageAvailable)
+    NativeCapturePolicyDecision StorageAvailable,
+    NativeCaptureIdentitySnapshot? CaptureIdentity = null)
 {
     public NativeCapturePolicyDecision SessionUnlocked { get; } =
         ValidateDecision(SessionUnlocked, nameof(SessionUnlocked));
@@ -38,6 +39,9 @@ public sealed record NativeCapturePrivacySignals(
 
     public NativeCapturePolicyDecision StorageAvailable { get; } =
         ValidateDecision(StorageAvailable, nameof(StorageAvailable));
+
+    public NativeCaptureIdentitySnapshot CaptureIdentity { get; } =
+        CaptureIdentity ?? NativeCaptureIdentitySnapshot.Unknown;
 
     public static NativeCapturePrivacySignals FailClosed { get; } = new(
         NativeCapturePolicyDecision.Unknown,
@@ -99,12 +103,19 @@ public static class NativeCapturePrivacyPolicy
         var presentationAllowed = settings.CapturePrivacy.PauseDuringScreenSharing
             ? RequireInactive(signals.PresentationMode)
             : NativeCapturePolicyDecision.Allow;
-        var applicationAllowed = settings.CapturePrivacy.ExcludeSensitiveApplications
-            ? signals.ApplicationAllowed
-            : NativeCapturePolicyDecision.Allow;
-        var windowAllowed = settings.CapturePrivacy.ExcludeSensitiveApplications
-            ? signals.WindowAllowed
-            : NativeCapturePolicyDecision.Allow;
+        var exclusion = NativeCaptureExclusionRuleMatcher.Evaluate(
+            settings.CapturePrivacy.ExclusionRules,
+            signals.CaptureIdentity);
+        var applicationAllowed = CombineExclusionPolicies(
+            settings.CapturePrivacy.ExcludeSensitiveApplications,
+            signals.ApplicationAllowed,
+            exclusion.Application.HasEnabledRules,
+            exclusion.Application.Decision);
+        var windowAllowed = CombineExclusionPolicies(
+            settings.CapturePrivacy.ExcludeSensitiveApplications,
+            signals.WindowAllowed,
+            exclusion.Window.HasEnabledRules,
+            exclusion.Window.Decision);
 
         return new NativeCapturePrivacyContext(
             consentGranted,
@@ -134,5 +145,39 @@ public static class NativeCapturePrivacyPolicy
             NativeCaptureConditionState.Active => NativeCapturePolicyDecision.Block,
             _ => NativeCapturePolicyDecision.Unknown,
         };
+    }
+
+    private static NativeCapturePolicyDecision CombineExclusionPolicies(
+        bool includeBuiltInPolicy,
+        NativeCapturePolicyDecision builtInDecision,
+        bool includeUserRules,
+        NativeCapturePolicyDecision userRuleDecision)
+    {
+        var effectiveBuiltInDecision = includeBuiltInPolicy
+            ? builtInDecision
+            : NativeCapturePolicyDecision.Allow;
+        var effectiveUserRuleDecision = includeUserRules
+            ? userRuleDecision
+            : NativeCapturePolicyDecision.Allow;
+
+        return MostRestrictive(
+            effectiveBuiltInDecision,
+            effectiveUserRuleDecision);
+    }
+
+    private static NativeCapturePolicyDecision MostRestrictive(
+        NativeCapturePolicyDecision left,
+        NativeCapturePolicyDecision right)
+    {
+        if (left == NativeCapturePolicyDecision.Block
+            || right == NativeCapturePolicyDecision.Block)
+        {
+            return NativeCapturePolicyDecision.Block;
+        }
+
+        return left == NativeCapturePolicyDecision.Unknown
+            || right == NativeCapturePolicyDecision.Unknown
+                ? NativeCapturePolicyDecision.Unknown
+                : NativeCapturePolicyDecision.Allow;
     }
 }

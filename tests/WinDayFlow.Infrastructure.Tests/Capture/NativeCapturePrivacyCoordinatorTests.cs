@@ -498,7 +498,8 @@ public sealed class NativeCapturePrivacyCoordinatorTests
             presentationMode ?? source.PresentationMode,
             source.ApplicationAllowed,
             source.WindowAllowed,
-            source.StorageAvailable);
+            source.StorageAvailable,
+            source.CaptureIdentity);
     }
 
     private sealed class TestPrivacyTarget : INativeCapturePrivacyTarget
@@ -578,7 +579,8 @@ public sealed class NativeCapturePrivacyCoordinatorTests
         }
 
         public async Task SaveAsync(
-            AppSettings settings,
+            AppSettings expected,
+            AppSettings proposed,
             CancellationToken cancellationToken = default)
         {
             if (Interlocked.Exchange(ref _blockNextSave, 0) != 0)
@@ -587,7 +589,12 @@ public sealed class NativeCapturePrivacyCoordinatorTests
                 await _releaseSave.Task.WaitAsync(cancellationToken);
             }
 
-            _settings = settings;
+            if (_settings != expected)
+            {
+                throw new AppSettingsConcurrencyException();
+            }
+
+            _settings = proposed;
         }
 
         public void BlockNextSave()

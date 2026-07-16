@@ -136,6 +136,176 @@ public sealed class NativeCapturePrivacyPolicyTests
             NativeCapturePolicyDecision.Allow));
     }
 
+    [Fact]
+    public void UserApplicationRuleBlocksWhenBuiltInProtectionIsDisabled()
+    {
+        var rule = CaptureExclusionRule.Create(
+            Guid.NewGuid(),
+            "Excluded editor",
+            enabled: true,
+            CaptureExclusionRuleScope.Application,
+            ApplicationIdentityKind.ExecutableName,
+            "editor.exe");
+        var privacy = CreatePrivacySettings(
+            excludeSensitiveApplications: false,
+            new CaptureExclusionRuleSet([rule]));
+        var signals = CopySignals(
+            CreateAllowedSignals(),
+            captureIdentity: new NativeCaptureIdentitySnapshot(
+                executableName: "EDITOR.EXE",
+                packageFamilyName: null,
+                publisherCertificateSha256: null,
+                windowTitle: null));
+
+        var context = NativeCapturePrivacyPolicy.Compose(
+            CreateEnabledSettings(privacy),
+            signals,
+            runtimePolicyRevision: 10);
+
+        Assert.Equal(
+            NativeCapturePolicyDecision.Block,
+            context.ApplicationAllowed);
+        Assert.Equal(
+            NativeCapturePolicyDecision.Allow,
+            context.WindowAllowed);
+    }
+
+    [Fact]
+    public void UnknownUserWindowRuleRemainsFailClosedWhenBuiltInProtectionIsDisabled()
+    {
+        var rule = CaptureExclusionRule.Create(
+            Guid.NewGuid(),
+            "Private editor window",
+            enabled: true,
+            CaptureExclusionRuleScope.Window,
+            ApplicationIdentityKind.ExecutableName,
+            "editor.exe",
+            WindowTitleMatchKind.Contains,
+            "private");
+        var privacy = CreatePrivacySettings(
+            excludeSensitiveApplications: false,
+            new CaptureExclusionRuleSet([rule]));
+        var signals = CopySignals(
+            CreateAllowedSignals(),
+            captureIdentity: NativeCaptureIdentitySnapshot.Unknown);
+
+        var context = NativeCapturePrivacyPolicy.Compose(
+            CreateEnabledSettings(privacy),
+            signals,
+            runtimePolicyRevision: 11);
+
+        Assert.Equal(
+            NativeCapturePolicyDecision.Allow,
+            context.ApplicationAllowed);
+        Assert.Equal(
+            NativeCapturePolicyDecision.Unknown,
+            context.WindowAllowed);
+    }
+
+    [Fact]
+    public void BuiltInBlockStillAppliesWhenUserRulesDoNotMatchAndProtectionIsEnabled()
+    {
+        var rule = CaptureExclusionRule.Create(
+            Guid.NewGuid(),
+            "Different editor",
+            enabled: true,
+            CaptureExclusionRuleScope.Application,
+            ApplicationIdentityKind.ExecutableName,
+            "different.exe");
+        var privacy = CreatePrivacySettings(
+            excludeSensitiveApplications: true,
+            new CaptureExclusionRuleSet([rule]));
+        var signals = CopySignals(
+            CreateAllowedSignals(),
+            applicationAllowed: NativeCapturePolicyDecision.Block,
+            captureIdentity: new NativeCaptureIdentitySnapshot(
+                executableName: "editor.exe",
+                packageFamilyName: null,
+                publisherCertificateSha256: null,
+                windowTitle: null));
+
+        var context = NativeCapturePrivacyPolicy.Compose(
+            CreateEnabledSettings(privacy),
+            signals,
+            runtimePolicyRevision: 12);
+
+        Assert.Equal(
+            NativeCapturePolicyDecision.Block,
+            context.ApplicationAllowed);
+    }
+
+    [Fact]
+    public void DisabledBuiltInProtectionBypassesSignalsWhenNoUserRulesExist()
+    {
+        var privacy = CreatePrivacySettings(
+            excludeSensitiveApplications: false,
+            CaptureExclusionRuleSet.Empty);
+        var signals = CopySignals(
+            CreateAllowedSignals(),
+            applicationAllowed: NativeCapturePolicyDecision.Block,
+            windowAllowed: NativeCapturePolicyDecision.Unknown,
+            captureIdentity: NativeCaptureIdentitySnapshot.Unknown);
+
+        var context = NativeCapturePrivacyPolicy.Compose(
+            CreateEnabledSettings(privacy),
+            signals,
+            runtimePolicyRevision: 13);
+
+        Assert.Equal(
+            NativeCapturePolicyDecision.Allow,
+            context.ApplicationAllowed);
+        Assert.Equal(
+            NativeCapturePolicyDecision.Allow,
+            context.WindowAllowed);
+    }
+
+    [Fact]
+    public void UserApplicationAndWindowRuleDecisionsRemainIndependentInPolicy()
+    {
+        var windowRuleId = Guid.NewGuid();
+        var rules = new CaptureExclusionRuleSet(
+        [
+            CaptureExclusionRule.Create(
+                Guid.NewGuid(),
+                "Packaged application",
+                enabled: true,
+                CaptureExclusionRuleScope.Application,
+                ApplicationIdentityKind.PackageFamilyName,
+                "Contoso.App_123456789abcd"),
+            CaptureExclusionRule.Create(
+                windowRuleId,
+                "Private editor window",
+                enabled: true,
+                CaptureExclusionRuleScope.Window,
+                ApplicationIdentityKind.ExecutableName,
+                "editor.exe",
+                WindowTitleMatchKind.Contains,
+                "private"),
+        ]);
+        var privacy = CreatePrivacySettings(
+            excludeSensitiveApplications: false,
+            rules);
+        var signals = CopySignals(
+            CreateAllowedSignals(),
+            captureIdentity: new NativeCaptureIdentitySnapshot(
+                executableName: "editor.exe",
+                packageFamilyName: null,
+                publisherCertificateSha256: null,
+                windowTitle: "PRIVATE document"));
+
+        var context = NativeCapturePrivacyPolicy.Compose(
+            CreateEnabledSettings(privacy),
+            signals,
+            runtimePolicyRevision: 14);
+
+        Assert.Equal(
+            NativeCapturePolicyDecision.Unknown,
+            context.ApplicationAllowed);
+        Assert.Equal(
+            NativeCapturePolicyDecision.Block,
+            context.WindowAllowed);
+    }
+
     private static AppSettings CreateEnabledSettings(CapturePrivacySettings privacy)
     {
         return new AppSettings(
@@ -149,6 +319,19 @@ public sealed class NativeCapturePrivacyPolicyTests
             privacy);
     }
 
+    private static CapturePrivacySettings CreatePrivacySettings(
+        bool excludeSensitiveApplications,
+        CaptureExclusionRuleSet exclusionRules)
+    {
+        return new CapturePrivacySettings(
+            EvidenceRetentionDays: 30,
+            excludeSensitiveApplications,
+            PauseInRemoteSessions: true,
+            PauseDuringScreenSharing: true,
+            Revision: 7,
+            exclusionRules);
+    }
+
     private static NativeCapturePrivacySignals CreateAllowedSignals()
     {
         return new NativeCapturePrivacySignals(
@@ -159,5 +342,22 @@ public sealed class NativeCapturePrivacyPolicyTests
             NativeCapturePolicyDecision.Allow,
             NativeCapturePolicyDecision.Allow,
             NativeCapturePolicyDecision.Allow);
+    }
+
+    private static NativeCapturePrivacySignals CopySignals(
+        NativeCapturePrivacySignals source,
+        NativeCapturePolicyDecision? applicationAllowed = null,
+        NativeCapturePolicyDecision? windowAllowed = null,
+        NativeCaptureIdentitySnapshot? captureIdentity = null)
+    {
+        return new NativeCapturePrivacySignals(
+            source.SessionUnlocked,
+            source.SecureDesktopClear,
+            source.RemoteSession,
+            source.PresentationMode,
+            applicationAllowed ?? source.ApplicationAllowed,
+            windowAllowed ?? source.WindowAllowed,
+            source.StorageAvailable,
+            captureIdentity ?? source.CaptureIdentity);
     }
 }

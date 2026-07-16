@@ -442,7 +442,8 @@ public sealed class AppSettingsServiceTests
         }
 
         public async Task SaveAsync(
-            AppSettings settings,
+            AppSettings expected,
+            AppSettings proposed,
             CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -467,8 +468,13 @@ public sealed class AppSettingsServiceTests
                     throw saveException;
                 }
 
-                _settings = settings;
-                SavedSettings.Add(settings);
+                if (_settings != expected)
+                {
+                    throw new AppSettingsConcurrencyException();
+                }
+
+                _settings = proposed;
+                SavedSettings.Add(proposed);
             }
             finally
             {

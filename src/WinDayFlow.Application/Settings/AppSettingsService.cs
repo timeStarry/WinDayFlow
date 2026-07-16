@@ -56,6 +56,7 @@ public sealed class AppSettingsService : IDisposable
                 await ApplySnapshotAsync(
                         previous,
                         current,
+                        loaded,
                         saveRequired: current != loaded,
                         () => settingsApplied = true,
                         cancellationToken)
@@ -170,6 +171,153 @@ public sealed class AppSettingsService : IDisposable
             cancellationToken);
     }
 
+    public async Task<CaptureExclusionRule> AddCaptureExclusionRuleAsync(
+        CaptureExclusionRule rule,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(rule);
+        if (rule.Revision != 1)
+        {
+            throw new ArgumentException(
+                "A new capture exclusion rule must start at revision one.",
+                nameof(rule));
+        }
+
+        CaptureExclusionRule? added = null;
+        await UpdateAsync(
+                current =>
+                {
+                    added = rule;
+                    return ChangeExclusionRules(
+                        current,
+                        current.CapturePrivacy.ExclusionRules.Add(rule));
+                },
+                cancellationToken)
+            .ConfigureAwait(false);
+        return added!;
+    }
+
+    public async Task<CaptureExclusionRule> UpdateCaptureExclusionRuleAsync(
+        Guid id,
+        long expectedRevision,
+        string name,
+        CaptureExclusionRuleScope scope,
+        ApplicationIdentityKind applicationIdentityKind,
+        string identityValue,
+        WindowTitleMatchKind? windowTitleMatchKind,
+        string? pattern,
+        CancellationToken cancellationToken = default)
+    {
+        CaptureExclusionRule? updated = null;
+        await UpdateAsync(
+                current =>
+                {
+                    var (index, rule) = FindRule(
+                        current.CapturePrivacy.ExclusionRules,
+                        id,
+                        expectedRevision);
+                    updated = rule.Change(
+                        name,
+                        scope,
+                        applicationIdentityKind,
+                        identityValue,
+                        windowTitleMatchKind,
+                        pattern);
+                    if (updated == rule)
+                    {
+                        return current;
+                    }
+
+                    return ChangeExclusionRules(
+                        current,
+                        current.CapturePrivacy.ExclusionRules.Replace(index, updated));
+                },
+                cancellationToken)
+            .ConfigureAwait(false);
+        return updated!;
+    }
+
+    public async Task<CaptureExclusionRule> SetCaptureExclusionRuleEnabledAsync(
+        Guid id,
+        long expectedRevision,
+        bool enabled,
+        CancellationToken cancellationToken = default)
+    {
+        CaptureExclusionRule? updated = null;
+        await UpdateAsync(
+                current =>
+                {
+                    var (index, rule) = FindRule(
+                        current.CapturePrivacy.ExclusionRules,
+                        id,
+                        expectedRevision);
+                    updated = rule.ChangeEnabled(enabled);
+                    if (updated == rule)
+                    {
+                        return current;
+                    }
+
+                    return ChangeExclusionRules(
+                        current,
+                        current.CapturePrivacy.ExclusionRules.Replace(index, updated));
+                },
+                cancellationToken)
+            .ConfigureAwait(false);
+        return updated!;
+    }
+
+    public async Task<CaptureExclusionRule> MoveCaptureExclusionRuleAsync(
+        Guid id,
+        long expectedRevision,
+        int newIndex,
+        CancellationToken cancellationToken = default)
+    {
+        CaptureExclusionRule? moved = null;
+        await UpdateAsync(
+                current =>
+                {
+                    var rules = current.CapturePrivacy.ExclusionRules;
+                    if (newIndex < 0 || newIndex >= rules.Count)
+                    {
+                        throw new ArgumentOutOfRangeException(
+                            nameof(newIndex),
+                            newIndex,
+                            "The capture exclusion rule position is outside the rule set.");
+                    }
+
+                    var (oldIndex, rule) = FindRule(rules, id, expectedRevision);
+                    if (oldIndex == newIndex)
+                    {
+                        moved = rule;
+                        return current;
+                    }
+
+                    moved = rule.AdvanceRevision();
+                    return ChangeExclusionRules(
+                        current,
+                        rules.Move(oldIndex, newIndex, moved));
+                },
+                cancellationToken)
+            .ConfigureAwait(false);
+        return moved!;
+    }
+
+    public async Task DeleteCaptureExclusionRuleAsync(
+        Guid id,
+        long expectedRevision,
+        CancellationToken cancellationToken = default)
+    {
+        await UpdateAsync(
+                current =>
+                {
+                    var rules = current.CapturePrivacy.ExclusionRules;
+                    var (index, _) = FindRule(rules, id, expectedRevision);
+                    return ChangeExclusionRules(current, rules.RemoveAt(index));
+                },
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
     public void Dispose()
     {
         if (_disposed)
@@ -211,6 +359,7 @@ public sealed class AppSettingsService : IDisposable
                 await ApplySnapshotAsync(
                         previous,
                         current,
+                        previous,
                         saveRequired: true,
                         () => settingsApplied = true,
                         cancellationToken)
@@ -233,6 +382,7 @@ public sealed class AppSettingsService : IDisposable
     private async Task ApplySnapshotAsync(
         AppSettings previous,
         AppSettings current,
+        AppSettings repositoryExpected,
         bool saveRequired,
         Action markSettingsApplied,
         CancellationToken cancellationToken)
@@ -247,7 +397,7 @@ public sealed class AppSettingsService : IDisposable
             if (saveRequired)
             {
                 await _repository
-                    .SaveAsync(current, cancellationToken)
+                    .SaveAsync(repositoryExpected, current, cancellationToken)
                     .ConfigureAwait(false);
             }
 
@@ -338,6 +488,63 @@ public sealed class AppSettingsService : IDisposable
         return settings.RecordingConsent is { } consent
             && consent.PolicyVersion == CurrentRecordingConsentVersion
             && consent.PrivacyRevision == settings.CapturePrivacy.Revision;
+    }
+
+    private static AppSettings ChangeExclusionRules(
+        AppSettings current,
+        CaptureExclusionRuleSet rules)
+    {
+        var privacy = current.CapturePrivacy.ChangeRules(rules);
+        if (privacy == current.CapturePrivacy)
+        {
+            return current;
+        }
+
+        return new AppSettings(
+            current.Theme,
+            CaptureEnabled: privacy.Revision == current.CapturePrivacy.Revision
+                && current.CaptureEnabled,
+            current.CloudAnalysisEnabled,
+            current.RecordingConsent,
+            privacy);
+    }
+
+    private static (int Index, CaptureExclusionRule Rule) FindRule(
+        CaptureExclusionRuleSet rules,
+        Guid id,
+        long expectedRevision)
+    {
+        if (id == Guid.Empty)
+        {
+            throw new ArgumentException(
+                "A capture exclusion rule identifier cannot be empty.",
+                nameof(id));
+        }
+
+        if (expectedRevision <= 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(expectedRevision),
+                expectedRevision,
+                "The expected capture exclusion rule revision must be positive.");
+        }
+
+        var index = rules.IndexOf(id);
+        if (index < 0)
+        {
+            throw new CaptureExclusionRuleNotFoundException(id);
+        }
+
+        var rule = rules[index];
+        if (rule.Revision != expectedRevision)
+        {
+            throw new CaptureExclusionRuleRevisionConflictException(
+                id,
+                expectedRevision,
+                rule.Revision);
+        }
+
+        return (index, rule);
     }
 
     private void OnSettingsChanged(AppSettings previous, AppSettings current)

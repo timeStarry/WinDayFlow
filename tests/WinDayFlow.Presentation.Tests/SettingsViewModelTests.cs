@@ -1,3 +1,4 @@
+using System.Collections.Specialized;
 using System.ComponentModel;
 using WinDayFlow.Application.Capture;
 using WinDayFlow.Application.Settings;
@@ -201,6 +202,173 @@ public sealed class SettingsViewModelTests
         Assert.True(settings.HasValidRecordingConsent);
         Assert.Empty(repository.SavedSettings);
         Assert.Equal("无法更改录制状态，请稍后重试。", viewModel.ErrorMessage);
+    }
+
+    [Fact]
+    public async Task ExclusionRuleCrudRefreshesOrderedProjectionAndNotices()
+    {
+        var repository = new TestSettingsRepository();
+        using var settings = new AppSettingsService(repository);
+        await settings.InitializeAsync();
+        var capture = new TestCaptureService(CaptureState.Stopped);
+        using var viewModel = new SettingsViewModel(settings, capture);
+
+        Assert.Empty(viewModel.ExclusionRules);
+        Assert.False(viewModel.HasExclusionRules);
+        Assert.False(viewModel.IsExclusionEngineAvailable);
+        Assert.Contains("尚未接入录制监视器", viewModel.ExclusionEngineStatusText);
+
+        Assert.True(await viewModel.AddExclusionRuleAsync(
+            "密码管理器",
+            enabled: true,
+            CaptureExclusionRuleScope.Application,
+            ApplicationIdentityKind.ExecutableName,
+            "KeePassXC.exe",
+            windowTitleMatchKind: null,
+            pattern: null));
+        var applicationRule = Assert.Single(viewModel.ExclusionRules);
+        Assert.Equal("密码管理器", applicationRule.Name);
+        Assert.Equal("规则已启用", applicationRule.StatusText);
+        Assert.Contains("KeePassXC.exe", applicationRule.ConfiguredMatchSummaryText);
+        Assert.Equal("排除规则已添加。", viewModel.RuleMutationNoticeText);
+
+        Assert.True(await viewModel.AddExclusionRuleAsync(
+            "私密浏览",
+            enabled: false,
+            CaptureExclusionRuleScope.Window,
+            ApplicationIdentityKind.ExecutableName,
+            "browser.exe",
+            WindowTitleMatchKind.Contains,
+            "Private"));
+        var windowRule = viewModel.ExclusionRules[1];
+        Assert.Equal("2 条规则 · 1 条已启用", viewModel.ExclusionRuleSummaryText);
+        Assert.NotEqual(applicationRule.ToggleAutomationId, windowRule.ToggleAutomationId);
+        Assert.NotEqual(applicationRule.EditAutomationId, windowRule.EditAutomationId);
+        Assert.True(windowRule.CanMoveUp);
+        Assert.False(windowRule.CanMoveDown);
+
+        Assert.True(await viewModel.UpdateExclusionRuleAsync(
+            windowRule,
+            "浏览器私密窗口",
+            CaptureExclusionRuleScope.Window,
+            ApplicationIdentityKind.ExecutableName,
+            "browser.exe",
+            WindowTitleMatchKind.StartsWith,
+            "Private"));
+        Assert.Equal("浏览器私密窗口", windowRule.Name);
+        Assert.Contains("开头匹配", windowRule.ConfiguredMatchSummaryText);
+        Assert.Equal("排除规则已保存。", viewModel.RuleMutationNoticeText);
+
+        Assert.True(await viewModel.SetExclusionRuleEnabledAsync(windowRule, enabled: true));
+        Assert.True(windowRule.IsEnabled);
+        Assert.Equal("2 条规则 · 2 条已启用", viewModel.ExclusionRuleSummaryText);
+
+        Assert.True(await viewModel.MoveExclusionRuleAsync(windowRule, offset: -1));
+        Assert.Same(windowRule, viewModel.ExclusionRules[0]);
+        Assert.False(windowRule.CanMoveUp);
+        Assert.True(windowRule.CanMoveDown);
+
+        Assert.True(await viewModel.DeleteExclusionRuleAsync(applicationRule));
+        Assert.Same(windowRule, Assert.Single(viewModel.ExclusionRules));
+        Assert.Equal("排除规则已删除。", viewModel.RuleMutationNoticeText);
+        viewModel.ClearRuleMutationNotice();
+        Assert.False(viewModel.HasRuleMutationNotice);
+    }
+
+    [Fact]
+    public async Task EffectiveExclusionRuleChangePersistsClosedStateBeforeStoppingCapture()
+    {
+        var repository = new TestSettingsRepository(
+            new AppSettings(
+                AppThemePreference.System,
+                CaptureEnabled: true,
+                CloudAnalysisEnabled: false,
+                CreateConsent()));
+        using var settings = new AppSettingsService(repository);
+        await settings.InitializeAsync();
+        var capture = new TestCaptureService(CaptureState.Recording)
+        {
+            StopOperation = _ =>
+            {
+                Assert.False(settings.Current.CaptureEnabled);
+                Assert.False(settings.HasValidRecordingConsent);
+                Assert.Single(settings.Current.CapturePrivacy.ExclusionRules.Rules);
+                return Task.CompletedTask;
+            },
+        };
+        using var viewModel = new SettingsViewModel(settings, capture);
+
+        Assert.True(await viewModel.AddExclusionRuleAsync(
+            "密码管理器",
+            enabled: true,
+            CaptureExclusionRuleScope.Application,
+            ApplicationIdentityKind.ExecutableName,
+            "KeePassXC.exe",
+            windowTitleMatchKind: null,
+            pattern: null));
+
+        Assert.Equal(1, capture.StopCount);
+        Assert.Equal(CaptureState.Stopped, capture.CurrentStatus.State);
+        Assert.False(viewModel.CaptureEnabled);
+        Assert.Equal(2, viewModel.CapturePrivacyRevision);
+    }
+
+    [Fact]
+    public async Task DisabledExclusionRuleDraftDoesNotStopCaptureOrInvalidateConsent()
+    {
+        var repository = new TestSettingsRepository(
+            new AppSettings(
+                AppThemePreference.System,
+                CaptureEnabled: true,
+                CloudAnalysisEnabled: false,
+                CreateConsent()));
+        using var settings = new AppSettingsService(repository);
+        await settings.InitializeAsync();
+        var capture = new TestCaptureService(CaptureState.Recording);
+        using var viewModel = new SettingsViewModel(settings, capture);
+
+        Assert.True(await viewModel.AddExclusionRuleAsync(
+            "稍后启用",
+            enabled: false,
+            CaptureExclusionRuleScope.Application,
+            ApplicationIdentityKind.ExecutableName,
+            "draft.exe",
+            windowTitleMatchKind: null,
+            pattern: null));
+
+        Assert.Equal(0, capture.StopCount);
+        Assert.True(viewModel.CaptureEnabled);
+        Assert.True(viewModel.HasValidRecordingConsent);
+        Assert.Equal(1, viewModel.CapturePrivacyRevision);
+        Assert.False(Assert.Single(viewModel.ExclusionRules).IsEnabled);
+    }
+
+    [Fact]
+    public async Task ExclusionRuleSaveFailureLeavesProjectionUnchanged()
+    {
+        var repository = new TestSettingsRepository
+        {
+            SaveException = new InvalidOperationException("Sensitive storage detail."),
+        };
+        using var settings = new AppSettingsService(repository);
+        await settings.InitializeAsync();
+        var capture = new TestCaptureService(CaptureState.Stopped);
+        using var viewModel = new SettingsViewModel(settings, capture);
+
+        Assert.False(await viewModel.AddExclusionRuleAsync(
+            "密码管理器",
+            enabled: true,
+            CaptureExclusionRuleScope.Application,
+            ApplicationIdentityKind.ExecutableName,
+            "KeePassXC.exe",
+            windowTitleMatchKind: null,
+            pattern: null));
+
+        Assert.Empty(viewModel.ExclusionRules);
+        Assert.False(viewModel.HasExclusionRules);
+        Assert.False(viewModel.HasRuleMutationNotice);
+        Assert.Equal("无法更改排除规则，请稍后重试。", viewModel.ErrorMessage);
+        Assert.Empty(repository.SavedSettings);
     }
 
     [Fact]
@@ -542,6 +710,75 @@ public sealed class SettingsViewModelTests
     }
 
     [Fact]
+    public async Task DisposeCancelsInFlightExclusionRuleWithoutPublishingProjectionOrNotice()
+    {
+        var repository = new TestSettingsRepository
+        {
+            WaitForFirstSaveCancellation = true,
+        };
+        using var settings = new AppSettingsService(repository);
+        await settings.InitializeAsync();
+        var capture = new TestCaptureService(CaptureState.Stopped);
+        var viewModel = new SettingsViewModel(settings, capture);
+        var collectionChanges = 0;
+        ((INotifyCollectionChanged)viewModel.ExclusionRules).CollectionChanged +=
+            (_, _) => collectionChanges++;
+
+        var mutation = viewModel.AddExclusionRuleAsync(
+            "密码管理器",
+            enabled: true,
+            CaptureExclusionRuleScope.Application,
+            ApplicationIdentityKind.ExecutableName,
+            "KeePassXC.exe",
+            windowTitleMatchKind: null,
+            pattern: null);
+        await repository.FirstSaveStarted.WaitAsync(TimeSpan.FromSeconds(5));
+
+        viewModel.Dispose();
+
+        Assert.False(await mutation);
+        Assert.Empty(viewModel.ExclusionRules);
+        Assert.False(viewModel.HasRuleMutationNotice);
+        Assert.Equal(0, collectionChanges);
+        Assert.Empty(repository.SavedSettings);
+    }
+
+    [Fact]
+    public async Task DisposedExclusionRuleMutationPreservesProjectionAndExistingNotice()
+    {
+        var repository = new TestSettingsRepository();
+        using var settings = new AppSettingsService(repository);
+        await settings.InitializeAsync();
+        var capture = new TestCaptureService(CaptureState.Stopped);
+        var viewModel = new SettingsViewModel(settings, capture);
+
+        Assert.True(await viewModel.AddExclusionRuleAsync(
+            "稍后启用",
+            enabled: false,
+            CaptureExclusionRuleScope.Application,
+            ApplicationIdentityKind.ExecutableName,
+            "draft.exe",
+            windowTitleMatchKind: null,
+            pattern: null));
+        var item = Assert.Single(viewModel.ExclusionRules);
+        var notice = viewModel.RuleMutationNoticeText;
+        var changedProperties = ObserveChanges(viewModel);
+        var collectionChanges = 0;
+        ((INotifyCollectionChanged)viewModel.ExclusionRules).CollectionChanged +=
+            (_, _) => collectionChanges++;
+
+        viewModel.Dispose();
+        changedProperties.Clear();
+
+        Assert.False(await viewModel.DeleteExclusionRuleAsync(item));
+        Assert.Same(item, Assert.Single(viewModel.ExclusionRules));
+        Assert.Equal(notice, viewModel.RuleMutationNoticeText);
+        Assert.Empty(changedProperties);
+        Assert.Equal(0, collectionChanges);
+        Assert.Single(repository.SavedSettings);
+    }
+
+    [Fact]
     public async Task DisposeDropsCaptureUpdateAlreadyQueuedForUiDispatch()
     {
         var repository = new TestSettingsRepository();
@@ -624,7 +861,8 @@ public sealed class SettingsViewModelTests
         }
 
         public async Task SaveAsync(
-            AppSettings settings,
+            AppSettings expected,
+            AppSettings proposed,
             CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -649,8 +887,13 @@ public sealed class SettingsViewModelTests
             }
 
             cancellationToken.ThrowIfCancellationRequested();
-            _settings = settings;
-            SavedSettings.Add(settings);
+            if (_settings != expected)
+            {
+                throw new AppSettingsConcurrencyException();
+            }
+
+            _settings = proposed;
+            SavedSettings.Add(proposed);
         }
 
         public void ReleaseFirstSave()

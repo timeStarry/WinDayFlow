@@ -572,11 +572,17 @@ public sealed class ConsentGatedCaptureServiceTests
         }
 
         public Task SaveAsync(
-            AppSettings settings,
+            AppSettings expected,
+            AppSettings proposed,
             CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            _settings = settings;
+            if (_settings != expected)
+            {
+                throw new AppSettingsConcurrencyException();
+            }
+
+            _settings = proposed;
             return Task.CompletedTask;
         }
     }

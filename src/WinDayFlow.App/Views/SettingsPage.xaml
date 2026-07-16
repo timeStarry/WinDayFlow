@@ -1,18 +1,22 @@
 <Page
     x:Class="WinDayFlow.App.Views.SettingsPage"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
-    <ScrollViewer
-        HorizontalScrollBarVisibility="Disabled"
-        HorizontalScrollMode="Disabled"
-        VerticalScrollBarVisibility="Auto">
-        <Grid Padding="{StaticResource PagePadding}">
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:controls="using:WinDayFlow.App.Controls"
+    xmlns:presentation="using:WinDayFlow.Presentation.Settings">
+    <Grid>
+        <ScrollViewer
+            Padding="{StaticResource PagePadding}"
+            HorizontalScrollBarVisibility="Disabled"
+            HorizontalScrollMode="Disabled"
+            VerticalScrollBarVisibility="Auto">
             <StackPanel
                 MaxWidth="{StaticResource SettingsContentMaxWidth}"
                 HorizontalAlignment="Center"
                 Spacing="28">
                 <InfoBar
                     x:Name="SettingsErrorInfoBar"
+                    AutomationProperties.LiveSetting="Assertive"
                     IsClosable="False"
                     Severity="Error"
                     Title="无法完成设置操作" />
@@ -244,7 +248,7 @@
                                 <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}" Text="敏感应用保护" />
                                 <TextBlock
                                     Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                    Text="识别到身份验证、密码、财务、健康或私密浏览上下文时暂停。"
+                                    Text="录制组件接入后，识别到身份验证、密码、财务、健康或私密浏览上下文时将暂停。"
                                     TextWrapping="Wrap" />
                             </StackPanel>
                             <ToggleSwitch
@@ -259,6 +263,219 @@
                                 OffContent="关闭"
                                 OnContent="排除"
                                 Toggled="OnPrivacyToggleChanged" />
+                        </Grid>
+                    </Border>
+
+                    <Border Style="{StaticResource SettingsGroupBorderStyle}">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+
+                            <Grid
+                                x:Name="ExclusionRulesHeaderLayout"
+                                Padding="20"
+                                ColumnSpacing="24">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                </Grid.RowDefinitions>
+                                <StackPanel VerticalAlignment="Center" Spacing="3">
+                                    <TextBlock
+                                        Style="{StaticResource BodyStrongTextBlockStyle}"
+                                        Text="应用和窗口排除" />
+                                    <TextBlock
+                                        x:Name="ExclusionRuleSummaryTextBlock"
+                                        AutomationProperties.LiveSetting="Polite"
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Text="没有自定义规则"
+                                        TextWrapping="Wrap" />
+                                    <TextBlock
+                                        x:Name="ExclusionRuleAvailabilityTextBlock"
+                                        Style="{StaticResource MetadataTextStyle}"
+                                        Text="规则已保存到本机，尚未接入录制监视器；当前不会用于录制。"
+                                        TextWrapping="Wrap" />
+                                </StackPanel>
+                                <Button
+                                    x:Name="AddExclusionRuleButton"
+                                    Grid.Column="1"
+                                    Click="OnAddExclusionRule"
+                                    AutomationProperties.AutomationId="AddExclusionRuleButton"
+                                    AutomationProperties.Name="添加应用或窗口排除规则"
+                                    IsEnabled="{x:Bind ViewModel.CanAddExclusionRule, Mode=OneWay}"
+                                    Style="{StaticResource AccentButtonStyle}"
+                                    ToolTipService.ToolTip="添加排除规则">
+                                    <StackPanel Orientation="Horizontal" Spacing="8">
+                                        <SymbolIcon Symbol="Add" />
+                                        <TextBlock Text="添加规则" />
+                                    </StackPanel>
+                                </Button>
+                            </Grid>
+
+                            <InfoBar
+                                x:Name="ExclusionRuleMutationInfoBar"
+                                Grid.Row="1"
+                                Margin="20,0,20,16"
+                                AutomationProperties.LiveSetting="Polite"
+                                Closed="OnExclusionRuleMutationInfoBarClosed"
+                                IsOpen="False"
+                                Severity="Success"
+                                Title="排除规则已更新" />
+
+                            <Border
+                                Grid.Row="2"
+                                BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}"
+                                BorderThickness="0,1,0,0">
+                                <Grid>
+                                    <controls:EmptyStateControl
+                                        x:Name="ExclusionRuleEmptyState"
+                                        Margin="20,32"
+                                        Description="添加规则不会开启录制；录制组件接入后，启用的规则才会阻止匹配内容。"
+                                        Icon="BlockContact"
+                                        Title="尚未添加自定义排除规则" />
+
+                                    <ListView
+                                        x:Name="ExclusionRuleList"
+                                        AutomationProperties.AutomationId="ExclusionRuleList"
+                                        AutomationProperties.Name="应用和窗口排除规则"
+                                        IsItemClickEnabled="False"
+                                        IsEnabled="{x:Bind ViewModel.CanChangeExclusionRules, Mode=OneWay}"
+                                        ItemsSource="{x:Bind ViewModel.ExclusionRules, Mode=OneWay}"
+                                        ScrollViewer.VerticalScrollBarVisibility="Disabled"
+                                        ScrollViewer.VerticalScrollMode="Disabled"
+                                        SelectionMode="None">
+                                    <ListView.ItemContainerStyle>
+                                        <Style BasedOn="{StaticResource DefaultListViewItemStyle}" TargetType="ListViewItem">
+                                            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                                            <Setter Property="IsTabStop" Value="False" />
+                                            <Setter Property="Padding" Value="0" />
+                                        </Style>
+                                    </ListView.ItemContainerStyle>
+                                    <ListView.ItemTemplate>
+                                        <DataTemplate x:DataType="presentation:ExclusionRuleItemViewModel">
+                                            <ContentControl
+                                                x:Name="ExclusionRuleRowRoot"
+                                                HorizontalContentAlignment="Stretch"
+                                                IsTabStop="False"
+                                                Loaded="OnExclusionRuleRowLoaded">
+                                                <Grid
+                                                    x:Name="ExclusionRuleRowGrid"
+                                                    Padding="16"
+                                                    ColumnSpacing="8">
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="*" />
+                                                        <ColumnDefinition Width="Auto" />
+                                                    </Grid.ColumnDefinitions>
+                                                    <Grid.RowDefinitions>
+                                                        <RowDefinition Height="Auto" />
+                                                        <RowDefinition Height="Auto" />
+                                                    </Grid.RowDefinitions>
+                                                    <StackPanel x:Name="ExclusionRuleContentStack" Spacing="3">
+                                                        <TextBlock
+                                                            FontWeight="SemiBold"
+                                                            Text="{x:Bind Name, Mode=OneWay}"
+                                                            TextTrimming="CharacterEllipsis" />
+                                                        <TextBlock
+                                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                                            Text="{x:Bind ConfiguredMatchSummaryText, Mode=OneWay}"
+                                                            TextTrimming="CharacterEllipsis"
+                                                            TextWrapping="Wrap" />
+                                                        <TextBlock
+                                                            Style="{StaticResource MetadataTextStyle}"
+                                                            Text="{x:Bind StatusText, Mode=OneWay}" />
+                                                    </StackPanel>
+                                                    <Grid
+                                                        x:Name="ExclusionRuleActionPanel"
+                                                        Grid.Column="1"
+                                                        HorizontalAlignment="Right"
+                                                        VerticalAlignment="Center"
+                                                        ColumnSpacing="8">
+                                                        <Grid.ColumnDefinitions>
+                                                            <ColumnDefinition Width="Auto" />
+                                                            <ColumnDefinition Width="Auto" />
+                                                        </Grid.ColumnDefinitions>
+                                                        <Grid.RowDefinitions>
+                                                            <RowDefinition Height="Auto" />
+                                                            <RowDefinition Height="Auto" />
+                                                        </Grid.RowDefinitions>
+                                                        <StackPanel
+                                                            x:Name="ExclusionRuleStateActionPanel"
+                                                            HorizontalAlignment="Right"
+                                                            Orientation="Horizontal"
+                                                            Spacing="4">
+                                                            <ToggleSwitch
+                                                                Width="48"
+                                                                Height="40"
+                                                                AutomationProperties.AutomationId="{x:Bind ToggleAutomationId, Mode=OneWay}"
+                                                                AutomationProperties.Name="{x:Bind ToggleAutomationName, Mode=OneWay}"
+                                                                IsOn="{x:Bind IsEnabled, Mode=OneWay}"
+                                                                OffContent=""
+                                                                OnContent=""
+                                                                Toggled="OnExclusionRuleToggled"
+                                                                ToolTipService.ToolTip="启用或停用规则" />
+                                                            <Button
+                                                                x:Name="MoveExclusionRuleUpButton"
+                                                                Width="40"
+                                                                Height="40"
+                                                                Click="OnMoveExclusionRuleUp"
+                                                                AutomationProperties.AutomationId="{x:Bind MoveUpAutomationId, Mode=OneWay}"
+                                                                AutomationProperties.Name="{x:Bind MoveUpAutomationName, Mode=OneWay}"
+                                                                IsEnabled="{x:Bind CanMoveUp, Mode=OneWay}"
+                                                                ToolTipService.ToolTip="上移">
+                                                                <FontIcon Glyph="&#xE70E;" />
+                                                            </Button>
+                                                            <Button
+                                                                x:Name="MoveExclusionRuleDownButton"
+                                                                Width="40"
+                                                                Height="40"
+                                                                Click="OnMoveExclusionRuleDown"
+                                                                AutomationProperties.AutomationId="{x:Bind MoveDownAutomationId, Mode=OneWay}"
+                                                                AutomationProperties.Name="{x:Bind MoveDownAutomationName, Mode=OneWay}"
+                                                                IsEnabled="{x:Bind CanMoveDown, Mode=OneWay}"
+                                                                ToolTipService.ToolTip="下移">
+                                                                <FontIcon Glyph="&#xE70D;" />
+                                                            </Button>
+                                                        </StackPanel>
+                                                        <StackPanel
+                                                            x:Name="ExclusionRuleEditActionPanel"
+                                                            Grid.Column="1"
+                                                            HorizontalAlignment="Right"
+                                                            Orientation="Horizontal"
+                                                            Spacing="4">
+                                                            <Button
+                                                                x:Name="EditExclusionRuleButton"
+                                                                Width="40"
+                                                                Height="40"
+                                                                Click="OnEditExclusionRule"
+                                                                AutomationProperties.AutomationId="{x:Bind EditAutomationId, Mode=OneWay}"
+                                                                AutomationProperties.Name="{x:Bind EditAutomationName, Mode=OneWay}"
+                                                                ToolTipService.ToolTip="编辑">
+                                                                <SymbolIcon Symbol="Edit" />
+                                                            </Button>
+                                                            <Button
+                                                                Width="40"
+                                                                Height="40"
+                                                                Click="OnDeleteExclusionRule"
+                                                                AutomationProperties.AutomationId="{x:Bind DeleteAutomationId, Mode=OneWay}"
+                                                                AutomationProperties.Name="{x:Bind DeleteAutomationName, Mode=OneWay}"
+                                                                ToolTipService.ToolTip="删除">
+                                                                <SymbolIcon Symbol="Delete" />
+                                                            </Button>
+                                                        </StackPanel>
+                                                    </Grid>
+                                                </Grid>
+                                            </ContentControl>
+                                        </DataTemplate>
+                                    </ListView.ItemTemplate>
+                                    </ListView>
+                                </Grid>
+                            </Border>
                         </Grid>
                     </Border>
 
@@ -279,7 +496,7 @@
                                 <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}" Text="远程会话" />
                                 <TextBlock
                                     Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                    Text="连接远程桌面或进入远程会话时使用保守暂停策略。"
+                                    Text="录制组件接入后，连接远程桌面或进入远程会话时将使用保守暂停策略。"
                                     TextWrapping="Wrap" />
                             </StackPanel>
                             <ToggleSwitch
@@ -314,7 +531,7 @@
                                 <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}" Text="Windows 演示模式" />
                                 <TextBlock
                                     Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                    Text="进入 Windows 演示模式时暂停；其他屏幕共享应用尚不能通用检测。"
+                                    Text="录制组件接入后，进入 Windows 演示模式时将暂停；其他屏幕共享应用尚不能通用检测。"
                                     TextWrapping="Wrap" />
                             </StackPanel>
                             <ToggleSwitch
@@ -368,6 +585,120 @@
                     </Border>
                 </StackPanel>
             </StackPanel>
-        </Grid>
-    </ScrollViewer>
+        </ScrollViewer>
+
+        <ContentDialog
+            x:Name="ExclusionRuleEditorDialog"
+            AutomationProperties.Name="排除规则编辑器"
+            DefaultButton="Primary"
+            PrimaryButtonClick="OnExclusionRuleEditorPrimaryButtonClick"
+            PrimaryButtonText="保存"
+            SecondaryButtonText="取消">
+            <ScrollViewer
+                MaxHeight="600"
+                HorizontalScrollBarVisibility="Disabled"
+                HorizontalScrollMode="Disabled"
+                VerticalScrollBarVisibility="Auto">
+                <StackPanel x:Name="ExclusionRuleEditorForm" MaxWidth="520" Spacing="16">
+                    <InfoBar
+                        x:Name="ExclusionRuleEditorErrorInfoBar"
+                        AutomationProperties.LiveSetting="Assertive"
+                        IsClosable="False"
+                        IsOpen="False"
+                        Severity="Error"
+                        Title="请检查规则信息" />
+
+                    <TextBox
+                        x:Name="ExclusionRuleNameTextBox"
+                        AutomationProperties.AutomationId="ExclusionRuleName"
+                        AutomationProperties.Name="规则名称"
+                        Header="名称"
+                        MaxLength="80"
+                        PlaceholderText="例如：密码管理器" />
+
+                    <ComboBox
+                        x:Name="ExclusionRuleScopePicker"
+                        HorizontalAlignment="Stretch"
+                        AutomationProperties.AutomationId="ExclusionRuleScope"
+                        AutomationProperties.Name="排除范围"
+                        Header="排除范围"
+                        SelectionChanged="OnExclusionRuleEditorSelectionChanged">
+                        <ComboBoxItem Content="整个应用" Tag="Application" />
+                        <ComboBoxItem Content="特定窗口" Tag="Window" />
+                    </ComboBox>
+
+                    <ComboBox
+                        x:Name="ExclusionRuleIdentityKindPicker"
+                        HorizontalAlignment="Stretch"
+                        AutomationProperties.AutomationId="ExclusionRuleIdentityKind"
+                        AutomationProperties.Name="应用身份类型"
+                        Header="应用身份类型"
+                        SelectionChanged="OnExclusionRuleEditorSelectionChanged">
+                        <ComboBoxItem Content="EXE 文件名" Tag="ExecutableName" />
+                        <ComboBoxItem Content="包系列名称 (PFN)" Tag="PackageFamilyName" />
+                        <ComboBoxItem Content="发布者证书 SHA-256" Tag="PublisherCertificateSha256" />
+                    </ComboBox>
+
+                    <StackPanel Spacing="6">
+                        <TextBox
+                            x:Name="ExclusionRuleIdentityTextBox"
+                            AutomationProperties.AutomationId="ExclusionRuleIdentity"
+                            AutomationProperties.Name="应用身份"
+                            Header="可执行文件名"
+                            MaxLength="512"
+                            PlaceholderText="例如：KeePassXC.exe" />
+                        <TextBlock
+                            x:Name="ExclusionRuleIdentityHelpText"
+                            Style="{StaticResource MetadataTextStyle}"
+                            Text="只接受 EXE 文件名，不接受完整路径。"
+                            TextWrapping="Wrap" />
+                    </StackPanel>
+
+                    <StackPanel x:Name="ExclusionRuleWindowMatchPanel" Spacing="16">
+                        <ComboBox
+                            x:Name="ExclusionRuleWindowMatchKindPicker"
+                            HorizontalAlignment="Stretch"
+                            AutomationProperties.AutomationId="ExclusionRuleWindowMatchKind"
+                            AutomationProperties.Name="窗口标题匹配方式"
+                            Header="窗口标题匹配方式">
+                            <ComboBoxItem Content="完全匹配" Tag="Exact" />
+                            <ComboBoxItem Content="开头匹配" Tag="StartsWith" />
+                            <ComboBoxItem Content="包含" Tag="Contains" />
+                        </ComboBox>
+                        <TextBox
+                            x:Name="ExclusionRuleWindowPatternTextBox"
+                            AutomationProperties.AutomationId="ExclusionRuleWindowPattern"
+                            AutomationProperties.Name="窗口标题匹配文字"
+                            Header="匹配文字"
+                            MaxLength="256"
+                            PlaceholderText="输入要匹配的文字" />
+                        <TextBlock
+                            Style="{StaticResource MetadataTextStyle}"
+                            Text="这里只保存你输入的匹配文字。此页面不会读取、列出或预览当前窗口标题。"
+                            TextWrapping="Wrap" />
+                    </StackPanel>
+
+                    <ToggleSwitch
+                        x:Name="ExclusionRuleEnabledToggle"
+                        AutomationProperties.AutomationId="ExclusionRuleEnabled"
+                        AutomationProperties.Name="保存后启用规则"
+                        Header="保存后启用规则"
+                        OffContent="停用"
+                        OnContent="启用" />
+
+                    <TextBlock
+                        Style="{StaticResource MetadataTextStyle}"
+                        Text="启用规则只会配置排除边界，不会开启录制。"
+                        TextWrapping="Wrap" />
+
+                    <ProgressBar
+                        x:Name="ExclusionRuleEditorProgressBar"
+                        AutomationProperties.LiveSetting="Polite"
+                        AutomationProperties.Name="正在保存排除规则"
+                        IsIndeterminate="True"
+                        Visibility="Collapsed" />
+                </StackPanel>
+            </ScrollViewer>
+        </ContentDialog>
+    </Grid>
 </Page>

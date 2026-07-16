@@ -48,9 +48,11 @@ contains:
   manual activity creation, editing, and deletion;
 - a settings surface with persistent system/light/dark theme selection,
   capture-off and cloud-off defaults, consent policy v2, evidence-retention and
-  conservative exclusion/session choices, and a gate that blocks capture
-  start/resume unless capture is enabled and consent covers the current privacy
-  revision;
+  conservative exclusion/session choices, plus ordered EXE, package-family,
+  publisher-certificate, and application-anchored window exclusion rules;
+- schema v4 settings persistence that commits the complete ordered rule
+  snapshot, capture-off state, and exact privacy-revision change atomically,
+  with optimistic concurrency checks over the complete settings snapshot;
 - an x64 C++20 native-capture foundation with a versioned C ABI, stable status
   codes, a bounded polled event queue, fail-closed privacy inputs, and native
   pixel, scheduling, queue, and ABI contract tests;
@@ -64,14 +66,17 @@ contains:
   uses the unavailable path because the native binary does not yet advertise a
   write-safe screen-capture capability;
 - an inactive, fail-closed Windows probe for session lock, input desktop,
-  Remote Desktop, Windows Presentation Mode, and storage headroom; application
-  and window identity remain unknown until exclusion rules are implemented;
+  Remote Desktop, Windows Presentation Mode, and storage headroom, plus a pure
+  typed exclusion matcher that evaluates application and window rules
+  independently without returning observed identity or title text; live
+  application/window identity collection remains intentionally disconnected;
 - domain, application, infrastructure, presentation, and capture-interoperability
   project boundaries with automated persistence and mutation tests; and
 - an unpackaged, self-contained development bundle for manual UI verification.
 
-Manual activities, consent, and privacy settings are stored at
-`%LOCALAPPDATA%\WinDayFlow\Data\windayflow.db` and survive application restarts.
+Manual activities, consent, privacy settings, and user-authored exclusion rules
+are stored at `%LOCALAPPDATA%\WinDayFlow\Data\windayflow.db` and survive
+application restarts.
 The DXGI/WIC/Media Foundation engine, native persistence barrier, event-driven
 privacy monitoring, analysis queue and providers, generated Daily and Weekly
 views, journal editing, and timeline-grounded chat are **not integrated yet**.
@@ -82,7 +87,9 @@ as a local manual timeline, but it is not yet a functional recorder.
 
 See the [architecture design](docs/ARCHITECTURE.md) for delivery phases and the
 [Reference Baseline](docs/ARCHITECTURE.md#2-reference-baseline) for the reviewed
-upstream revisions, adopted ideas, adaptations, and rejected coupling.
+upstream revisions, adopted ideas, adaptations, and rejected coupling. The
+[capture-exclusion rule ADR](docs/adr/0002-capture-exclusion-rules.md) records
+the typed matching, ordering, privacy-revision, and persistence contract.
 
 ## Platform Support
 
