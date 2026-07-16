@@ -38,6 +38,13 @@ public sealed class SettingsViewModelTests
         Assert.False(viewModel.CaptureEnabled);
         Assert.True(viewModel.CloudAnalysisEnabled);
         Assert.False(viewModel.HasValidRecordingConsent);
+        Assert.False(viewModel.HasOutdatedRecordingConsent);
+        Assert.Equal(CapturePrivacySettings.DefaultRetentionDays, viewModel.EvidenceRetentionDays);
+        Assert.True(viewModel.ExcludeSensitiveApplications);
+        Assert.True(viewModel.PauseInRemoteSessions);
+        Assert.True(viewModel.PauseDuringScreenSharing);
+        Assert.Equal(1, viewModel.CapturePrivacyRevision);
+        Assert.True(viewModel.CanChangePrivacy);
         Assert.Equal(expectedBackendAvailable, viewModel.IsCaptureBackendAvailable);
         Assert.False(viewModel.CanChangeCapture);
         Assert.True(viewModel.CanGrantConsent);
@@ -86,6 +93,80 @@ public sealed class SettingsViewModelTests
         Assert.Contains(nameof(SettingsViewModel.CanChangeCapture), changedProperties);
         Assert.Equal(2, repository.SavedSettings.Count);
         Assert.False(viewModel.HasError);
+    }
+
+    [Fact]
+    public async Task PrivacyChangeStopsCaptureBeforePersistingAndRequiresRenewedConsent()
+    {
+        var consent = CreateConsent();
+        var repository = new TestSettingsRepository(
+            new AppSettings(
+                AppThemePreference.System,
+                CaptureEnabled: true,
+                CloudAnalysisEnabled: false,
+                consent));
+        using var settings = new AppSettingsService(repository);
+        await settings.InitializeAsync();
+        var capture = new TestCaptureService(CaptureState.Recording)
+        {
+            StopOperation = _ =>
+            {
+                Assert.True(settings.Current.CaptureEnabled);
+                Assert.True(settings.HasValidRecordingConsent);
+                Assert.Equal(30, settings.Current.CapturePrivacy.EvidenceRetentionDays);
+                return Task.CompletedTask;
+            },
+        };
+        using var viewModel = new SettingsViewModel(settings, capture);
+
+        Assert.True(await viewModel.SetCapturePrivacyAsync(
+            evidenceRetentionDays: 90,
+            excludeSensitiveApplications: false,
+            pauseInRemoteSessions: true,
+            pauseDuringScreenSharing: false));
+
+        Assert.Equal(1, capture.StopCount);
+        Assert.Equal(CaptureState.Stopped, capture.CurrentStatus.State);
+        Assert.False(settings.Current.CaptureEnabled);
+        Assert.False(settings.HasValidRecordingConsent);
+        Assert.True(viewModel.HasOutdatedRecordingConsent);
+        Assert.Equal(90, viewModel.EvidenceRetentionDays);
+        Assert.False(viewModel.ExcludeSensitiveApplications);
+        Assert.False(viewModel.PauseDuringScreenSharing);
+        Assert.Equal(2, viewModel.CapturePrivacyRevision);
+        Assert.Equal("录制说明或隐私选择已更新", viewModel.ConsentStatusText);
+        Assert.Single(repository.SavedSettings);
+    }
+
+    [Fact]
+    public async Task PrivacyChangeStopFailurePreservesSettingsAndConsent()
+    {
+        var consent = CreateConsent();
+        var initial = new AppSettings(
+            AppThemePreference.System,
+            CaptureEnabled: true,
+            CloudAnalysisEnabled: false,
+            consent);
+        var repository = new TestSettingsRepository(initial);
+        using var settings = new AppSettingsService(repository);
+        await settings.InitializeAsync();
+        var capture = new TestCaptureService(CaptureState.Recording)
+        {
+            StopOperation = _ => throw new InvalidOperationException("Sensitive detail."),
+        };
+        using var viewModel = new SettingsViewModel(settings, capture);
+
+        Assert.False(await viewModel.SetCapturePrivacyAsync(
+            evidenceRetentionDays: 7,
+            excludeSensitiveApplications: false,
+            pauseInRemoteSessions: false,
+            pauseDuringScreenSharing: false));
+
+        Assert.Equal(1, capture.StopCount);
+        Assert.Equal(initial, settings.Current);
+        Assert.True(settings.HasValidRecordingConsent);
+        Assert.Empty(repository.SavedSettings);
+        Assert.Equal("无法更改录制状态，请稍后重试。", viewModel.ErrorMessage);
     }
 
     [Fact]
@@ -432,7 +513,8 @@ public sealed class SettingsViewModelTests
     {
         return new RecordingConsent(
             AppSettingsService.CurrentRecordingConsentVersion,
-            ConsentTime);
+            ConsentTime,
+            CapturePrivacySettings.Default.Revision);
     }
 
     private static HashSet<string> ObserveChanges(INotifyPropertyChanged source)

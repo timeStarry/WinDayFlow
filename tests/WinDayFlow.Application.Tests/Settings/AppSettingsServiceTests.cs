@@ -17,6 +17,7 @@ public sealed class AppSettingsServiceTests
         Assert.False(settings.CaptureEnabled);
         Assert.False(settings.CloudAnalysisEnabled);
         Assert.Null(settings.RecordingConsent);
+        Assert.Equal(CapturePrivacySettings.Default, settings.CapturePrivacy);
     }
 
     [Fact]
@@ -40,6 +41,22 @@ public sealed class AppSettingsServiceTests
             () => new RecordingConsent(
                 1,
                 ConsentTime.ToOffset(TimeSpan.FromHours(8))));
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => new RecordingConsent(2, ConsentTime, PrivacyRevision: 0));
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => new CapturePrivacySettings(
+                EvidenceRetentionDays: 0,
+                ExcludeSensitiveApplications: true,
+                PauseInRemoteSessions: true,
+                PauseDuringScreenSharing: true,
+                Revision: 1));
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => new CapturePrivacySettings(
+                CapturePrivacySettings.DefaultRetentionDays,
+                ExcludeSensitiveApplications: true,
+                PauseInRemoteSessions: true,
+                PauseDuringScreenSharing: true,
+                Revision: 0));
     }
 
     [Fact]
@@ -71,12 +88,18 @@ public sealed class AppSettingsServiceTests
         Assert.Empty(repository.SavedSettings);
     }
 
-    [Fact]
-    public async Task InitializeAsyncDisablesCaptureWhenStoredConsentIsOutdated()
+    [Theory]
+    [InlineData(1)]
+    [InlineData(3)]
+    public async Task InitializeAsyncDisablesCaptureWhenStoredConsentIsOutdated(
+        int storedPolicyVersion)
     {
         var staleConsent = new RecordingConsent(
-            AppSettingsService.CurrentRecordingConsentVersion + 1,
-            ConsentTime);
+            storedPolicyVersion,
+            ConsentTime,
+            storedPolicyVersion >= AppSettingsService.CurrentRecordingConsentVersion
+                ? CapturePrivacySettings.Default.Revision
+                : null);
         var stored = new AppSettings(
             AppThemePreference.System,
             CaptureEnabled: true,
@@ -125,8 +148,53 @@ public sealed class AppSettingsServiceTests
         Assert.Equal(AppSettingsService.CurrentRecordingConsentVersion, consent.PolicyVersion);
         Assert.Equal(ConsentTime, consent.AcceptedAtUtc);
         Assert.Equal(TimeSpan.Zero, consent.AcceptedAtUtc.Offset);
+        Assert.Equal(service.Current.CapturePrivacy.Revision, consent.PrivacyRevision);
         Assert.True(service.HasValidRecordingConsent);
         Assert.Single(repository.SavedSettings);
+    }
+
+    [Fact]
+    public async Task PrivacyChangeIncrementsRevisionDisablesCaptureAndInvalidatesConsent()
+    {
+        var repository = new TestSettingsRepository();
+        using var service = new AppSettingsService(
+            repository,
+            new FixedTimeProvider(ConsentTime));
+        await service.GrantRecordingConsentAsync();
+        await service.SetCaptureEnabledAsync(enabled: true);
+        var acceptedRevision = service.Current.RecordingConsent?.PrivacyRevision;
+
+        await service.SetCapturePrivacyAsync(
+            evidenceRetentionDays: 90,
+            excludeSensitiveApplications: true,
+            pauseInRemoteSessions: true,
+            pauseDuringScreenSharing: false);
+
+        Assert.False(service.Current.CaptureEnabled);
+        Assert.False(service.HasValidRecordingConsent);
+        Assert.Equal(90, service.Current.CapturePrivacy.EvidenceRetentionDays);
+        Assert.False(service.Current.CapturePrivacy.PauseDuringScreenSharing);
+        Assert.Equal(2, service.Current.CapturePrivacy.Revision);
+        Assert.Equal(1, acceptedRevision);
+        Assert.Equal(acceptedRevision, service.Current.RecordingConsent?.PrivacyRevision);
+        Assert.Equal(3, repository.SavedSettings.Count);
+    }
+
+    [Fact]
+    public async Task ReapplyingIdenticalPrivacyChoicesDoesNotPersistOrChangeRevision()
+    {
+        var repository = new TestSettingsRepository();
+        using var service = new AppSettingsService(repository);
+        var privacy = service.Current.CapturePrivacy;
+
+        await service.SetCapturePrivacyAsync(
+            privacy.EvidenceRetentionDays,
+            privacy.ExcludeSensitiveApplications,
+            privacy.PauseInRemoteSessions,
+            privacy.PauseDuringScreenSharing);
+
+        Assert.Same(privacy, service.Current.CapturePrivacy);
+        Assert.Empty(repository.SavedSettings);
     }
 
     [Fact]

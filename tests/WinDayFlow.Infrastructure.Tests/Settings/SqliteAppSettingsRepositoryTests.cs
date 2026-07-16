@@ -25,14 +25,22 @@ public sealed class SqliteAppSettingsRepositoryTests
         using var database = new TemporaryDatabase();
         var factory = new SqliteConnectionFactory(database.DatabasePath);
         await new SqliteDatabaseInitializer(factory).InitializeAsync();
+        var privacy = new CapturePrivacySettings(
+            EvidenceRetentionDays: 90,
+            ExcludeSensitiveApplications: false,
+            PauseInRemoteSessions: true,
+            PauseDuringScreenSharing: false,
+            Revision: 7);
         var consent = new RecordingConsent(
-            4,
-            new DateTimeOffset(2026, 7, 16, 3, 4, 5, TimeSpan.Zero).AddTicks(6789));
+            AppSettingsService.CurrentRecordingConsentVersion,
+            new DateTimeOffset(2026, 7, 16, 3, 4, 5, TimeSpan.Zero).AddTicks(6789),
+            privacy.Revision);
         var expected = new AppSettings(
             AppThemePreference.Dark,
             CaptureEnabled: true,
             CloudAnalysisEnabled: true,
-            consent);
+            consent,
+            privacy);
 
         await new SqliteAppSettingsRepository(factory).SaveAsync(expected);
 
@@ -42,6 +50,8 @@ public sealed class SqliteAppSettingsRepositoryTests
         Assert.Equal(expected, restored);
         Assert.Equal(consent.PolicyVersion, restored.RecordingConsent?.PolicyVersion);
         Assert.Equal(consent.AcceptedAtUtc, restored.RecordingConsent?.AcceptedAtUtc);
+        Assert.Equal(consent.PrivacyRevision, restored.RecordingConsent?.PrivacyRevision);
+        Assert.Equal(privacy, restored.CapturePrivacy);
     }
 
     [Fact]
@@ -56,6 +66,31 @@ public sealed class SqliteAppSettingsRepositoryTests
         command.CommandText = """
             UPDATE app_settings
             SET capture_enabled = 1
+            WHERE id = 1;
+            """;
+
+        await Assert.ThrowsAsync<SqliteException>(
+            () => command.ExecuteNonQueryAsync());
+        Assert.Equal(
+            AppSettings.Default,
+            await new SqliteAppSettingsRepository(factory).GetAsync());
+    }
+
+    [Fact]
+    public async Task DatabaseRejectsCaptureWhenConsentCoversAnotherPrivacyRevision()
+    {
+        using var database = new TemporaryDatabase();
+        var factory = new SqliteConnectionFactory(database.DatabasePath);
+        await new SqliteDatabaseInitializer(factory).InitializeAsync();
+
+        await using var connection = await factory.OpenConnectionAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            UPDATE app_settings
+            SET capture_consent_version = 2,
+                capture_consent_granted_at_utc = '2026-07-16T03:04:05.0000000+00:00',
+                capture_consent_privacy_revision = 2,
+                capture_enabled = 1
             WHERE id = 1;
             """;
 

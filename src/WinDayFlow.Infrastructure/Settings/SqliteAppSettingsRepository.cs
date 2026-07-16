@@ -13,7 +13,13 @@ public sealed class SqliteAppSettingsRepository : IAppSettingsRepository
             capture_enabled,
             cloud_analysis_enabled,
             capture_consent_version,
-            capture_consent_granted_at_utc
+            capture_consent_granted_at_utc,
+            capture_consent_privacy_revision,
+            evidence_retention_days,
+            exclude_sensitive_applications,
+            pause_in_remote_sessions,
+            pause_during_screen_sharing,
+            capture_privacy_revision
         FROM app_settings
         WHERE id = 1;
         """;
@@ -58,7 +64,13 @@ public sealed class SqliteAppSettingsRepository : IAppSettingsRepository
                     capture_enabled = $capture_enabled,
                     cloud_analysis_enabled = $cloud_analysis_enabled,
                     capture_consent_version = $capture_consent_version,
-                    capture_consent_granted_at_utc = $capture_consent_granted_at_utc
+                    capture_consent_granted_at_utc = $capture_consent_granted_at_utc,
+                    capture_consent_privacy_revision = $capture_consent_privacy_revision,
+                    evidence_retention_days = $evidence_retention_days,
+                    exclude_sensitive_applications = $exclude_sensitive_applications,
+                    pause_in_remote_sessions = $pause_in_remote_sessions,
+                    pause_during_screen_sharing = $pause_during_screen_sharing,
+                    capture_privacy_revision = $capture_privacy_revision
                 WHERE id = 1;
                 """;
             command.Parameters.AddWithValue("$theme", (int)settings.Theme);
@@ -77,6 +89,26 @@ public sealed class SqliteAppSettingsRepository : IAppSettingsRepository
                     "O",
                     CultureInfo.InvariantCulture)
                 ?? (object)DBNull.Value);
+            command.Parameters.AddWithValue(
+                "$capture_consent_privacy_revision",
+                settings.RecordingConsent?.PrivacyRevision is long privacyRevision
+                    ? privacyRevision
+                    : DBNull.Value);
+            command.Parameters.AddWithValue(
+                "$evidence_retention_days",
+                settings.CapturePrivacy.EvidenceRetentionDays);
+            command.Parameters.AddWithValue(
+                "$exclude_sensitive_applications",
+                settings.CapturePrivacy.ExcludeSensitiveApplications ? 1 : 0);
+            command.Parameters.AddWithValue(
+                "$pause_in_remote_sessions",
+                settings.CapturePrivacy.PauseInRemoteSessions ? 1 : 0);
+            command.Parameters.AddWithValue(
+                "$pause_during_screen_sharing",
+                settings.CapturePrivacy.PauseDuringScreenSharing ? 1 : 0);
+            command.Parameters.AddWithValue(
+                "$capture_privacy_revision",
+                settings.CapturePrivacy.Revision);
 
             var affectedRows = await command
                 .ExecuteNonQueryAsync(cancellationToken)
@@ -150,14 +182,28 @@ public sealed class SqliteAppSettingsRepository : IAppSettingsRepository
                     "O",
                     CultureInfo.InvariantCulture,
                     DateTimeStyles.None);
-                consent = new RecordingConsent(policyVersion, acceptedAtUtc);
+                var consentPrivacyRevision = reader.IsDBNull(5)
+                    ? (long?)null
+                    : reader.GetInt64(5);
+                consent = new RecordingConsent(
+                    policyVersion,
+                    acceptedAtUtc,
+                    consentPrivacyRevision);
             }
+
+            var privacy = new CapturePrivacySettings(
+                checked((int)reader.GetInt64(6)),
+                ReadBoolean(reader, 7, "exclude_sensitive_applications"),
+                ReadBoolean(reader, 8, "pause_in_remote_sessions"),
+                ReadBoolean(reader, 9, "pause_during_screen_sharing"),
+                reader.GetInt64(10));
 
             return new AppSettings(
                 theme,
                 captureEnabled,
                 cloudAnalysisEnabled,
-                consent);
+                consent,
+                privacy);
         }
         catch (InvalidDataException)
         {

@@ -185,10 +185,153 @@
                                 IsReadOnly="True" />
                         </Grid>
                     </Border>
+
+                    <Border Style="{StaticResource SettingsGroupBorderStyle}">
+                        <Grid
+                            x:Name="RetentionSettingLayout"
+                            Padding="20"
+                            ColumnSpacing="24">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="3*" />
+                                <ColumnDefinition Width="2*" />
+                            </Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+                            <StackPanel VerticalAlignment="Center" Spacing="2">
+                                <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}" Text="屏幕证据保留期限" />
+                                <TextBlock
+                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                    Text="到期证据将在没有待处理任务引用时进入清理队列。"
+                                    TextWrapping="Wrap" />
+                            </StackPanel>
+                            <ComboBox
+                                x:Name="RetentionPicker"
+                                Grid.Column="1"
+                                MaxWidth="260"
+                                HorizontalAlignment="Stretch"
+                                VerticalAlignment="Center"
+                                AutomationProperties.AutomationId="EvidenceRetentionPicker"
+                                AutomationProperties.Name="屏幕证据保留期限"
+                                IsEnabled="{x:Bind ViewModel.CanChangePrivacy, Mode=OneWay}"
+                                SelectionChanged="OnRetentionChanged">
+                                <ComboBoxItem Content="7 天" Tag="7" />
+                                <ComboBoxItem Content="30 天" Tag="30" />
+                                <ComboBoxItem Content="90 天" Tag="90" />
+                                <ComboBoxItem Content="1 年" Tag="365" />
+                            </ComboBox>
+                        </Grid>
+                    </Border>
                 </StackPanel>
 
                 <StackPanel Spacing="12">
                     <TextBlock Style="{StaticResource SectionTitleTextStyle}" Text="隐私" />
+                    <Border Style="{StaticResource SettingsGroupBorderStyle}">
+                        <Grid
+                            x:Name="SensitiveApplicationSettingLayout"
+                            Padding="20"
+                            ColumnSpacing="24">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="3*" />
+                                <ColumnDefinition Width="2*" />
+                            </Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+                            <StackPanel VerticalAlignment="Center" Spacing="2">
+                                <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}" Text="敏感应用保护" />
+                                <TextBlock
+                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                    Text="识别到身份验证、密码、财务、健康或私密浏览上下文时暂停。"
+                                    TextWrapping="Wrap" />
+                            </StackPanel>
+                            <ToggleSwitch
+                                x:Name="SensitiveApplicationToggle"
+                                Grid.Column="1"
+                                HorizontalAlignment="Right"
+                                VerticalAlignment="Center"
+                                AutomationProperties.AutomationId="SensitiveApplicationProtectionToggle"
+                                AutomationProperties.Name="敏感应用保护"
+                                IsEnabled="{x:Bind ViewModel.CanChangePrivacy, Mode=OneWay}"
+                                IsOn="{x:Bind ViewModel.ExcludeSensitiveApplications, Mode=OneWay}"
+                                OffContent="关闭"
+                                OnContent="排除"
+                                Toggled="OnPrivacyToggleChanged" />
+                        </Grid>
+                    </Border>
+
+                    <Border Style="{StaticResource SettingsGroupBorderStyle}">
+                        <Grid
+                            x:Name="RemoteSessionSettingLayout"
+                            Padding="20"
+                            ColumnSpacing="24">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="3*" />
+                                <ColumnDefinition Width="2*" />
+                            </Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+                            <StackPanel VerticalAlignment="Center" Spacing="2">
+                                <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}" Text="远程会话" />
+                                <TextBlock
+                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                    Text="连接远程桌面或进入远程会话时使用保守暂停策略。"
+                                    TextWrapping="Wrap" />
+                            </StackPanel>
+                            <ToggleSwitch
+                                x:Name="RemoteSessionToggle"
+                                Grid.Column="1"
+                                HorizontalAlignment="Right"
+                                VerticalAlignment="Center"
+                                AutomationProperties.AutomationId="RemoteSessionPauseToggle"
+                                AutomationProperties.Name="远程会话期间暂停"
+                                IsEnabled="{x:Bind ViewModel.CanChangePrivacy, Mode=OneWay}"
+                                IsOn="{x:Bind ViewModel.PauseInRemoteSessions, Mode=OneWay}"
+                                OffContent="继续"
+                                OnContent="暂停"
+                                Toggled="OnPrivacyToggleChanged" />
+                        </Grid>
+                    </Border>
+
+                    <Border Style="{StaticResource SettingsGroupBorderStyle}">
+                        <Grid
+                            x:Name="ScreenSharingSettingLayout"
+                            Padding="20"
+                            ColumnSpacing="24">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="3*" />
+                                <ColumnDefinition Width="2*" />
+                            </Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+                            <StackPanel VerticalAlignment="Center" Spacing="2">
+                                <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}" Text="演示与屏幕共享" />
+                                <TextBlock
+                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                    Text="检测到演示或屏幕共享状态时暂停并显示原因。"
+                                    TextWrapping="Wrap" />
+                            </StackPanel>
+                            <ToggleSwitch
+                                x:Name="ScreenSharingToggle"
+                                Grid.Column="1"
+                                HorizontalAlignment="Right"
+                                VerticalAlignment="Center"
+                                AutomationProperties.AutomationId="ScreenSharingPauseToggle"
+                                AutomationProperties.Name="屏幕共享期间暂停"
+                                IsEnabled="{x:Bind ViewModel.CanChangePrivacy, Mode=OneWay}"
+                                IsOn="{x:Bind ViewModel.PauseDuringScreenSharing, Mode=OneWay}"
+                                OffContent="继续"
+                                OnContent="暂停"
+                                Toggled="OnPrivacyToggleChanged" />
+                        </Grid>
+                    </Border>
+
                     <Border Style="{StaticResource SettingsGroupBorderStyle}">
                         <Grid
                             x:Name="CloudSettingLayout"

@@ -47,8 +47,9 @@ contains:
 - a timeline review surface with date navigation, search, filters, and durable
   manual activity creation, editing, and deletion;
 - a settings surface with persistent system/light/dark theme selection,
-  capture-off and cloud-off defaults, versioned recording consent, and a
-  consent gate that blocks capture start/resume without current authorization;
+  capture-off and cloud-off defaults, consent policy v2, evidence-retention and
+  conservative exclusion/session choices, and a gate that blocks capture
+  start/resume unless consent covers the current privacy revision;
 - an x64 C++20 native-capture foundation with a versioned C ABI, stable status
   codes, a bounded polled event queue, fail-closed privacy inputs, and native
   pixel, scheduling, queue, and ABI contract tests;
@@ -56,7 +57,7 @@ contains:
   project boundaries with automated persistence and mutation tests; and
 - an unpackaged, self-contained development bundle for manual UI verification.
 
-Manual activities and application settings are stored at
+Manual activities, consent, and privacy settings are stored at
 `%LOCALAPPDATA%\WinDayFlow\Data\windayflow.db` and survive application restarts.
 The DXGI/WIC/Media Foundation engine and its managed adapter, analysis queue and
 providers, generated Daily and Weekly views, journal editing, and timeline-

@@ -20,6 +20,7 @@ public sealed partial class SettingsViewModel : ObservableObject, IDisposable
     [NotifyPropertyChangedFor(nameof(CanChangeCapture))]
     [NotifyPropertyChangedFor(nameof(CanGrantConsent))]
     [NotifyPropertyChangedFor(nameof(CanRevokeConsent))]
+    [NotifyPropertyChangedFor(nameof(CanChangePrivacy))]
     private bool _isBusy;
 
     [ObservableProperty]
@@ -47,6 +48,25 @@ public sealed partial class SettingsViewModel : ObservableObject, IDisposable
 
     public bool HasValidRecordingConsent => _settingsService.HasValidRecordingConsent;
 
+    public bool HasOutdatedRecordingConsent =>
+        !HasValidRecordingConsent
+        && _settingsService.Current.RecordingConsent is not null;
+
+    public int EvidenceRetentionDays =>
+        _settingsService.Current.CapturePrivacy.EvidenceRetentionDays;
+
+    public bool ExcludeSensitiveApplications =>
+        _settingsService.Current.CapturePrivacy.ExcludeSensitiveApplications;
+
+    public bool PauseInRemoteSessions =>
+        _settingsService.Current.CapturePrivacy.PauseInRemoteSessions;
+
+    public bool PauseDuringScreenSharing =>
+        _settingsService.Current.CapturePrivacy.PauseDuringScreenSharing;
+
+    public long CapturePrivacyRevision =>
+        _settingsService.Current.CapturePrivacy.Revision;
+
     public bool IsCaptureBackendAvailable =>
         _captureService.CurrentStatus.State != CaptureState.Unavailable;
 
@@ -59,22 +79,39 @@ public sealed partial class SettingsViewModel : ObservableObject, IDisposable
 
     public bool CanRevokeConsent => !IsBusy && HasValidRecordingConsent;
 
+    public bool CanChangePrivacy => !IsBusy;
+
     public bool HasError => ErrorMessage.Length > 0;
 
     public string ConsentStatusText => HasValidRecordingConsent
         ? "已同意当前录制说明"
-        : "尚未同意屏幕活动录制";
+        : HasOutdatedRecordingConsent
+            ? "录制说明或隐私选择已更新"
+            : "尚未同意屏幕活动录制";
 
     public string ConsentDetailText
     {
         get
         {
             var consent = _settingsService.Current.RecordingConsent;
-            return HasValidRecordingConsent && consent is not null
-                ? $"版本 {consent.PolicyVersion} · {consent.AcceptedAtUtc.ToLocalTime():g}"
+            if (HasValidRecordingConsent && consent is not null)
+            {
+                return $"版本 {consent.PolicyVersion} · {consent.AcceptedAtUtc.ToLocalTime():g} · 隐私修订 {consent.PrivacyRevision}";
+            }
+
+            return HasOutdatedRecordingConsent
+                ? "旧授权已失效；录制保持关闭，请重新确认当前隐私选择。"
                 : "录制保持关闭；你仍可使用手工时间线。";
         }
     }
+
+    public string RetentionSummaryText => $"屏幕证据保留 {EvidenceRetentionDays} 天";
+
+    public string PrivacySummaryText => string.Join(
+        " · ",
+        ExcludeSensitiveApplications ? "排除敏感应用" : "不自动排除敏感应用",
+        PauseInRemoteSessions ? "远程会话暂停" : "远程会话继续",
+        PauseDuringScreenSharing ? "屏幕共享暂停" : "屏幕共享继续");
 
     public string CaptureAvailabilityText => _captureService.CurrentStatus.State switch
     {
@@ -159,6 +196,42 @@ public sealed partial class SettingsViewModel : ObservableObject, IDisposable
                         .SetCaptureEnabledAsync(enabled: false, token)
                         .ConfigureAwait(false);
                 }
+            },
+            CaptureErrorText,
+            cancellationToken).ConfigureAwait(true);
+    }
+
+    public async Task<bool> SetCapturePrivacyAsync(
+        int evidenceRetentionDays,
+        bool excludeSensitiveApplications,
+        bool pauseInRemoteSessions,
+        bool pauseDuringScreenSharing,
+        CancellationToken cancellationToken = default)
+    {
+        return await RunMutationAsync(
+            async token =>
+            {
+                var current = _settingsService.Current.CapturePrivacy;
+                if (current.EvidenceRetentionDays == evidenceRetentionDays
+                    && current.ExcludeSensitiveApplications == excludeSensitiveApplications
+                    && current.PauseInRemoteSessions == pauseInRemoteSessions
+                    && current.PauseDuringScreenSharing == pauseDuringScreenSharing)
+                {
+                    return;
+                }
+
+                if (ShouldStopCapture(_captureService.CurrentStatus.State))
+                {
+                    await _captureService.StopAsync(token).ConfigureAwait(false);
+                }
+
+                await _settingsService.SetCapturePrivacyAsync(
+                        evidenceRetentionDays,
+                        excludeSensitiveApplications,
+                        pauseInRemoteSessions,
+                        pauseDuringScreenSharing,
+                        token)
+                    .ConfigureAwait(false);
             },
             CaptureErrorText,
             cancellationToken).ConfigureAwait(true);
@@ -289,11 +362,20 @@ public sealed partial class SettingsViewModel : ObservableObject, IDisposable
         OnPropertyChanged(nameof(CaptureEnabled));
         OnPropertyChanged(nameof(CloudAnalysisEnabled));
         OnPropertyChanged(nameof(HasValidRecordingConsent));
+        OnPropertyChanged(nameof(HasOutdatedRecordingConsent));
+        OnPropertyChanged(nameof(EvidenceRetentionDays));
+        OnPropertyChanged(nameof(ExcludeSensitiveApplications));
+        OnPropertyChanged(nameof(PauseInRemoteSessions));
+        OnPropertyChanged(nameof(PauseDuringScreenSharing));
+        OnPropertyChanged(nameof(CapturePrivacyRevision));
         OnPropertyChanged(nameof(CanChangeCapture));
         OnPropertyChanged(nameof(CanGrantConsent));
         OnPropertyChanged(nameof(CanRevokeConsent));
+        OnPropertyChanged(nameof(CanChangePrivacy));
         OnPropertyChanged(nameof(ConsentStatusText));
         OnPropertyChanged(nameof(ConsentDetailText));
+        OnPropertyChanged(nameof(RetentionSummaryText));
+        OnPropertyChanged(nameof(PrivacySummaryText));
     }
 
     private void NotifyCaptureStatusChanged()

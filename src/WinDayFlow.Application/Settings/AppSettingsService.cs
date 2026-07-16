@@ -2,7 +2,7 @@ namespace WinDayFlow.Application.Settings;
 
 public sealed class AppSettingsService : IDisposable
 {
-    public const int CurrentRecordingConsentVersion = 1;
+    public const int CurrentRecordingConsentVersion = 2;
 
     private readonly IAppSettingsRepository _repository;
     private readonly TimeProvider _timeProvider;
@@ -20,7 +20,7 @@ public sealed class AppSettingsService : IDisposable
     public AppSettings Current { get; private set; } = AppSettings.Default;
 
     public bool HasValidRecordingConsent =>
-        IsValidRecordingConsent(Current.RecordingConsent);
+        IsValidRecordingConsent(Current);
 
     public event EventHandler<AppSettingsChangedEventArgs>? SettingsChanged;
 
@@ -74,7 +74,8 @@ public sealed class AppSettingsService : IDisposable
                 theme,
                 current.CaptureEnabled,
                 current.CloudAnalysisEnabled,
-                current.RecordingConsent),
+                current.RecordingConsent,
+                current.CapturePrivacy),
             cancellationToken);
     }
 
@@ -88,7 +89,9 @@ public sealed class AppSettingsService : IDisposable
                 current.CloudAnalysisEnabled,
                 new RecordingConsent(
                     CurrentRecordingConsentVersion,
-                    _timeProvider.GetUtcNow().ToUniversalTime())),
+                    _timeProvider.GetUtcNow().ToUniversalTime(),
+                    current.CapturePrivacy.Revision),
+                current.CapturePrivacy),
             cancellationToken);
     }
 
@@ -100,7 +103,8 @@ public sealed class AppSettingsService : IDisposable
                 current.Theme,
                 CaptureEnabled: false,
                 current.CloudAnalysisEnabled,
-                RecordingConsent: null),
+                RecordingConsent: null,
+                current.CapturePrivacy),
             cancellationToken);
     }
 
@@ -111,7 +115,7 @@ public sealed class AppSettingsService : IDisposable
         return UpdateAsync(
             current =>
             {
-                if (enabled && !IsValidRecordingConsent(current.RecordingConsent))
+                if (enabled && !IsValidRecordingConsent(current))
                 {
                     throw new RecordingConsentRequiredException();
                 }
@@ -120,7 +124,38 @@ public sealed class AppSettingsService : IDisposable
                     current.Theme,
                     enabled,
                     current.CloudAnalysisEnabled,
-                    current.RecordingConsent);
+                    current.RecordingConsent,
+                    current.CapturePrivacy);
+            },
+            cancellationToken);
+    }
+
+    public Task SetCapturePrivacyAsync(
+        int evidenceRetentionDays,
+        bool excludeSensitiveApplications,
+        bool pauseInRemoteSessions,
+        bool pauseDuringScreenSharing,
+        CancellationToken cancellationToken = default)
+    {
+        return UpdateAsync(
+            current =>
+            {
+                var privacy = current.CapturePrivacy.Change(
+                    evidenceRetentionDays,
+                    excludeSensitiveApplications,
+                    pauseInRemoteSessions,
+                    pauseDuringScreenSharing);
+                if (privacy == current.CapturePrivacy)
+                {
+                    return current;
+                }
+
+                return new AppSettings(
+                    current.Theme,
+                    CaptureEnabled: false,
+                    current.CloudAnalysisEnabled,
+                    current.RecordingConsent,
+                    privacy);
             },
             cancellationToken);
     }
@@ -176,7 +211,7 @@ public sealed class AppSettingsService : IDisposable
     private static AppSettings EnsureCaptureConsentIsCurrent(AppSettings settings)
     {
         if (!settings.CaptureEnabled
-            || IsValidRecordingConsent(settings.RecordingConsent))
+            || IsValidRecordingConsent(settings))
         {
             return settings;
         }
@@ -185,12 +220,15 @@ public sealed class AppSettingsService : IDisposable
             settings.Theme,
             CaptureEnabled: false,
             settings.CloudAnalysisEnabled,
-            settings.RecordingConsent);
+            settings.RecordingConsent,
+            settings.CapturePrivacy);
     }
 
-    private static bool IsValidRecordingConsent(RecordingConsent? consent)
+    private static bool IsValidRecordingConsent(AppSettings settings)
     {
-        return consent?.PolicyVersion == CurrentRecordingConsentVersion;
+        return settings.RecordingConsent is { } consent
+            && consent.PolicyVersion == CurrentRecordingConsentVersion
+            && consent.PrivacyRevision == settings.CapturePrivacy.Revision;
     }
 
     private void OnSettingsChanged(AppSettings previous, AppSettings current)

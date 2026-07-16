@@ -605,30 +605,35 @@ Persistence rules:
 
 ### 14.1 Current Persistence Slice
 
-The implemented persistence slice uses schema version 2. Version 1 contains
+The implemented persistence slice uses schema version 3. Version 1 contains
 `schema_migrations`, `timeline_entries`, `timeline_entry_apps`, and
 `timeline_entry_tags`; version 2 adds the singleton `app_settings` row while
-preserving existing timeline data. The application completes the idempotent
-migrations and initializes settings before creating the main window. Every
-timeline write plus its ordered child rows commits in one SQLite transaction,
-and each settings update is written and read back in one transaction.
+preserving existing timeline data. Version 3 adds evidence-retention,
+sensitive-application exclusion, remote-session, screen-sharing, and privacy-
+revision fields. It preserves version 1 consent as an auditable stale record but
+forces capture off because that consent did not cover the new choices. The
+application completes the idempotent migrations and initializes settings before
+creating the main window. Every timeline write plus its ordered child rows
+commits in one SQLite transaction, and each settings update is written and read
+back in one transaction.
 
 Manual entries are explicitly identified as user-authored. They do not invent
 capture evidence, model confidence, or an analysis version, and all editable
 fields carry user provenance timestamps. The WinUI timeline loads durable
 entries from this repository and supports create, edit, and delete; date-scoped
 results are searched and filtered in the ViewModel. The settings row persists
-theme, capture-enabled, cloud-analysis, and recording-consent version/timestamp
-values with database constraints. Capture evidence, unprocessed intervals,
-analysis jobs, generated projections, and the remaining table groups in this
-section are still pending.
+theme, capture-enabled, cloud-analysis, consent version/timestamp/privacy
+revision, evidence-retention days, conservative exclusion/session choices, and
+the current privacy revision with database constraints. Capture evidence,
+unprocessed intervals, analysis jobs, generated projections, and the remaining
+table groups in this section are still pending.
 
 ## 15. Privacy and Security
 
 The following are mandatory release requirements. The current build implements
 the persistent, versioned recording-consent gate and defaults capture and cloud
 analysis to off. Native capture and cloud providers remain unavailable. Schema
-version 2 stores manual timeline content and settings locally without
+version 3 stores manual timeline content and settings locally without
 application-level database encryption.
 
 - Recording is opt-in. Before the first capture, onboarding explains the data
@@ -638,10 +643,12 @@ application-level database encryption.
   persisted. A later release that expands collection scope requires renewed
   consent.
 - The current service enforces this gate for Start/Resume using consent policy
-  version 1; Pause/Stop remain available regardless of consent. The Settings
-  dialog currently discloses collection scope, local storage, cloud-provider
-  availability, and revocation behavior. Full first-run onboarding, exclusions,
-  and retention choices remain Phase 1 work.
+  version 2; consent records the exact privacy revision it covered, and any
+  privacy change disables capture until renewed consent is persisted. Pause/Stop
+  remain available regardless of consent. Settings persist a 30-day conservative
+  default plus user-selectable retention, sensitive-application exclusion,
+  remote-session pause, and screen-sharing pause choices. Full first-run
+  onboarding and user-authored application/window rule lists remain Phase 1 work.
 - Capture state is always available from the window and tray. Pause is a
   one-action command, and the resulting state is distinguishable from stopped,
   excluded, failed, locked, and storage-constrained states.
@@ -857,12 +864,12 @@ the user explicitly enables a future telemetry feature.
 ## 21. Delivery Plan
 
 Phases are release gates, not a claim of strict implementation order. As of
-2026-07-16, the no-capture manual-timeline portions of Phases 2 and 3 plus the
-persistent settings and recording-consent foundation are implemented. Phase 1
-also has Accepted ADR 0001, verified QiDayflow source provenance, the x64 C++20
-C ABI v1 foundation, and five native tests in Debug and Release. Live capture
-and managed native integration remain disabled, so no phase exit criterion is
-met.
+2026-07-16, the no-capture manual-timeline portions of Phases 2 and 3 plus
+schema v3, consent policy v2, and persistent retention/exclusion/session choices
+are implemented. Phase 1 also has Accepted ADR 0001, verified QiDayflow source
+provenance, the x64 C++20 C ABI v1 foundation, and five native tests in Debug and
+Release. Live capture and managed native integration remain disabled, so no
+phase exit criterion is met.
 
 ### Phase 0: Foundation
 

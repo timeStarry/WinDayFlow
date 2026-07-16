@@ -2,11 +2,14 @@ namespace WinDayFlow.Application.Settings;
 
 public sealed record RecordingConsent(
     int PolicyVersion,
-    DateTimeOffset AcceptedAtUtc)
+    DateTimeOffset AcceptedAtUtc,
+    long? PrivacyRevision = null)
 {
     public int PolicyVersion { get; } = ValidatePolicyVersion(PolicyVersion);
 
     public DateTimeOffset AcceptedAtUtc { get; } = ValidateAcceptedAtUtc(AcceptedAtUtc);
+
+    public long? PrivacyRevision { get; } = ValidatePrivacyRevision(PrivacyRevision);
 
     private static int ValidatePolicyVersion(int policyVersion)
     {
@@ -31,5 +34,18 @@ public sealed record RecordingConsent(
         }
 
         return acceptedAtUtc;
+    }
+
+    private static long? ValidatePrivacyRevision(long? privacyRevision)
+    {
+        if (privacyRevision <= 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(privacyRevision),
+                privacyRevision,
+                "The consented privacy revision must be positive when present.");
+        }
+
+        return privacyRevision;
     }
 }

@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Globalization;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using WinDayFlow.Application.Settings;
@@ -13,6 +14,7 @@ public sealed partial class SettingsPage : Page
     private bool _dialogOpen;
     private bool _isSubscribed;
     private bool _isUpdatingCaptureToggle;
+    private bool _isUpdatingPrivacyControls;
     private bool _isUpdatingThemePicker;
 
     public SettingsPage()
@@ -25,6 +27,7 @@ public sealed partial class SettingsPage : Page
         SizeChanged += OnSizeChanged;
         SynchronizeThemePicker();
         SynchronizeCaptureToggle();
+        SynchronizePrivacyControls();
         UpdateConsentActions();
         UpdateCaptureInformation();
     }
@@ -42,6 +45,7 @@ public sealed partial class SettingsPage : Page
         UpdateResponsiveLayout(ActualWidth);
         SynchronizeThemePicker();
         SynchronizeCaptureToggle();
+        SynchronizePrivacyControls();
         UpdateConsentActions();
         UpdateCaptureInformation();
         UpdateErrorInformation();
@@ -109,6 +113,10 @@ public sealed partial class SettingsPage : Page
         content.Children.Add(CreateDialogText(
             "控制权：你可以随时停止录制或撤回同意。撤回不会自动删除已有本地数据。"));
         content.Children.Add(CreateDialogText(
+            $"保留策略：{ViewModel.RetentionSummaryText}。"));
+        content.Children.Add(CreateDialogText(
+            $"隐私选择：{ViewModel.PrivacySummaryText}。"));
+        content.Children.Add(CreateDialogText(
             $"录制说明版本：{AppSettingsService.CurrentRecordingConsentVersion}"));
 
         var dialog = new ContentDialog
@@ -171,6 +179,43 @@ public sealed partial class SettingsPage : Page
         UpdateErrorInformation();
     }
 
+    private async void OnRetentionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_isUpdatingPrivacyControls
+            || RetentionPicker.SelectedItem is not ComboBoxItem { Tag: string value }
+            || !int.TryParse(value, out var retentionDays)
+            || retentionDays == ViewModel.EvidenceRetentionDays)
+        {
+            return;
+        }
+
+        await PersistPrivacyControlsAsync(retentionDays);
+    }
+
+    private async void OnPrivacyToggleChanged(object sender, RoutedEventArgs e)
+    {
+        if (_isUpdatingPrivacyControls)
+        {
+            return;
+        }
+
+        await PersistPrivacyControlsAsync(ViewModel.EvidenceRetentionDays);
+    }
+
+    private async Task PersistPrivacyControlsAsync(int retentionDays)
+    {
+        if (!await ViewModel.SetCapturePrivacyAsync(
+                retentionDays,
+                SensitiveApplicationToggle.IsOn,
+                RemoteSessionToggle.IsOn,
+                ScreenSharingToggle.IsOn))
+        {
+            SynchronizePrivacyControls();
+        }
+
+        UpdateErrorInformation();
+    }
+
     private void OnViewModelPropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
         if (e.PropertyName == nameof(SettingsViewModel.Theme))
@@ -181,6 +226,14 @@ public sealed partial class SettingsPage : Page
         if (e.PropertyName == nameof(SettingsViewModel.CaptureEnabled))
         {
             SynchronizeCaptureToggle();
+        }
+
+        if (e.PropertyName is nameof(SettingsViewModel.EvidenceRetentionDays)
+            or nameof(SettingsViewModel.ExcludeSensitiveApplications)
+            or nameof(SettingsViewModel.PauseInRemoteSessions)
+            or nameof(SettingsViewModel.PauseDuringScreenSharing))
+        {
+            SynchronizePrivacyControls();
         }
 
         if (e.PropertyName is nameof(SettingsViewModel.HasValidRecordingConsent)
@@ -246,6 +299,40 @@ public sealed partial class SettingsPage : Page
         _isUpdatingCaptureToggle = false;
     }
 
+    private void SynchronizePrivacyControls()
+    {
+        _isUpdatingPrivacyControls = true;
+        try
+        {
+            var retentionTag = ViewModel.EvidenceRetentionDays.ToString(
+                CultureInfo.InvariantCulture);
+            var matchingItem = RetentionPicker.Items
+                .OfType<ComboBoxItem>()
+                .FirstOrDefault(item => string.Equals(
+                    item.Tag as string,
+                    retentionTag,
+                    StringComparison.Ordinal));
+            if (matchingItem is null)
+            {
+                matchingItem = new ComboBoxItem
+                {
+                    Content = $"{ViewModel.EvidenceRetentionDays} 天",
+                    Tag = retentionTag,
+                };
+                RetentionPicker.Items.Add(matchingItem);
+            }
+
+            RetentionPicker.SelectedItem = matchingItem;
+            SensitiveApplicationToggle.IsOn = ViewModel.ExcludeSensitiveApplications;
+            RemoteSessionToggle.IsOn = ViewModel.PauseInRemoteSessions;
+            ScreenSharingToggle.IsOn = ViewModel.PauseDuringScreenSharing;
+        }
+        finally
+        {
+            _isUpdatingPrivacyControls = false;
+        }
+    }
+
     private void UpdateConsentActions()
     {
         GrantConsentButton.Visibility = ViewModel.HasValidRecordingConsent
@@ -299,6 +386,13 @@ public sealed partial class SettingsPage : Page
         UpdateSettingLayout(ConsentSettingLayout, ConsentActionPanel, useStackedLayout);
         UpdateSettingLayout(CaptureSettingLayout, CaptureToggle, useStackedLayout);
         UpdateSettingLayout(StorageSettingLayout, DataFolderTextBox, useStackedLayout);
+        UpdateSettingLayout(RetentionSettingLayout, RetentionPicker, useStackedLayout);
+        UpdateSettingLayout(
+            SensitiveApplicationSettingLayout,
+            SensitiveApplicationToggle,
+            useStackedLayout);
+        UpdateSettingLayout(RemoteSessionSettingLayout, RemoteSessionToggle, useStackedLayout);
+        UpdateSettingLayout(ScreenSharingSettingLayout, ScreenSharingToggle, useStackedLayout);
         UpdateSettingLayout(CloudSettingLayout, CloudAnalysisToggle, useStackedLayout);
 
         ConsentActionPanel.Orientation = useStackedLayout

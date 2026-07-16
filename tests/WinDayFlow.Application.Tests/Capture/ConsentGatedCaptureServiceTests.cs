@@ -245,7 +245,8 @@ public sealed class ConsentGatedCaptureServiceTests
         RecordingConsent? consent = useOutdatedConsent
             ? new RecordingConsent(
                 AppSettingsService.CurrentRecordingConsentVersion + 1,
-                new DateTimeOffset(2026, 7, 16, 0, 0, 0, TimeSpan.Zero))
+                new DateTimeOffset(2026, 7, 16, 0, 0, 0, TimeSpan.Zero),
+                CapturePrivacySettings.Default.Revision)
             : null;
         var initial = new AppSettings(
             AppThemePreference.System,

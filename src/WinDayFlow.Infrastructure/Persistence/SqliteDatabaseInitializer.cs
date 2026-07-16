@@ -5,7 +5,7 @@ namespace WinDayFlow.Infrastructure.Persistence;
 
 public sealed class SqliteDatabaseInitializer
 {
-    private const int LatestSchemaVersion = 2;
+    private const int LatestSchemaVersion = 3;
 
     private const string CreateMigrationTableSql = """
         CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -121,10 +121,94 @@ public sealed class SqliteDatabaseInitializer
         VALUES (1, 0, 0, 0, NULL, NULL);
         """;
 
+    private const string MigrationVersion3Sql = """
+        ALTER TABLE app_settings RENAME TO app_settings_v2;
+
+        CREATE TABLE app_settings (
+            id INTEGER NOT NULL PRIMARY KEY CHECK (id = 1),
+            theme INTEGER NOT NULL CHECK (theme BETWEEN 0 AND 2),
+            capture_enabled INTEGER NOT NULL CHECK (capture_enabled IN (0, 1)),
+            cloud_analysis_enabled INTEGER NOT NULL CHECK (cloud_analysis_enabled IN (0, 1)),
+            capture_consent_version INTEGER NULL CHECK (
+                capture_consent_version IS NULL OR capture_consent_version > 0
+            ),
+            capture_consent_granted_at_utc TEXT NULL CHECK (
+                capture_consent_granted_at_utc IS NULL
+                OR length(trim(capture_consent_granted_at_utc)) > 0
+            ),
+            capture_consent_privacy_revision INTEGER NULL CHECK (
+                capture_consent_privacy_revision IS NULL
+                OR capture_consent_privacy_revision > 0
+            ),
+            evidence_retention_days INTEGER NOT NULL CHECK (
+                evidence_retention_days BETWEEN 1 AND 365
+            ),
+            exclude_sensitive_applications INTEGER NOT NULL CHECK (
+                exclude_sensitive_applications IN (0, 1)
+            ),
+            pause_in_remote_sessions INTEGER NOT NULL CHECK (
+                pause_in_remote_sessions IN (0, 1)
+            ),
+            pause_during_screen_sharing INTEGER NOT NULL CHECK (
+                pause_during_screen_sharing IN (0, 1)
+            ),
+            capture_privacy_revision INTEGER NOT NULL CHECK (
+                capture_privacy_revision > 0
+            ),
+            CHECK (
+                (capture_consent_version IS NULL
+                    AND capture_consent_granted_at_utc IS NULL
+                    AND capture_consent_privacy_revision IS NULL)
+                OR
+                (capture_consent_version IS NOT NULL
+                    AND capture_consent_granted_at_utc IS NOT NULL)
+            ),
+            CHECK (
+                capture_enabled = 0
+                OR (
+                    capture_consent_version = 2
+                    AND capture_consent_granted_at_utc IS NOT NULL
+                    AND capture_consent_privacy_revision = capture_privacy_revision
+                )
+            )
+        );
+
+        INSERT INTO app_settings(
+            id,
+            theme,
+            capture_enabled,
+            cloud_analysis_enabled,
+            capture_consent_version,
+            capture_consent_granted_at_utc,
+            capture_consent_privacy_revision,
+            evidence_retention_days,
+            exclude_sensitive_applications,
+            pause_in_remote_sessions,
+            pause_during_screen_sharing,
+            capture_privacy_revision)
+        SELECT
+            id,
+            theme,
+            0,
+            cloud_analysis_enabled,
+            capture_consent_version,
+            capture_consent_granted_at_utc,
+            NULL,
+            30,
+            1,
+            1,
+            1,
+            1
+        FROM app_settings_v2;
+
+        DROP TABLE app_settings_v2;
+        """;
+
     private static readonly IReadOnlyList<Migration> Migrations =
     [
         new(1, MigrationVersion1Sql),
         new(2, MigrationVersion2Sql),
+        new(3, MigrationVersion3Sql),
     ];
 
     private readonly SqliteConnectionFactory _connectionFactory;
