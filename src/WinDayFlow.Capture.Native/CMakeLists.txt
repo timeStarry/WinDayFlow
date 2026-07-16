@@ -11,6 +11,8 @@ include(CTest)
 add_library(windayflow_capture_core STATIC
   internal/capture_event_queue.cpp
   internal/capture_policy.cpp
+  internal/capture_runtime_owner.cpp
+  internal/capture_safety_core.cpp
   internal/pixel_buffer.cpp
   internal/privacy_guard.cpp)
 
@@ -84,6 +86,9 @@ if(BUILD_TESTING)
 
   add_windayflow_native_test(capture_event_queue_tests tests/capture_event_queue_tests.cpp)
   target_link_libraries(capture_event_queue_tests PRIVATE windayflow_capture_core)
+
+  add_windayflow_native_test(capture_safety_core_tests tests/capture_safety_core_tests.cpp)
+  target_link_libraries(capture_safety_core_tests PRIVATE windayflow_capture_core)
 
   add_windayflow_native_test(capture_c_api_tests tests/capture_c_api_tests.cpp)
   target_link_libraries(capture_c_api_tests PRIVATE windayflow_capture)

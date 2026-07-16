@@ -38,6 +38,9 @@ enum {
   WDF_CAPTURE_RESULT_POLICY_BLOCKED = -6,
   WDF_CAPTURE_RESULT_STALE_POLICY = -7,
   WDF_CAPTURE_RESULT_POLICY_REVISION_CONFLICT = -8,
+  WDF_CAPTURE_RESULT_TARGET_MISMATCH = -9,
+  WDF_CAPTURE_RESULT_POLICY_REVISION_GAP = -10,
+  WDF_CAPTURE_RESULT_GENERATION_EXHAUSTED = -11,
   WDF_CAPTURE_RESULT_INTERNAL_ERROR = -255
 };
 
@@ -116,7 +119,15 @@ enum {
   WDF_CAPTURE_CAPABILITY_EVENT_QUEUE = 1ULL << 1,
   WDF_CAPTURE_CAPABILITY_SCREEN_CAPTURE = 1ULL << 2,
   WDF_CAPTURE_CAPABILITY_H264_CHUNKS = 1ULL << 3,
-  WDF_CAPTURE_CAPABILITY_EVIDENCE_EXTRACTION = 1ULL << 4
+  WDF_CAPTURE_CAPABILITY_EVIDENCE_EXTRACTION = 1ULL << 4,
+  WDF_CAPTURE_CAPABILITY_TARGET_SCOPED_AUTHORIZATION = 1ULL << 5,
+  WDF_CAPTURE_CAPABILITY_PERSISTENCE_GENERATION_BARRIER = 1ULL << 6,
+  WDF_CAPTURE_CAPABILITY_DETERMINISTIC_STOP = 1ULL << 7
+};
+
+typedef uint32_t wdf_capture_target_flags;
+enum {
+  WDF_CAPTURE_TARGET_PRESENT = 1U << 0
 };
 
 #if defined(_MSC_VER) || defined(__clang__) || defined(__GNUC__)
@@ -152,6 +163,30 @@ typedef struct wdf_capture_privacy_context_v1 {
   uint32_t reserved[8];
 } wdf_capture_privacy_context_v1;
 
+typedef struct wdf_capture_runtime_authorization_v1 {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint64_t runtime_policy_revision;
+  uint64_t target_epoch;
+  uint64_t target_window_handle;
+  uint64_t target_process_creation_time_100ns;
+  uint32_t target_process_id;
+  wdf_capture_target_flags target_flags;
+  wdf_capture_policy_decision consent_granted;
+  wdf_capture_policy_decision session_unlocked;
+  wdf_capture_policy_decision secure_desktop_clear;
+  wdf_capture_policy_decision remote_session_allowed;
+  wdf_capture_policy_decision presentation_allowed;
+  wdf_capture_policy_decision application_allowed;
+  wdf_capture_policy_decision window_allowed;
+  wdf_capture_policy_decision storage_available;
+  uint32_t reserved[8];
+} wdf_capture_runtime_authorization_v1;
+
+#if defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable : 4201)
+#endif
 typedef struct wdf_capture_event_v1 {
   uint32_t struct_size;
   uint32_t abi_version;
@@ -163,8 +198,18 @@ typedef struct wdf_capture_event_v1 {
   wdf_capture_error error;
   uint32_t dropped_before;
   uint32_t detail_utf8_length;
-  uint32_t reserved[8];
+  union {
+    struct {
+      uint64_t persistence_generation;
+      uint64_t target_epoch;
+      uint32_t reserved_tail[4];
+    };
+    uint32_t reserved[8];
+  };
 } wdf_capture_event_v1;
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
 
 #if defined(_MSC_VER) || defined(__clang__) || defined(__GNUC__)
 #pragma pack(pop)
@@ -178,8 +223,26 @@ static_assert(sizeof(wdf_capture_config_v1) == 80);
 static_assert(offsetof(wdf_capture_config_v1, output_directory_utf8) == 32);
 static_assert(sizeof(wdf_capture_privacy_context_v1) == 80);
 static_assert(offsetof(wdf_capture_privacy_context_v1, policy_revision) == 40);
+static_assert(sizeof(wdf_capture_runtime_authorization_v1) == 112);
+static_assert(offsetof(wdf_capture_runtime_authorization_v1,
+                       runtime_policy_revision) == 8);
+static_assert(offsetof(wdf_capture_runtime_authorization_v1, target_epoch) ==
+              16);
+static_assert(offsetof(wdf_capture_runtime_authorization_v1,
+                       target_window_handle) == 24);
+static_assert(offsetof(wdf_capture_runtime_authorization_v1,
+                       target_process_creation_time_100ns) == 32);
+static_assert(offsetof(wdf_capture_runtime_authorization_v1,
+                       target_process_id) == 40);
+static_assert(offsetof(wdf_capture_runtime_authorization_v1, target_flags) ==
+              44);
+static_assert(offsetof(wdf_capture_runtime_authorization_v1,
+                       consent_granted) == 48);
+static_assert(offsetof(wdf_capture_runtime_authorization_v1, reserved) == 80);
 static_assert(sizeof(wdf_capture_event_v1) == 80);
 static_assert(offsetof(wdf_capture_event_v1, sequence) == 8);
+static_assert(offsetof(wdf_capture_event_v1, persistence_generation) == 48);
+static_assert(offsetof(wdf_capture_event_v1, target_epoch) == 56);
 #else
 _Static_assert(sizeof(wdf_capture_config_v1) == 80,
                "wdf_capture_config_v1 ABI layout changed");
@@ -189,10 +252,39 @@ _Static_assert(sizeof(wdf_capture_privacy_context_v1) == 80,
                "wdf_capture_privacy_context_v1 ABI layout changed");
 _Static_assert(offsetof(wdf_capture_privacy_context_v1, policy_revision) == 40,
                "wdf_capture_privacy_context_v1 revision offset changed");
+_Static_assert(sizeof(wdf_capture_runtime_authorization_v1) == 112,
+               "wdf_capture_runtime_authorization_v1 ABI layout changed");
+_Static_assert(offsetof(wdf_capture_runtime_authorization_v1,
+                        runtime_policy_revision) == 8,
+               "runtime authorization revision offset changed");
+_Static_assert(offsetof(wdf_capture_runtime_authorization_v1, target_epoch) ==
+                   16,
+               "runtime authorization target epoch offset changed");
+_Static_assert(offsetof(wdf_capture_runtime_authorization_v1,
+                        target_window_handle) == 24,
+               "runtime authorization HWND offset changed");
+_Static_assert(offsetof(wdf_capture_runtime_authorization_v1,
+                        target_process_creation_time_100ns) == 32,
+               "runtime authorization process creation offset changed");
+_Static_assert(offsetof(wdf_capture_runtime_authorization_v1,
+                        target_process_id) == 40,
+               "runtime authorization PID offset changed");
+_Static_assert(offsetof(wdf_capture_runtime_authorization_v1, target_flags) ==
+                   44,
+               "runtime authorization flags offset changed");
+_Static_assert(offsetof(wdf_capture_runtime_authorization_v1,
+                        consent_granted) == 48,
+               "runtime authorization decisions offset changed");
+_Static_assert(offsetof(wdf_capture_runtime_authorization_v1, reserved) == 80,
+               "runtime authorization reserved offset changed");
 _Static_assert(sizeof(wdf_capture_event_v1) == 80,
                "wdf_capture_event_v1 ABI layout changed");
 _Static_assert(offsetof(wdf_capture_event_v1, sequence) == 8,
                "wdf_capture_event_v1 sequence offset changed");
+_Static_assert(offsetof(wdf_capture_event_v1, persistence_generation) == 48,
+               "wdf_capture_event_v1 generation offset changed");
+_Static_assert(offsetof(wdf_capture_event_v1, target_epoch) == 56,
+               "wdf_capture_event_v1 target epoch offset changed");
 #endif
 #endif
 
@@ -211,6 +303,17 @@ WDF_CAPTURE_API wdf_capture_result WDF_CAPTURE_CALL
 wdf_capture_update_privacy_context(
     wdf_capture_handle handle,
     const wdf_capture_privacy_context_v1* context) WDF_CAPTURE_NOEXCEPT;
+
+WDF_CAPTURE_API wdf_capture_result WDF_CAPTURE_CALL
+wdf_capture_update_runtime_authorization(
+    wdf_capture_handle handle,
+    const wdf_capture_runtime_authorization_v1* context,
+    uint64_t* persistence_generation) WDF_CAPTURE_NOEXCEPT;
+
+WDF_CAPTURE_API wdf_capture_result WDF_CAPTURE_CALL
+wdf_capture_revoke_runtime_authorization(
+    wdf_capture_handle handle,
+    uint64_t* persistence_generation) WDF_CAPTURE_NOEXCEPT;
 
 WDF_CAPTURE_API wdf_capture_result WDF_CAPTURE_CALL
 wdf_capture_start(wdf_capture_handle handle) WDF_CAPTURE_NOEXCEPT;

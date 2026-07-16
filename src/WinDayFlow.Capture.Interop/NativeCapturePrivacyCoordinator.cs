@@ -1,26 +1,39 @@
 using System.Diagnostics;
+using System.Threading.Channels;
 using WinDayFlow.Application.Capture;
 using WinDayFlow.Application.Settings;
 
 namespace WinDayFlow.Capture.Interop;
 
-public interface INativeCapturePrivacyTarget
+public interface INativeCaptureAuthorizationTarget
 {
-    Task UpdatePrivacyContextAsync(
-        NativeCapturePrivacyContext context,
+    Task<ulong> UpdateRuntimeAuthorizationAsync(
+        NativeCaptureRuntimeAuthorization authorization,
+        CancellationToken cancellationToken = default);
+
+    Task<ulong> RevokeRuntimeAuthorizationAsync(
         CancellationToken cancellationToken = default);
 }
 
 public sealed class NativeCapturePrivacyCoordinator
     : IAppSettingsCommitBarrier, ICaptureRuntimeAuthorization, IDisposable
 {
-    private readonly INativeCapturePrivacyTarget _target;
+    private readonly INativeCaptureAuthorizationTarget _target;
     private readonly object _disposeSync = new();
+    private readonly object _quiesceSync = new();
     private readonly object _settingsCommitSync = new();
     private readonly SemaphoreSlim _applyGate = new(1, 1);
+    private readonly Channel<AuthorizationNotification> _authorizationNotifications =
+        Channel.CreateUnbounded<AuthorizationNotification>(new UnboundedChannelOptions
+        {
+            SingleReader = true,
+            SingleWriter = false,
+            AllowSynchronousContinuations = false,
+        });
     private AppSettings _committedSettings;
     private NativeCapturePrivacySignals _signals;
-    private NativeCapturePrivacyContext _lastApplied;
+    private NativeCaptureRuntimeAuthorization _lastApplied;
+    private ulong _lastPersistenceGeneration;
     private Exception? _fatalFailure;
     private AppSettings? _preparedPrevious;
     private AppSettings? _preparedProposed;
@@ -28,18 +41,22 @@ public sealed class NativeCapturePrivacyCoordinator
     private int _captureAuthorized;
     private long _invalidationGeneration;
     private EventHandler<CaptureRuntimeAuthorizationChangedEventArgs>? _authorizationChanged;
+    private Task? _quiesceTask;
+    private int _quiescing;
     private bool _disposed;
 
     public NativeCapturePrivacyCoordinator(
-        INativeCapturePrivacyTarget target,
+        INativeCaptureAuthorizationTarget target,
         NativeCapturePrivacyContext initialContext,
         AppSettings? initialSettings = null,
         NativeCapturePrivacySignals? initialSignals = null)
     {
         _target = target ?? throw new ArgumentNullException(nameof(target));
-        _lastApplied = initialContext
-            ?? throw new ArgumentNullException(nameof(initialContext));
-        if (_lastApplied.ConsentGranted == NativeCapturePolicyDecision.Allow)
+        ArgumentNullException.ThrowIfNull(initialContext);
+        _lastApplied = new NativeCaptureRuntimeAuthorization(
+            initialContext,
+            NativeCaptureTargetIdentity.Unknown);
+        if (_lastApplied.PrivacyContext.ConsentGranted == NativeCapturePolicyDecision.Allow)
         {
             throw new ArgumentException(
                 "The native privacy coordinator requires a fail-closed initial context.",
@@ -48,6 +65,7 @@ public sealed class NativeCapturePrivacyCoordinator
 
         _committedSettings = initialSettings ?? AppSettings.Default;
         _signals = initialSignals ?? NativeCapturePrivacySignals.FailClosed;
+        _ = Task.Run(DispatchAuthorizationNotificationsAsync);
     }
 
     public bool IsCaptureAuthorized =>
@@ -57,7 +75,15 @@ public sealed class NativeCapturePrivacyCoordinator
         Volatile.Read(ref _invalidationGeneration);
 
     public NativeCapturePrivacyContext LastAppliedContext =>
+        Volatile.Read(ref _lastApplied).PrivacyContext;
+
+    public NativeCaptureRuntimeAuthorization LastAppliedAuthorization =>
         Volatile.Read(ref _lastApplied);
+
+    public ulong LastPersistenceGeneration =>
+        Volatile.Read(ref _lastPersistenceGeneration);
+
+    public bool IsFaulted => Volatile.Read(ref _fatalFailure) is not null;
 
     public event EventHandler<CaptureRuntimeAuthorizationChangedEventArgs>? AuthorizationChanged
     {
@@ -76,6 +102,31 @@ public sealed class NativeCapturePrivacyCoordinator
                 _authorizationChanged -= value;
             }
         }
+    }
+
+    public Task QuiesceAsync()
+    {
+        TaskCompletionSource? completion = null;
+        Task task;
+        lock (_quiesceSync)
+        {
+            if (_quiesceTask is not null)
+            {
+                return _quiesceTask;
+            }
+
+            ThrowIfDisposed();
+            Interlocked.Exchange(ref _quiescing, 1);
+            Interlocked.Exchange(ref _forcedBlock, 1);
+            completion = new TaskCompletionSource(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            task = completion.Task;
+            _quiesceTask = task;
+        }
+
+        SetCaptureAuthorized(authorized: false);
+        _ = CompleteQuiesceAsync(completion);
+        return task;
     }
 
     public async Task PrepareAsync(
@@ -211,7 +262,8 @@ public sealed class NativeCapturePrivacyCoordinator
             signals,
             forceBlock: Volatile.Read(ref _forcedBlock) != 0,
             LastAppliedContext.RuntimePolicyRevision);
-        if (!IsFullyAllowed(preview))
+        if (!IsFullyAllowed(preview.PrivacyContext)
+            || !HasSameDecisions(Volatile.Read(ref _lastApplied), preview))
         {
             SetCaptureAuthorized(authorized: false);
         }
@@ -264,6 +316,7 @@ public sealed class NativeCapturePrivacyCoordinator
             _authorizationChanged = null;
         }
 
+        _authorizationNotifications.Writer.TryComplete();
         RaiseAuthorizationChanged(handler, eventArgs);
         GC.SuppressFinalize(this);
     }
@@ -281,7 +334,7 @@ public sealed class NativeCapturePrivacyCoordinator
             _lastApplied.RuntimePolicyRevision);
         if (HasSameDecisions(_lastApplied, preview))
         {
-            return _lastApplied;
+            return _lastApplied.PrivacyContext;
         }
 
         if (_lastApplied.RuntimePolicyRevision == ulong.MaxValue)
@@ -299,9 +352,14 @@ public sealed class NativeCapturePrivacyCoordinator
             _lastApplied.RuntimePolicyRevision + 1);
         try
         {
-            await _target
-                .UpdatePrivacyContextAsync(next, cancellationToken)
+            var persistenceGeneration = await _target
+                .UpdateRuntimeAuthorizationAsync(next, cancellationToken)
                 .ConfigureAwait(false);
+            ValidateAdvancedPersistenceGeneration(
+                persistenceGeneration,
+                "updating runtime authorization");
+
+            Volatile.Write(ref _lastPersistenceGeneration, persistenceGeneration);
         }
         catch (Exception exception)
         {
@@ -310,10 +368,10 @@ public sealed class NativeCapturePrivacyCoordinator
         }
 
         Volatile.Write(ref _lastApplied, next);
-        return next;
+        return next.PrivacyContext;
     }
 
-    private static NativeCapturePrivacyContext Compose(
+    private static NativeCaptureRuntimeAuthorization Compose(
         AppSettings settings,
         NativeCapturePrivacySignals signals,
         bool forceBlock,
@@ -323,21 +381,42 @@ public sealed class NativeCapturePrivacyCoordinator
             settings,
             signals,
             runtimePolicyRevision);
-        if (!forceBlock || context.ConsentGranted == NativeCapturePolicyDecision.Block)
+        if (NativeCaptureRuntimeAuthorization.IsFullyAllowed(context)
+            && signals.Target.State != NativeCaptureTargetIdentityState.Present)
         {
-            return context;
+            context = new NativeCapturePrivacyContext(
+                context.ConsentGranted,
+                context.SessionUnlocked,
+                context.SecureDesktopClear,
+                context.RemoteSessionAllowed,
+                context.PresentationAllowed,
+                NativeCapturePolicyDecision.Unknown,
+                context.WindowAllowed,
+                context.StorageAvailable,
+                context.RuntimePolicyRevision);
         }
 
-        return new NativeCapturePrivacyContext(
-            NativeCapturePolicyDecision.Block,
-            context.SessionUnlocked,
-            context.SecureDesktopClear,
-            context.RemoteSessionAllowed,
-            context.PresentationAllowed,
-            context.ApplicationAllowed,
-            context.WindowAllowed,
-            context.StorageAvailable,
-            context.RuntimePolicyRevision);
+        if (!forceBlock || context.ConsentGranted == NativeCapturePolicyDecision.Block)
+        {
+            return new NativeCaptureRuntimeAuthorization(
+                context,
+                NativeCaptureRuntimeAuthorization.IsFullyAllowed(context)
+                    ? signals.Target
+                    : NativeCaptureTargetIdentity.Unknown);
+        }
+
+        return new NativeCaptureRuntimeAuthorization(
+            new NativeCapturePrivacyContext(
+                NativeCapturePolicyDecision.Block,
+                context.SessionUnlocked,
+                context.SecureDesktopClear,
+                context.RemoteSessionAllowed,
+                context.PresentationAllowed,
+                context.ApplicationAllowed,
+                context.WindowAllowed,
+                context.StorageAvailable,
+                context.RuntimePolicyRevision),
+            NativeCaptureTargetIdentity.Unknown);
     }
 
     private static bool IsRestrictiveChange(
@@ -357,17 +436,18 @@ public sealed class NativeCapturePrivacyCoordinator
     }
 
     private static bool HasSameDecisions(
-        NativeCapturePrivacyContext left,
-        NativeCapturePrivacyContext right)
+        NativeCaptureRuntimeAuthorization left,
+        NativeCaptureRuntimeAuthorization right)
     {
-        return left.ConsentGranted == right.ConsentGranted
-            && left.SessionUnlocked == right.SessionUnlocked
-            && left.SecureDesktopClear == right.SecureDesktopClear
-            && left.RemoteSessionAllowed == right.RemoteSessionAllowed
-            && left.PresentationAllowed == right.PresentationAllowed
-            && left.ApplicationAllowed == right.ApplicationAllowed
-            && left.WindowAllowed == right.WindowAllowed
-            && left.StorageAvailable == right.StorageAvailable;
+        return left.PrivacyContext.ConsentGranted == right.PrivacyContext.ConsentGranted
+            && left.PrivacyContext.SessionUnlocked == right.PrivacyContext.SessionUnlocked
+            && left.PrivacyContext.SecureDesktopClear == right.PrivacyContext.SecureDesktopClear
+            && left.PrivacyContext.RemoteSessionAllowed == right.PrivacyContext.RemoteSessionAllowed
+            && left.PrivacyContext.PresentationAllowed == right.PrivacyContext.PresentationAllowed
+            && left.PrivacyContext.ApplicationAllowed == right.PrivacyContext.ApplicationAllowed
+            && left.PrivacyContext.WindowAllowed == right.PrivacyContext.WindowAllowed
+            && left.PrivacyContext.StorageAvailable == right.PrivacyContext.StorageAvailable
+            && left.Target.Equals(right.Target);
     }
 
     private static bool IsFullyAllowed(NativeCapturePrivacyContext context)
@@ -458,18 +538,37 @@ public sealed class NativeCapturePrivacyCoordinator
             return;
         }
 
-        foreach (EventHandler<CaptureRuntimeAuthorizationChangedEventArgs> subscriber
-            in handler.GetInvocationList())
+        _authorizationNotifications.Writer.TryWrite(
+            new AuthorizationNotification(handler, eventArgs));
+    }
+
+    private async Task DispatchAuthorizationNotificationsAsync()
+    {
+        try
         {
-            try
+            await foreach (var notification in _authorizationNotifications.Reader
+                               .ReadAllAsync()
+                               .ConfigureAwait(false))
             {
-                subscriber(this, eventArgs);
+                foreach (EventHandler<CaptureRuntimeAuthorizationChangedEventArgs> subscriber
+                    in notification.Handler.GetInvocationList())
+                {
+                    try
+                    {
+                        subscriber(this, notification.EventArgs);
+                    }
+                    catch (Exception exception)
+                    {
+                        Debug.WriteLine(
+                            $"A capture runtime authorization subscriber failed: {exception}");
+                    }
+                }
             }
-            catch (Exception exception)
-            {
-                Debug.WriteLine(
-                    $"A capture runtime authorization subscriber failed: {exception}");
-            }
+        }
+        catch (Exception exception)
+        {
+            Debug.WriteLine(
+                $"Capture runtime authorization notification dispatch stopped: {exception}");
         }
     }
 
@@ -516,6 +615,12 @@ public sealed class NativeCapturePrivacyCoordinator
     private void ThrowIfUsable()
     {
         ThrowIfDisposed();
+        if (Volatile.Read(ref _quiescing) != 0)
+        {
+            throw new InvalidOperationException(
+                "The native capture privacy coordinator is quiescing.");
+        }
+
         if (Volatile.Read(ref _fatalFailure) is { } failure)
         {
             throw new InvalidOperationException(
@@ -524,8 +629,135 @@ public sealed class NativeCapturePrivacyCoordinator
         }
     }
 
+    private async Task QuiesceCoreAsync()
+    {
+        await _applyGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+        try
+        {
+            var current = Volatile.Read(ref _lastApplied);
+            var context = current.PrivacyContext;
+            var revoked = new NativeCaptureRuntimeAuthorization(
+                new NativeCapturePrivacyContext(
+                    NativeCapturePolicyDecision.Block,
+                    context.SessionUnlocked,
+                    context.SecureDesktopClear,
+                    context.RemoteSessionAllowed,
+                    context.PresentationAllowed,
+                    context.ApplicationAllowed,
+                    context.WindowAllowed,
+                    context.StorageAvailable,
+                    current.RuntimePolicyRevision == ulong.MaxValue
+                        ? current.RuntimePolicyRevision
+                        : current.RuntimePolicyRevision + 1),
+                NativeCaptureTargetIdentity.Unknown);
+            var failures = new List<Exception>();
+            if (Volatile.Read(ref _fatalFailure) is { } fatalFailure)
+            {
+                failures.Add(new InvalidOperationException(
+                    "The native capture privacy coordinator faulted before it could quiesce.",
+                    fatalFailure));
+            }
+            else if (current.RuntimePolicyRevision == ulong.MaxValue)
+            {
+                failures.Add(new InvalidOperationException(
+                    "The native capture runtime policy revision has been exhausted; the native handle must be recreated."));
+            }
+            else
+            {
+                try
+                {
+                    var updateGeneration = await _target
+                        .UpdateRuntimeAuthorizationAsync(revoked, CancellationToken.None)
+                        .ConfigureAwait(false);
+                    ValidateAdvancedPersistenceGeneration(
+                        updateGeneration,
+                        "quiescing");
+                    Volatile.Write(ref _lastPersistenceGeneration, updateGeneration);
+                    Volatile.Write(ref _lastApplied, revoked);
+                }
+                catch (Exception exception)
+                {
+                    failures.Add(exception);
+                }
+            }
+
+            try
+            {
+                var revokeGeneration = await _target
+                    .RevokeRuntimeAuthorizationAsync(CancellationToken.None)
+                    .ConfigureAwait(false);
+                ValidateCurrentPersistenceGeneration(
+                    revokeGeneration,
+                    "revoking");
+                Volatile.Write(ref _lastPersistenceGeneration, revokeGeneration);
+                Volatile.Write(ref _lastApplied, revoked);
+            }
+            catch (Exception exception)
+            {
+                failures.Add(exception);
+            }
+
+            if (failures.Count > 0)
+            {
+                var failure = failures.Count == 1
+                    ? failures[0]
+                    : new AggregateException(
+                        "The native capture runtime could not quiesce cleanly.",
+                        failures);
+                MarkFatal(failure);
+                throw failure;
+            }
+        }
+        finally
+        {
+            _applyGate.Release();
+        }
+    }
+
+    private async Task CompleteQuiesceAsync(TaskCompletionSource completion)
+    {
+        try
+        {
+            await QuiesceCoreAsync().ConfigureAwait(false);
+            completion.TrySetResult();
+        }
+        catch (Exception exception)
+        {
+            completion.TrySetException(exception);
+        }
+    }
+
+    private sealed record AuthorizationNotification(
+        EventHandler<CaptureRuntimeAuthorizationChangedEventArgs> Handler,
+        CaptureRuntimeAuthorizationChangedEventArgs EventArgs);
+
+    private void ValidateAdvancedPersistenceGeneration(
+        ulong persistenceGeneration,
+        string operation)
+    {
+        if (persistenceGeneration == 0
+            || persistenceGeneration <= LastPersistenceGeneration)
+        {
+            throw new InvalidOperationException(
+                $"The native persistence generation did not advance while {operation}.");
+        }
+    }
+
+    private void ValidateCurrentPersistenceGeneration(
+        ulong persistenceGeneration,
+        string operation)
+    {
+        if (persistenceGeneration == 0
+            || persistenceGeneration < LastPersistenceGeneration)
+        {
+            throw new InvalidOperationException(
+                $"The native persistence generation regressed while {operation}.");
+        }
+    }
+
     private void ThrowIfDisposed()
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed), this);
     }
+
 }

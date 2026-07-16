@@ -7,19 +7,24 @@ using WinDayFlow.Application.Capture;
 namespace WinDayFlow.Capture.Interop;
 
 public sealed class NativeCaptureBackend
-    : ICaptureBackend, INativeCapturePrivacyTarget, IDisposable
+    : INativeCaptureRuntimeBackend, IDisposable
 {
     private const string FoundationUnavailableDetail =
         "原生录制基础已加载；实时屏幕捕获能力尚未启用。";
     private const int MaximumEventDetailBytes = 1024 * 1024;
     private const uint PollTimeoutMilliseconds = 250;
-    private const uint StopTimeoutMilliseconds = 5_000;
+    internal const uint StopTimeoutMilliseconds = 5_000;
 
     private static readonly UTF8Encoding StrictUtf8 = new(
         encoderShouldEmitUTF8Identifier: false,
         throwOnInvalidBytes: true);
 
     private readonly object _statusSync = new();
+    private readonly object _pumpStopSync = new();
+    private readonly object _shutdownSync = new();
+    private readonly object _persistenceBoundarySync = new();
+    private readonly object _disposeOperationSync = new();
+    private readonly object _destroyOperationSync = new();
     private readonly INativeCaptureApi _nativeApi;
     private readonly SafeCaptureHandle _handle;
     private readonly SemaphoreSlim _lifecycleGate = new(1, 1);
@@ -36,6 +41,14 @@ public sealed class NativeCaptureBackend
     private CaptureStatus _status;
     private EventHandler<CaptureStatusChangedEventArgs>? _statusChanged;
     private EventHandler<NativeCaptureChunkCommittedEventArgs>? _chunkCommitted;
+    private Task? _pumpStopTask;
+    private Task? _requestStopTask;
+    private NativePersistenceBoundary _persistenceBoundary = new(0, 0, null);
+    private int _shutdownStarted;
+    private TaskCompletionSource? _disposeCompletion;
+    private TaskCompletionSource<NativeCaptureResult>? _destroyCompletion;
+    private int _disposeOwnerThreadId;
+    private int _destroyOwnerThreadId;
     private bool _disposed;
 
     public NativeCaptureBackend(
@@ -68,11 +81,11 @@ public sealed class NativeCaptureBackend
         if (!probe.AbiCompatible)
         {
             throw new BadImageFormatException(
-                $"Native capture ABI {probe.AbiVersion} is incompatible with managed ABI {NativeCaptureAbiContract.AbiVersion}.");
+                probe.Failure
+                ?? $"Native capture ABI {probe.AbiVersion} is incompatible with managed ABI {NativeCaptureAbiContract.AbiVersion}.");
         }
 
-        var requiredFoundation = NativeCaptureCapabilities.PrivacyGuard
-            | NativeCaptureCapabilities.EventQueue;
+        var requiredFoundation = NativeCaptureAbiContract.FoundationCapabilities;
         if ((probe.Capabilities & requiredFoundation) != requiredFoundation)
         {
             throw new BadImageFormatException(
@@ -87,7 +100,18 @@ public sealed class NativeCaptureBackend
         _handle = CreateHandle(configuration, _nativeApi);
         try
         {
-            UpdatePrivacyContextCore(initialPrivacyContext);
+            if (SupportsRuntimeAuthorization)
+            {
+                _ = UpdateRuntimeAuthorizationCore(
+                    new NativeCaptureRuntimeAuthorization(
+                        initialPrivacyContext,
+                        NativeCaptureTargetIdentity.Unknown));
+            }
+            else
+            {
+                UpdatePrivacyContextCore(initialPrivacyContext);
+            }
+
             _notificationPump = Task.Run(DispatchNotificationsAsync);
             _eventPump = Task.Run(PollEventsAsync);
         }
@@ -102,7 +126,18 @@ public sealed class NativeCaptureBackend
     public NativeCaptureCapabilities Capabilities { get; }
 
     public bool SupportsScreenCapture =>
-        (Capabilities & NativeCaptureCapabilities.ScreenCapture) != 0;
+        (Capabilities & NativeCaptureAbiContract.SafeScreenCaptureCapabilities)
+        == NativeCaptureAbiContract.SafeScreenCaptureCapabilities;
+
+    public bool SupportsRuntimeAuthorization =>
+        (Capabilities & (
+            NativeCaptureCapabilities.TargetScopedAuthorization
+            | NativeCaptureCapabilities.PersistenceGenerationBarrier))
+        == (NativeCaptureCapabilities.TargetScopedAuthorization
+            | NativeCaptureCapabilities.PersistenceGenerationBarrier);
+
+    internal bool IsShutdownStarted =>
+        Volatile.Read(ref _shutdownStarted) != 0;
 
     public CaptureStatus CurrentStatus
     {
@@ -195,6 +230,16 @@ public sealed class NativeCaptureBackend
                     $"Capability probe failed with result {(int)capabilitiesResult}.");
             }
 
+            if (GetCapabilityContractFailure(capabilities) is { } capabilityFailure)
+            {
+                return new NativeCaptureProbe(
+                    LibraryLoaded: true,
+                    AbiCompatible: false,
+                    abiVersion,
+                    capabilities,
+                    capabilityFailure);
+            }
+
             return new NativeCaptureProbe(
                 LibraryLoaded: true,
                 AbiCompatible: true,
@@ -264,6 +309,7 @@ public sealed class NativeCaptureBackend
         try
         {
             ThrowIfDisposed();
+            ThrowIfShuttingDown();
             UpdatePrivacyContextCore(context);
         }
         finally
@@ -272,7 +318,296 @@ public sealed class NativeCaptureBackend
         }
     }
 
+    public async Task<ulong> UpdateRuntimeAuthorizationAsync(
+        NativeCaptureRuntimeAuthorization authorization,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(authorization);
+        EnsureRuntimeAuthorizationCapability();
+        await EnterLifecycleAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            ThrowIfDisposed();
+            ThrowIfShuttingDown();
+            return UpdateRuntimeAuthorizationCore(authorization);
+        }
+        finally
+        {
+            _lifecycleGate.Release();
+        }
+    }
+
     public void Dispose()
+    {
+        TaskCompletionSource? ownedCompletion = null;
+        Task completionTask;
+        lock (_disposeOperationSync)
+        {
+            if (_disposeCompletion is not null)
+            {
+                if (_disposeOwnerThreadId == Environment.CurrentManagedThreadId)
+                {
+                    return;
+                }
+
+                completionTask = _disposeCompletion.Task;
+            }
+            else
+            {
+                ownedCompletion = new TaskCompletionSource(
+                    TaskCreationOptions.RunContinuationsAsynchronously);
+                _disposeCompletion = ownedCompletion;
+                _disposeOwnerThreadId = Environment.CurrentManagedThreadId;
+                completionTask = ownedCompletion.Task;
+            }
+        }
+
+        if (ownedCompletion is null)
+        {
+            completionTask.GetAwaiter().GetResult();
+            return;
+        }
+
+        try
+        {
+            DisposeCore();
+            ownedCompletion.TrySetResult();
+        }
+        catch (Exception exception)
+        {
+            ownedCompletion.TrySetException(exception);
+            throw;
+        }
+        finally
+        {
+            Volatile.Write(ref _disposeOwnerThreadId, 0);
+        }
+    }
+
+    private void DisposeCore()
+    {
+        if (IsDisposed())
+        {
+            return;
+        }
+
+        Interlocked.Exchange(ref _shutdownStarted, 1);
+
+        if (SupportsRuntimeAuthorization)
+        {
+            try
+            {
+                RevokeRuntimeAuthorizationAsync(CancellationToken.None)
+                    .GetAwaiter()
+                    .GetResult();
+            }
+            catch (Exception exception)
+            {
+                Debug.WriteLine(
+                    $"Native capture authorization revoke failed during dispose: {exception}");
+            }
+        }
+
+        try
+        {
+            RequestStopForShutdownAsync().GetAwaiter().GetResult();
+        }
+        catch (Exception exception)
+        {
+            Debug.WriteLine($"Native capture stop request failed during dispose: {exception}");
+        }
+
+        try
+        {
+            WaitStoppedForShutdownAsync(StopTimeoutMilliseconds).GetAwaiter().GetResult();
+        }
+        catch (Exception exception)
+        {
+            Debug.WriteLine($"Native capture wait failed during dispose: {exception}");
+        }
+
+        try
+        {
+            StopEventPumpAsync().GetAwaiter().GetResult();
+        }
+        catch (Exception exception)
+        {
+            Debug.WriteLine($"Native capture event pump failed during dispose: {exception}");
+        }
+
+        try
+        {
+            var destroyResult = DestroyForShutdownCore();
+            if (destroyResult != NativeCaptureResult.Ok)
+            {
+                Debug.WriteLine(
+                    $"Native capture destroy failed during dispose with result {(int)destroyResult}.");
+            }
+        }
+        finally
+        {
+            CompleteOwnedShutdown();
+        }
+    }
+
+    Task INativeCaptureRuntimeBackend.RequestStopForShutdownAsync() =>
+        RequestStopForShutdownAsync();
+
+    private Task RequestStopForShutdownAsync()
+    {
+        lock (_shutdownSync)
+        {
+            _requestStopTask ??= RequestStopForShutdownCoreAsync();
+            return _requestStopTask;
+        }
+    }
+
+    Task INativeCaptureRuntimeBackend.WaitStoppedForShutdownAsync(
+        uint timeoutMilliseconds) =>
+        WaitStoppedForShutdownAsync(timeoutMilliseconds);
+
+    private async Task WaitStoppedForShutdownAsync(uint timeoutMilliseconds)
+    {
+        if (timeoutMilliseconds > 60_000)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(timeoutMilliseconds),
+                timeoutMilliseconds,
+                "The native stop wait must be bounded to at most 60000 milliseconds.");
+        }
+
+        await EnterLifecycleForShutdownAsync().ConfigureAwait(false);
+        try
+        {
+            ThrowForResult(
+                _nativeApi.WaitStopped(_handle, timeoutMilliseconds),
+                "wait_stopped");
+        }
+        finally
+        {
+            _lifecycleGate.Release();
+        }
+    }
+
+    public async Task<ulong> RevokeRuntimeAuthorizationAsync(
+        CancellationToken cancellationToken = default)
+    {
+        _ = cancellationToken;
+        EnsureRuntimeAuthorizationCapability();
+        await EnterLifecycleForShutdownAsync().ConfigureAwait(false);
+        try
+        {
+            lock (_persistenceBoundarySync)
+            {
+                ThrowForResult(
+                    _nativeApi.RevokeRuntimeAuthorization(
+                        _handle,
+                        out var persistenceGeneration),
+                    "revoke_runtime_authorization");
+                if (persistenceGeneration == 0)
+                {
+                    throw new InvalidDataException(
+                        "The native runtime authorization revoke returned no persistence generation.");
+                }
+
+                var currentBoundary = Volatile.Read(ref _persistenceBoundary);
+                if (persistenceGeneration < currentBoundary.PersistenceGeneration
+                    || (persistenceGeneration == currentBoundary.PersistenceGeneration
+                        && currentBoundary.TargetEpoch != 0))
+                {
+                    throw new InvalidDataException(
+                        "The native runtime authorization revoke returned a regressed persistence generation.");
+                }
+
+                Volatile.Write(
+                    ref _persistenceBoundary,
+                    new NativePersistenceBoundary(persistenceGeneration, 0, null));
+                return persistenceGeneration;
+            }
+        }
+        finally
+        {
+            _lifecycleGate.Release();
+        }
+    }
+
+    Task INativeCaptureRuntimeBackend.StopEventPumpAsync() =>
+        StopEventPumpAsync();
+
+    private Task StopEventPumpAsync()
+    {
+        lock (_pumpStopSync)
+        {
+            _pumpStopTask ??= StopEventPumpCoreAsync();
+            return _pumpStopTask;
+        }
+    }
+
+    NativeCaptureResult INativeCaptureRuntimeBackend.DestroyForShutdown() =>
+        DestroyForShutdownCore();
+
+    private NativeCaptureResult DestroyForShutdownCore()
+    {
+        TaskCompletionSource<NativeCaptureResult>? ownedCompletion = null;
+        Task<NativeCaptureResult> completionTask;
+        lock (_destroyOperationSync)
+        {
+            if (_destroyCompletion is not null)
+            {
+                if (_destroyOwnerThreadId == Environment.CurrentManagedThreadId)
+                {
+                    return NativeCaptureResult.InternalError;
+                }
+
+                completionTask = _destroyCompletion.Task;
+            }
+            else
+            {
+                ownedCompletion = new TaskCompletionSource<NativeCaptureResult>(
+                    TaskCreationOptions.RunContinuationsAsynchronously);
+                _destroyCompletion = ownedCompletion;
+                _destroyOwnerThreadId = Environment.CurrentManagedThreadId;
+                completionTask = ownedCompletion.Task;
+            }
+        }
+
+        if (ownedCompletion is null)
+        {
+            return completionTask.GetAwaiter().GetResult();
+        }
+
+        try
+        {
+            NativeCaptureResult result;
+            _lifecycleGate.Wait();
+            try
+            {
+                result = _handle.DestroyExplicit();
+            }
+            finally
+            {
+                _handle.Dispose();
+                _lifecycleGate.Release();
+            }
+
+            ownedCompletion.TrySetResult(result);
+            return result;
+        }
+        catch (Exception exception)
+        {
+            ownedCompletion.TrySetException(exception);
+            throw;
+        }
+        finally
+        {
+            Volatile.Write(ref _destroyOwnerThreadId, 0);
+        }
+    }
+
+    void INativeCaptureRuntimeBackend.CompleteOwnedShutdown() =>
+        CompleteOwnedShutdown();
+
+    private void CompleteOwnedShutdown()
     {
         lock (_statusSync)
         {
@@ -286,42 +621,12 @@ public sealed class NativeCaptureBackend
             _chunkCommitted = null;
         }
 
-        _lifetimeCancellation.Cancel();
-        _notifications.Writer.TryComplete();
-        _lifecycleGate.Wait();
-        try
-        {
-            if (!_handle.IsInvalid && !_handle.IsClosed)
-            {
-                _ = _nativeApi.RequestStop(_handle);
-                _ = _nativeApi.WaitStopped(
-                    _handle,
-                    StopTimeoutMilliseconds);
-                _handle.Dispose();
-            }
-        }
-        finally
-        {
-            _lifecycleGate.Release();
-        }
-
-        try
-        {
-            _eventPump.GetAwaiter().GetResult();
-        }
-        catch (OperationCanceledException)
-        {
-        }
-
-        if (_notificationPump.IsCompleted)
-        {
-            _notificationPump.GetAwaiter().GetResult();
-        }
-
         _lifetimeCancellation.Dispose();
         _lifecycleGate.Dispose();
-        GC.SuppressFinalize(this);
     }
+
+    void INativeCaptureRuntimeBackend.DisposeSafelyAfterConstructionFailure() =>
+        Dispose();
 
     private static unsafe SafeCaptureHandle CreateHandle(
         NativeCaptureConfiguration configuration,
@@ -383,6 +688,7 @@ public sealed class NativeCaptureBackend
         try
         {
             ThrowIfDisposed();
+            ThrowIfShuttingDown();
             ThrowForResult(nativeOperation(_handle), operation);
         }
         finally
@@ -395,10 +701,17 @@ public sealed class NativeCaptureBackend
     {
         cancellationToken.ThrowIfCancellationRequested();
         ThrowIfDisposed();
+        ThrowIfShuttingDown();
         using var linkedCancellation = CancellationTokenSource.CreateLinkedTokenSource(
             cancellationToken,
             _lifetimeCancellation.Token);
         await _lifecycleGate.WaitAsync(linkedCancellation.Token).ConfigureAwait(false);
+    }
+
+    private async Task EnterLifecycleForShutdownAsync()
+    {
+        ThrowIfDisposed();
+        await _lifecycleGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
     }
 
     private void UpdatePrivacyContextCore(NativeCapturePrivacyContext context)
@@ -417,11 +730,113 @@ public sealed class NativeCaptureBackend
             StorageAvailable = (int)context.StorageAvailable,
             PolicyRevision = context.RuntimePolicyRevision,
         };
-        ThrowForResult(
-            _nativeApi.UpdatePrivacyContext(
-                _handle,
-                ref nativeContext),
-            "update_privacy_context");
+        lock (_persistenceBoundarySync)
+        {
+            ThrowForResult(
+                _nativeApi.UpdatePrivacyContext(
+                    _handle,
+                    ref nativeContext),
+                "update_privacy_context");
+            if (SupportsRuntimeAuthorization)
+            {
+                Volatile.Write(
+                    ref _persistenceBoundary,
+                    new NativePersistenceBoundary(0, 0, null));
+            }
+        }
+    }
+
+    private unsafe ulong UpdateRuntimeAuthorizationCore(
+        NativeCaptureRuntimeAuthorization authorization)
+    {
+        var context = authorization.PrivacyContext;
+        var target = authorization.Target;
+        var targetPresent = target.State == NativeCaptureTargetIdentityState.Present;
+        var nativeAuthorization = new NativeCaptureRuntimeAuthorizationV1
+        {
+            StructSize = NativeCaptureAbiContract.X64RuntimeAuthorizationStructureSize,
+            AbiVersion = NativeCaptureAbiContract.AbiVersion,
+            RuntimePolicyRevision = context.RuntimePolicyRevision,
+            TargetEpoch = targetPresent ? target.TargetEpoch : 0,
+            TargetWindowHandle = targetPresent ? target.WindowHandle : 0,
+            TargetProcessCreationTime100ns = targetPresent
+                ? target.ProcessCreationTime100ns
+                : 0,
+            TargetProcessId = targetPresent ? target.ProcessId : 0,
+            TargetFlags = targetPresent
+                ? NativeCaptureRuntimeAuthorizationV1.TargetPresent
+                : 0,
+            ConsentGranted = (int)context.ConsentGranted,
+            SessionUnlocked = (int)context.SessionUnlocked,
+            SecureDesktopClear = (int)context.SecureDesktopClear,
+            RemoteSessionAllowed = (int)context.RemoteSessionAllowed,
+            PresentationAllowed = (int)context.PresentationAllowed,
+            ApplicationAllowed = (int)context.ApplicationAllowed,
+            WindowAllowed = (int)context.WindowAllowed,
+            StorageAvailable = (int)context.StorageAvailable,
+        };
+        lock (_persistenceBoundarySync)
+        {
+            ThrowForResult(
+                _nativeApi.UpdateRuntimeAuthorization(
+                    _handle,
+                    ref nativeAuthorization,
+                    out var persistenceGeneration),
+                "update_runtime_authorization");
+            if (persistenceGeneration == 0)
+            {
+                throw new InvalidDataException(
+                    "The native runtime authorization update returned no persistence generation.");
+            }
+
+            var currentBoundary = Volatile.Read(ref _persistenceBoundary);
+            if (persistenceGeneration < currentBoundary.PersistenceGeneration
+                || (persistenceGeneration == currentBoundary.PersistenceGeneration
+                    && !Equals(currentBoundary.Authorization, authorization)))
+            {
+                throw new InvalidDataException(
+                    "The native runtime authorization update returned a regressed or conflicting persistence generation.");
+            }
+
+            Volatile.Write(
+                ref _persistenceBoundary,
+                new NativePersistenceBoundary(
+                    persistenceGeneration,
+                    targetPresent ? target.TargetEpoch : 0,
+                    authorization));
+            return persistenceGeneration;
+        }
+    }
+
+    private async Task RequestStopForShutdownCoreAsync()
+    {
+        Interlocked.Exchange(ref _shutdownStarted, 1);
+        await EnterLifecycleForShutdownAsync().ConfigureAwait(false);
+        try
+        {
+            ThrowForResult(_nativeApi.RequestStop(_handle), "request_stop");
+        }
+        finally
+        {
+            _lifecycleGate.Release();
+        }
+    }
+
+    private async Task StopEventPumpCoreAsync()
+    {
+        _lifetimeCancellation.Cancel();
+        try
+        {
+            await _eventPump.ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        finally
+        {
+            _notifications.Writer.TryComplete();
+        }
+
     }
 
     private async Task PollEventsAsync()
@@ -506,6 +921,30 @@ public sealed class NativeCaptureBackend
         if (!Enum.IsDefined(state) || !Enum.IsDefined(reason) || !Enum.IsDefined(error))
         {
             throw new InvalidDataException("The native capture event contains an unknown code.");
+        }
+
+        if (eventKind == NativeCaptureEventKind.ChunkCommitted)
+        {
+            if (!SupportsScreenCapture)
+            {
+                throw new InvalidDataException(
+                    "A native binary without the complete live-capture safety capability set published a committed chunk.");
+            }
+
+            lock (_persistenceBoundarySync)
+            {
+                var persistenceBoundary = Volatile.Read(ref _persistenceBoundary);
+                if (captureEvent.PersistenceGeneration == 0
+                    || captureEvent.TargetEpoch == 0
+                    || captureEvent.PersistenceGeneration
+                        != persistenceBoundary.PersistenceGeneration
+                    || captureEvent.TargetEpoch
+                        != persistenceBoundary.TargetEpoch)
+                {
+                    throw new InvalidDataException(
+                        "The native committed chunk was not bound to the current persistence generation and capture target.");
+                }
+            }
         }
 
         var detail = captureEvent.DetailUtf8Length == 0
@@ -601,7 +1040,9 @@ public sealed class NativeCaptureBackend
             committedAt,
             artifactIdentifier,
             state,
-            captureEvent.DroppedBefore);
+            captureEvent.DroppedBefore,
+            captureEvent.PersistenceGeneration,
+            captureEvent.TargetEpoch);
     }
 
     private void QueueChunkCommitted(NativeCaptureChunkCommitted chunk)
@@ -642,12 +1083,14 @@ public sealed class NativeCaptureBackend
 
     private void RequestStopAfterManagedFault()
     {
+        _ = RequestStopAfterManagedFaultAsync();
+    }
+
+    private async Task RequestStopAfterManagedFaultAsync()
+    {
         try
         {
-            if (!_handle.IsInvalid && !_handle.IsClosed)
-            {
-                _ = _nativeApi.RequestStop(_handle);
-            }
+            await RequestStopForShutdownAsync().ConfigureAwait(false);
         }
         catch (Exception exception)
         {
@@ -788,6 +1231,46 @@ public sealed class NativeCaptureBackend
             && RuntimeInformation.ProcessArchitecture == Architecture.X64;
     }
 
+    private static string? GetCapabilityContractFailure(
+        NativeCaptureCapabilities capabilities)
+    {
+        const NativeCaptureCapabilities safetyTrio =
+            NativeCaptureCapabilities.TargetScopedAuthorization
+            | NativeCaptureCapabilities.PersistenceGenerationBarrier
+            | NativeCaptureCapabilities.DeterministicStop;
+        var advertisedSafety = capabilities & safetyTrio;
+        if (advertisedSafety != NativeCaptureCapabilities.None
+            && advertisedSafety != safetyTrio)
+        {
+            return "The native capture binary advertises only part of the required runtime safety capability set.";
+        }
+
+        if (advertisedSafety == safetyTrio
+            && (capabilities & NativeCaptureAbiContract.FoundationCapabilities)
+                != NativeCaptureAbiContract.FoundationCapabilities)
+        {
+            return "The native capture runtime safety capabilities require the privacy guard and event queue foundation.";
+        }
+
+        var screenCapture = capabilities.HasFlag(
+            NativeCaptureCapabilities.ScreenCapture);
+        var h264Chunks = capabilities.HasFlag(
+            NativeCaptureCapabilities.H264Chunks);
+        if (h264Chunks && !screenCapture)
+        {
+            return "The native H.264 chunk capability requires screen capture support.";
+        }
+
+        if (screenCapture
+            && (capabilities & NativeCaptureAbiContract.SafeScreenCaptureCapabilities)
+                != NativeCaptureAbiContract.SafeScreenCaptureCapabilities)
+        {
+            return "The native screen capture capability requires the complete runtime safety set and H.264 chunk support.";
+        }
+
+        return null;
+    }
+
     private static void EnsureSupportedPlatform()
     {
         if (!IsSupportedPlatform())
@@ -803,6 +1286,16 @@ public sealed class NativeCaptureBackend
         if (!SupportsScreenCapture)
         {
             throw new NotSupportedException(FoundationUnavailableDetail);
+        }
+    }
+
+    private void EnsureRuntimeAuthorizationCapability()
+    {
+        ThrowIfDisposed();
+        if (!SupportsRuntimeAuthorization)
+        {
+            throw new NotSupportedException(
+                "The native capture binary does not provide target-scoped runtime authorization and a persistence generation barrier.");
         }
     }
 
@@ -836,6 +1329,23 @@ public sealed class NativeCaptureBackend
         }
     }
 
+    private void ThrowIfShuttingDown()
+    {
+        if (Volatile.Read(ref _shutdownStarted) != 0)
+        {
+            throw new InvalidOperationException(
+                "The native capture backend is shutting down.");
+        }
+    }
+
+    private bool IsDisposed()
+    {
+        lock (_statusSync)
+        {
+            return _disposed;
+        }
+    }
+
     private abstract record ManagedNotification;
 
     private sealed record StatusChangedNotification(
@@ -844,4 +1354,9 @@ public sealed class NativeCaptureBackend
 
     private sealed record ChunkCommittedNotification(
         NativeCaptureChunkCommitted Chunk) : ManagedNotification;
+
+    private sealed record NativePersistenceBoundary(
+        ulong PersistenceGeneration,
+        ulong TargetEpoch,
+        NativeCaptureRuntimeAuthorization? Authorization);
 }

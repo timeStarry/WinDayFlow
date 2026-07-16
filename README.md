@@ -54,11 +54,15 @@ contains:
   snapshot, capture-off state, and exact privacy-revision change atomically,
   with optimistic concurrency checks over the complete settings snapshot;
 - an x64 C++20 native-capture foundation with a versioned C ABI, stable status
-  codes, a bounded polled event queue, fail-closed privacy inputs, and native
-  pixel, scheduling, queue, and ABI contract tests;
+  codes, a bounded polled event queue, fail-closed privacy inputs, and an
+  original target-scoped safety core; its additive 112-byte runtime
+  authorization binds Windows target identity and target epoch, while each
+  native permit adds a native-instance epoch and persistence generation behind
+  tested shared/unique write permits;
 - a managed P/Invoke adapter with x64 ABI layout checks, safe-handle ownership,
-  bounded event polling, privacy-revision updates, capability negotiation, and
-  real-DLL integration tests;
+  bounded event polling, privacy-revision updates, complete safety-capability
+  negotiation, explicit asynchronous owner/quiesce behavior, and real-DLL
+  integration tests;
 - a tested settings commit barrier, process-local capture latch with monotonic
   invalidation generations, sticky automatic-stop handling, a pure Windows
   privacy-policy composer, and a native coordinator whose runtime generations
@@ -77,19 +81,30 @@ contains:
 Manual activities, consent, privacy settings, and user-authored exclusion rules
 are stored at `%LOCALAPPDATA%\WinDayFlow\Data\windayflow.db` and survive
 application restarts.
-The DXGI/WIC/Media Foundation engine, native persistence barrier, event-driven
-privacy monitoring, analysis queue and providers, generated Daily and Weekly
-views, journal editing, and timeline-grounded chat are **not integrated yet**.
-The native foundation deliberately
-advertises no screen-capture capability, and the app reports capture as
-unavailable even after consent is recorded. The development bundle can be used
-as a local manual timeline, but it is not yet a functional recorder.
+The real DXGI/WIC/Media Foundation writer, Windows target verifier,
+event-driven privacy monitor, analysis queue and providers, generated Daily and
+Weekly views, journal editing, and timeline-grounded chat are **not integrated
+yet**. The safety core proves the synthetic authorization, persistence-permit,
+and stop/join/destroy boundary; it does not prove that a real frame or metadata
+writer uses that boundary. Start/Resume admission is also still tokenless: the
+Application layer checks a Boolean authorization snapshot before calling the
+backend, so an Allow A-to-B transition can race that call. Live activation
+requires an issuer-bound admission stamp and one native/owner atomic check of
+the expected persistence generation and target epoch. Dynamic lock, exclusion,
+and Unknown transitions must also receive an explicit evidence-Pause or sticky
+session-Stop policy; this milestone does not implement that distinction. The
+native foundation deliberately advertises no screen-capture capability, App DI
+continues to use the unavailable backend, and the development bundle is not yet
+a functional recorder.
 
 See the [architecture design](docs/ARCHITECTURE.md) for delivery phases and the
 [Reference Baseline](docs/ARCHITECTURE.md#2-reference-baseline) for the reviewed
 upstream revisions, adopted ideas, adaptations, and rejected coupling. The
 [capture-exclusion rule ADR](docs/adr/0002-capture-exclusion-rules.md) records
-the typed matching, ordering, privacy-revision, and persistence contract.
+the typed matching, ordering, privacy-revision, and persistence contract. The
+[native safety-core ADR](docs/adr/0003-native-capture-safety-core.md) records the
+target identity, generation, write-permit, quiescence, command-admission, and
+capability gates that must precede live capture.
 
 ## Platform Support
 
@@ -129,7 +144,7 @@ pwsh -File .\scripts\Build-Native.ps1 -Configuration Debug
 
 `Build-Native.ps1` selects an installed Visual Studio generator supported by
 CMake, ignores ambient `CMAKE_GENERATOR*` overrides, preserves x64
-multi-configuration output, builds the C++20 DLL, and runs all five native C
+multi-configuration output, builds the C++20 DLL, and runs all six native C
 and C++ tests with per-test timeouts. Use `-Fresh` to recreate CMake state, or
 `-Generator` to select a specific installed Visual Studio generator.
 

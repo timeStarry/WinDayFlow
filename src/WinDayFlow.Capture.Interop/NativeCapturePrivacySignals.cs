@@ -9,6 +9,12 @@ public enum NativeCaptureConditionState
     Active = 2,
 }
 
+/// <summary>
+/// Represents one privacy observation. Capture identity and target must be sampled from
+/// the same foreground-window observation and the target tuple must be revalidated after
+/// identity resolution. A producer that cannot prove that relationship must publish an
+/// unknown target so composition remains fail closed.
+/// </summary>
 public sealed record NativeCapturePrivacySignals(
     NativeCapturePolicyDecision SessionUnlocked,
     NativeCapturePolicyDecision SecureDesktopClear,
@@ -17,7 +23,8 @@ public sealed record NativeCapturePrivacySignals(
     NativeCapturePolicyDecision ApplicationAllowed,
     NativeCapturePolicyDecision WindowAllowed,
     NativeCapturePolicyDecision StorageAvailable,
-    NativeCaptureIdentitySnapshot? CaptureIdentity = null)
+    NativeCaptureIdentitySnapshot? CaptureIdentity = null,
+    NativeCaptureTargetIdentity? Target = null)
 {
     public NativeCapturePolicyDecision SessionUnlocked { get; } =
         ValidateDecision(SessionUnlocked, nameof(SessionUnlocked));
@@ -42,6 +49,9 @@ public sealed record NativeCapturePrivacySignals(
 
     public NativeCaptureIdentitySnapshot CaptureIdentity { get; } =
         CaptureIdentity ?? NativeCaptureIdentitySnapshot.Unknown;
+
+    public NativeCaptureTargetIdentity Target { get; } =
+        Target ?? NativeCaptureTargetIdentity.Unknown;
 
     public static NativeCapturePrivacySignals FailClosed { get; } = new(
         NativeCapturePolicyDecision.Unknown,

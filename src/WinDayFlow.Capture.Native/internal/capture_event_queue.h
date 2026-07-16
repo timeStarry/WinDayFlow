@@ -20,6 +20,8 @@ struct CaptureEvent {
   wdf_capture_reason reason = WDF_CAPTURE_REASON_NONE;
   wdf_capture_error error = WDF_CAPTURE_ERROR_NONE;
   uint32_t dropped_before = 0;
+  uint64_t persistence_generation = 0;
+  uint64_t target_epoch = 0;
   std::string detail;
 };
 
@@ -40,7 +42,9 @@ class CaptureEventQueue {
                 wdf_capture_reason reason,
                 wdf_capture_error error,
                 std::string detail,
-                int64_t timestamp_unix_ms);
+                int64_t timestamp_unix_ms,
+                uint64_t persistence_generation = 0,
+                uint64_t target_epoch = 0);
 
   CaptureEventReadResult Read(uint32_t timeout_ms,
                               wdf_capture_event_v1* event,

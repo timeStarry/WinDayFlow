@@ -16,6 +16,9 @@ internal enum NativeCaptureResult
     PolicyBlocked = -6,
     StalePolicy = -7,
     PolicyRevisionConflict = -8,
+    TargetMismatch = -9,
+    PolicyRevisionGap = -10,
+    GenerationExhausted = -11,
     InternalError = -255,
 }
 
@@ -61,6 +64,30 @@ internal unsafe struct NativeCapturePrivacyContextV1
 }
 
 [StructLayout(LayoutKind.Sequential, Pack = 8)]
+internal unsafe struct NativeCaptureRuntimeAuthorizationV1
+{
+    internal const uint TargetPresent = 1U << 0;
+
+    public uint StructSize;
+    public uint AbiVersion;
+    public ulong RuntimePolicyRevision;
+    public ulong TargetEpoch;
+    public ulong TargetWindowHandle;
+    public ulong TargetProcessCreationTime100ns;
+    public uint TargetProcessId;
+    public uint TargetFlags;
+    public int ConsentGranted;
+    public int SessionUnlocked;
+    public int SecureDesktopClear;
+    public int RemoteSessionAllowed;
+    public int PresentationAllowed;
+    public int ApplicationAllowed;
+    public int WindowAllowed;
+    public int StorageAvailable;
+    public fixed uint Reserved[8];
+}
+
+[StructLayout(LayoutKind.Sequential, Pack = 8)]
 internal unsafe struct NativeCaptureEventV1
 {
     public uint StructSize;
@@ -73,7 +100,9 @@ internal unsafe struct NativeCaptureEventV1
     public int Error;
     public uint DroppedBefore;
     public uint DetailUtf8Length;
-    public fixed uint Reserved[8];
+    public ulong PersistenceGeneration;
+    public ulong TargetEpoch;
+    public fixed uint Reserved[4];
 
     public static NativeCaptureEventV1 Create()
     {
@@ -102,23 +131,58 @@ internal sealed class SafeCaptureHandle : SafeHandle
     }
 
     private readonly NativeCaptureDestroy _destroy;
+    private readonly object _destroySync = new();
+    private bool _explicitDestroyAttempted;
 
     public override bool IsInvalid => handle == IntPtr.Zero;
 
+    internal NativeCaptureResult DestroyExplicit()
+    {
+        lock (_destroySync)
+        {
+            if (_explicitDestroyAttempted || IsInvalid || IsClosed)
+            {
+                return NativeCaptureResult.Ok;
+            }
+
+            _explicitDestroyAttempted = true;
+            var value = unchecked((nuint)handle);
+            try
+            {
+                return _destroy(ref value);
+            }
+            finally
+            {
+                handle = IntPtr.Zero;
+                SetHandleAsInvalid();
+            }
+        }
+    }
+
     protected override bool ReleaseHandle()
     {
-        try
+        lock (_destroySync)
         {
-            var value = unchecked((nuint)handle);
-            return _destroy(ref value) == NativeCaptureResult.Ok;
-        }
-        catch
-        {
-            return false;
-        }
-        finally
-        {
-            handle = IntPtr.Zero;
+            if (_explicitDestroyAttempted)
+            {
+                handle = IntPtr.Zero;
+                return true;
+            }
+
+            _explicitDestroyAttempted = true;
+            try
+            {
+                var value = unchecked((nuint)handle);
+                return _destroy(ref value) == NativeCaptureResult.Ok;
+            }
+            catch
+            {
+                return false;
+            }
+            finally
+            {
+                handle = IntPtr.Zero;
+            }
         }
     }
 }
@@ -134,6 +198,23 @@ internal interface INativeCaptureApi
     NativeCaptureResult UpdatePrivacyContext(
         SafeCaptureHandle handle,
         ref NativeCapturePrivacyContextV1 context);
+
+    NativeCaptureResult UpdateRuntimeAuthorization(
+        SafeCaptureHandle handle,
+        ref NativeCaptureRuntimeAuthorizationV1 authorization,
+        out ulong persistenceGeneration)
+    {
+        persistenceGeneration = 0;
+        return NativeCaptureResult.NotImplemented;
+    }
+
+    NativeCaptureResult RevokeRuntimeAuthorization(
+        SafeCaptureHandle handle,
+        out ulong persistenceGeneration)
+    {
+        persistenceGeneration = 0;
+        return NativeCaptureResult.NotImplemented;
+    }
 
     NativeCaptureResult Start(SafeCaptureHandle handle);
 
@@ -178,6 +259,22 @@ internal sealed class PInvokeNativeCaptureApi : INativeCaptureApi
         SafeCaptureHandle handle,
         ref NativeCapturePrivacyContextV1 context) =>
         NativeCaptureMethods.wdf_capture_update_privacy_context(handle, ref context);
+
+    public NativeCaptureResult UpdateRuntimeAuthorization(
+        SafeCaptureHandle handle,
+        ref NativeCaptureRuntimeAuthorizationV1 authorization,
+        out ulong persistenceGeneration) =>
+        NativeCaptureMethods.wdf_capture_update_runtime_authorization(
+            handle,
+            ref authorization,
+            out persistenceGeneration);
+
+    public NativeCaptureResult RevokeRuntimeAuthorization(
+        SafeCaptureHandle handle,
+        out ulong persistenceGeneration) =>
+        NativeCaptureMethods.wdf_capture_revoke_runtime_authorization(
+            handle,
+            out persistenceGeneration);
 
     public NativeCaptureResult Start(SafeCaptureHandle handle) =>
         NativeCaptureMethods.wdf_capture_start(handle);
@@ -279,6 +376,17 @@ internal static class NativeCaptureMethods
     internal static extern NativeCaptureResult wdf_capture_update_privacy_context(
         SafeCaptureHandle handle,
         ref NativeCapturePrivacyContextV1 context);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern NativeCaptureResult wdf_capture_update_runtime_authorization(
+        SafeCaptureHandle handle,
+        ref NativeCaptureRuntimeAuthorizationV1 authorization,
+        out ulong persistenceGeneration);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern NativeCaptureResult wdf_capture_revoke_runtime_authorization(
+        SafeCaptureHandle handle,
+        out ulong persistenceGeneration);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
     internal static extern NativeCaptureResult wdf_capture_start(SafeCaptureHandle handle);

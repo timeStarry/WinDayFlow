@@ -55,6 +55,35 @@ wdf_capture_privacy_context_v1 PrivacyContext(
   return context;
 }
 
+wdf_capture_runtime_authorization_v1 RuntimeAuthorization(
+    wdf_capture_policy_decision consent,
+    uint64_t revision,
+    uint64_t target_epoch = 1,
+    uint64_t window_handle = 100,
+    uint32_t process_id = 200,
+    uint64_t creation_time = 300) {
+  wdf_capture_runtime_authorization_v1 context{};
+  context.struct_size = sizeof(context);
+  context.abi_version = WDF_CAPTURE_ABI_VERSION;
+  context.runtime_policy_revision = revision;
+  context.consent_granted = consent;
+  context.session_unlocked = WDF_CAPTURE_POLICY_ALLOW;
+  context.secure_desktop_clear = WDF_CAPTURE_POLICY_ALLOW;
+  context.remote_session_allowed = WDF_CAPTURE_POLICY_ALLOW;
+  context.presentation_allowed = WDF_CAPTURE_POLICY_ALLOW;
+  context.application_allowed = WDF_CAPTURE_POLICY_ALLOW;
+  context.window_allowed = WDF_CAPTURE_POLICY_ALLOW;
+  context.storage_available = WDF_CAPTURE_POLICY_ALLOW;
+  if (consent == WDF_CAPTURE_POLICY_ALLOW) {
+    context.target_epoch = target_epoch;
+    context.target_window_handle = window_handle;
+    context.target_process_creation_time_100ns = creation_time;
+    context.target_process_id = process_id;
+    context.target_flags = WDF_CAPTURE_TARGET_PRESENT;
+  }
+  return context;
+}
+
 bool PollEvent(wdf_capture_handle handle,
                wdf_capture_event_v1* event,
                std::string* detail) {
@@ -99,7 +128,17 @@ bool TestAbiAndArgumentValidation() {
                   WDF_CAPTURE_RESULT_OK &&
                   (capabilities & WDF_CAPTURE_CAPABILITY_PRIVACY_GUARD) != 0 &&
                   (capabilities & WDF_CAPTURE_CAPABILITY_EVENT_QUEUE) != 0 &&
-                  (capabilities & WDF_CAPTURE_CAPABILITY_SCREEN_CAPTURE) == 0,
+                  (capabilities &
+                   WDF_CAPTURE_CAPABILITY_TARGET_SCOPED_AUTHORIZATION) != 0 &&
+                  (capabilities &
+                   WDF_CAPTURE_CAPABILITY_PERSISTENCE_GENERATION_BARRIER) !=
+                      0 &&
+                  (capabilities & WDF_CAPTURE_CAPABILITY_DETERMINISTIC_STOP) !=
+                      0 &&
+                  (capabilities & WDF_CAPTURE_CAPABILITY_SCREEN_CAPTURE) == 0 &&
+                  (capabilities & WDF_CAPTURE_CAPABILITY_H264_CHUNKS) == 0 &&
+                  (capabilities &
+                   WDF_CAPTURE_CAPABILITY_EVIDENCE_EXTRACTION) == 0,
               "foundation capabilities were incorrect")) {
     return false;
   }
@@ -155,8 +194,17 @@ bool TestTrulyShortVersionedStructures() {
           reinterpret_cast<const wdf_capture_privacy_context_v1*>(
               short_storage.data())) == WDF_CAPTURE_RESULT_INVALID_ARGUMENT,
       "four-byte privacy header was read beyond its declared size");
+  uint64_t generation = 0;
+  const bool runtime_authorization_rejected = Expect(
+      wdf_capture_update_runtime_authorization(
+          handle,
+          reinterpret_cast<const wdf_capture_runtime_authorization_v1*>(
+              short_storage.data()),
+          &generation) == WDF_CAPTURE_RESULT_INVALID_ARGUMENT,
+      "four-byte runtime authorization header was read beyond its declared size");
   wdf_capture_destroy(&handle);
-  return event_rejected && privacy_rejected;
+  return event_rejected && privacy_rejected &&
+         runtime_authorization_rejected;
 }
 
 bool TestLifecycleIsPrivacyGatedAndUnavailable() {
@@ -173,7 +221,9 @@ bool TestLifecycleIsPrivacyGatedAndUnavailable() {
   if (!PollEvent(handle, &event, &detail) ||
       !Expect(event.sequence == 1 &&
                   event.state == WDF_CAPTURE_STATE_UNAVAILABLE &&
-                  event.reason == WDF_CAPTURE_REASON_BACKEND_UNAVAILABLE,
+                  event.reason == WDF_CAPTURE_REASON_BACKEND_UNAVAILABLE &&
+                  event.persistence_generation == 1 &&
+                  event.target_epoch == 0,
               "initial unavailable event was incorrect")) {
     wdf_capture_destroy(&handle);
     return false;
@@ -189,7 +239,8 @@ bool TestLifecycleIsPrivacyGatedAndUnavailable() {
       !PollEvent(handle, &event, &detail) ||
       !Expect(event.sequence == 2 &&
                   event.state == WDF_CAPTURE_STATE_BLOCKED_BY_CONSENT &&
-                  event.reason == WDF_CAPTURE_REASON_CONSENT_REQUIRED,
+                  event.reason == WDF_CAPTURE_REASON_CONSENT_REQUIRED &&
+                  event.persistence_generation == 2,
               "consent block event was incorrect") ||
       !Expect(wdf_capture_start(handle) == WDF_CAPTURE_RESULT_INVALID_STATE,
               "start bypassed the explicit resume transition")) {
@@ -207,7 +258,8 @@ bool TestLifecycleIsPrivacyGatedAndUnavailable() {
       !PollEvent(handle, &event, &detail) ||
       !Expect(event.sequence == 3 &&
                   event.state == WDF_CAPTURE_STATE_UNAVAILABLE &&
-                  event.reason == WDF_CAPTURE_REASON_BACKEND_UNAVAILABLE,
+                  event.reason == WDF_CAPTURE_REASON_BACKEND_UNAVAILABLE &&
+                  event.persistence_generation == 3,
               "unavailable backend event was incorrect") ||
       !Expect(wdf_capture_resume(handle) == WDF_CAPTURE_RESULT_INVALID_STATE,
               "resume was accepted outside a paused state")) {
@@ -215,14 +267,34 @@ bool TestLifecycleIsPrivacyGatedAndUnavailable() {
     return false;
   }
 
-  if (!Expect(wdf_capture_request_stop(handle) == WDF_CAPTURE_RESULT_OK &&
-                  wdf_capture_wait_stopped(handle, 0) == WDF_CAPTURE_RESULT_OK,
-              "stop/wait contract failed") ||
+  wdf_capture_privacy_context_v1 legacy_during_stop =
+      PrivacyContext(WDF_CAPTURE_POLICY_ALLOW, 3);
+  wdf_capture_runtime_authorization_v1 runtime_during_stop =
+      RuntimeAuthorization(WDF_CAPTURE_POLICY_ALLOW, 3);
+  uint64_t stop_generation = 0;
+  if (!Expect(wdf_capture_request_stop(handle) == WDF_CAPTURE_RESULT_OK,
+              "stop request failed") ||
+      !Expect(wdf_capture_update_privacy_context(
+                  handle, &legacy_during_stop) ==
+                  WDF_CAPTURE_RESULT_INVALID_STATE,
+              "legacy authorization reopened STOPPING") ||
+      !Expect(wdf_capture_update_runtime_authorization(
+                  handle, &runtime_during_stop, &stop_generation) ==
+                  WDF_CAPTURE_RESULT_INVALID_STATE,
+              "target authorization reopened STOPPING") ||
+      !Expect(wdf_capture_wait_stopped(handle, 0) == WDF_CAPTURE_RESULT_OK,
+              "stop wait failed") ||
       !PollEvent(handle, &event, &detail) ||
       !Expect(event.sequence == 4 &&
-                  event.state == WDF_CAPTURE_STATE_STOPPED &&
+                  event.state == WDF_CAPTURE_STATE_STOPPING &&
                   event.reason == WDF_CAPTURE_REASON_USER_STOPPED,
-              "stopped event was incorrect")) {
+              "stopping event was incorrect") ||
+      !PollEvent(handle, &event, &detail) ||
+      !Expect(event.sequence == 5 &&
+                  event.state == WDF_CAPTURE_STATE_STOPPED &&
+                  event.reason == WDF_CAPTURE_REASON_USER_STOPPED &&
+                  event.persistence_generation == 3,
+              "joined stopped event was incorrect")) {
     wdf_capture_destroy(&handle);
     return false;
   }
@@ -272,6 +344,160 @@ bool TestPrivacyRevisionNeverRegresses() {
   return valid;
 }
 
+bool TestRuntimeAuthorizationBarrierContract() {
+  wdf_capture_config_v1 config = ValidConfig();
+  wdf_capture_handle handle = 0;
+  if (wdf_capture_create(&config, &handle) != WDF_CAPTURE_RESULT_OK) {
+    return Expect(false, "runtime authorization handle could not be created");
+  }
+
+  uint64_t generation = 99;
+  wdf_capture_runtime_authorization_v1 invalid =
+      RuntimeAuthorization(WDF_CAPTURE_POLICY_ALLOW, 1);
+  invalid.target_flags |= 1U << 7;
+  const bool unknown_flags_rejected = Expect(
+      wdf_capture_update_runtime_authorization(
+          handle, &invalid, &generation) ==
+              WDF_CAPTURE_RESULT_INVALID_ARGUMENT &&
+          generation == 0,
+      "unknown target flags were accepted");
+  invalid = RuntimeAuthorization(WDF_CAPTURE_POLICY_ALLOW, 1);
+  invalid.reserved[0] = 1;
+  const bool reserved_rejected = Expect(
+      wdf_capture_update_runtime_authorization(
+          handle, &invalid, &generation) ==
+          WDF_CAPTURE_RESULT_INVALID_ARGUMENT,
+      "nonzero runtime authorization reserved data was accepted");
+  invalid = RuntimeAuthorization(WDF_CAPTURE_POLICY_ALLOW, 1);
+  invalid.target_flags = 0;
+  invalid.target_epoch = 0;
+  invalid.target_window_handle = 0;
+  invalid.target_process_creation_time_100ns = 0;
+  invalid.target_process_id = 0;
+  const bool allow_without_target_rejected = Expect(
+      wdf_capture_update_runtime_authorization(
+          handle, &invalid, &generation) ==
+          WDF_CAPTURE_RESULT_INVALID_ARGUMENT,
+      "fully allowed authorization omitted its target");
+  invalid = RuntimeAuthorization(WDF_CAPTURE_POLICY_BLOCK, 1);
+  invalid.target_flags = WDF_CAPTURE_TARGET_PRESENT;
+  invalid.target_epoch = 1;
+  invalid.target_window_handle = 100;
+  invalid.target_process_creation_time_100ns = 300;
+  invalid.target_process_id = 200;
+  const bool block_with_target_rejected = Expect(
+      wdf_capture_update_runtime_authorization(
+          handle, &invalid, &generation) ==
+          WDF_CAPTURE_RESULT_INVALID_ARGUMENT,
+      "restrictive authorization retained a target");
+
+  wdf_capture_runtime_authorization_v1 allow_v1 =
+      RuntimeAuthorization(WDF_CAPTURE_POLICY_ALLOW, 1);
+  wdf_capture_runtime_authorization_v1 conflict_v1 =
+      RuntimeAuthorization(WDF_CAPTURE_POLICY_BLOCK, 1);
+  wdf_capture_runtime_authorization_v1 gap_v3 =
+      RuntimeAuthorization(WDF_CAPTURE_POLICY_ALLOW, 3);
+  wdf_capture_runtime_authorization_v1 reused_epoch_v2 =
+      RuntimeAuthorization(WDF_CAPTURE_POLICY_ALLOW, 2, 1, 101);
+  wdf_capture_runtime_authorization_v1 allow_v2 =
+      RuntimeAuthorization(WDF_CAPTURE_POLICY_ALLOW, 2, 2, 101);
+
+  const bool revision_and_target_rules =
+      Expect(wdf_capture_update_runtime_authorization(
+                 handle, &allow_v1, &generation) == WDF_CAPTURE_RESULT_OK &&
+                 generation == 2,
+             "initial runtime authorization was rejected") &&
+      Expect(wdf_capture_update_runtime_authorization(
+                 handle, &allow_v1, &generation) == WDF_CAPTURE_RESULT_OK &&
+                 generation == 2,
+             "idempotent runtime authorization advanced generation") &&
+      Expect(wdf_capture_update_runtime_authorization(
+                 handle, &conflict_v1, &generation) ==
+                 WDF_CAPTURE_RESULT_POLICY_REVISION_CONFLICT,
+             "runtime revision conflict was accepted") &&
+      Expect(wdf_capture_update_runtime_authorization(
+                 handle, &gap_v3, &generation) ==
+                 WDF_CAPTURE_RESULT_POLICY_REVISION_GAP,
+             "runtime revision gap was accepted") &&
+      Expect(wdf_capture_update_runtime_authorization(
+                 handle, &reused_epoch_v2, &generation) ==
+                 WDF_CAPTURE_RESULT_TARGET_MISMATCH,
+             "target tuple changed without an epoch advance") &&
+      Expect(wdf_capture_update_runtime_authorization(
+                 handle, &allow_v2, &generation) == WDF_CAPTURE_RESULT_OK &&
+                 generation == 3,
+             "epoch-advanced target was rejected") &&
+      Expect(wdf_capture_update_runtime_authorization(
+                 handle, &allow_v1, &generation) ==
+                 WDF_CAPTURE_RESULT_STALE_POLICY,
+             "stale runtime authorization was accepted") &&
+      Expect(wdf_capture_revoke_runtime_authorization(
+                 handle, &generation) == WDF_CAPTURE_RESULT_OK &&
+                 generation == 4,
+             "runtime authorization was not revoked") &&
+      Expect(wdf_capture_revoke_runtime_authorization(
+                 handle, &generation) == WDF_CAPTURE_RESULT_OK &&
+                 generation == 4,
+             "idempotent runtime revoke advanced generation") &&
+      Expect(wdf_capture_update_runtime_authorization(
+                 handle, &allow_v1, nullptr) ==
+                 WDF_CAPTURE_RESULT_INVALID_ARGUMENT,
+             "runtime authorization accepted a null generation output");
+
+  wdf_capture_destroy(&handle);
+  return unknown_flags_rejected && reserved_rejected &&
+         allow_without_target_rejected && block_with_target_rejected &&
+         revision_and_target_rules;
+}
+
+bool TestLegacyAndRuntimeRevisionNamespacesCannotMix() {
+  wdf_capture_config_v1 config = ValidConfig();
+  wdf_capture_handle legacy_first = 0;
+  if (wdf_capture_create(&config, &legacy_first) != WDF_CAPTURE_RESULT_OK) {
+    return Expect(false, "legacy-first namespace handle could not be created");
+  }
+  wdf_capture_privacy_context_v1 legacy_v7 =
+      PrivacyContext(WDF_CAPTURE_POLICY_ALLOW, 7);
+  wdf_capture_runtime_authorization_v1 runtime_v1 =
+      RuntimeAuthorization(WDF_CAPTURE_POLICY_ALLOW, 1);
+  uint64_t generation = 0;
+  const bool legacy_taints_handle =
+      Expect(wdf_capture_update_privacy_context(
+                 legacy_first, &legacy_v7) == WDF_CAPTURE_RESULT_OK,
+             "legacy revision seven was rejected") &&
+      Expect(wdf_capture_update_runtime_authorization(
+                 legacy_first, &runtime_v1, &generation) ==
+                     WDF_CAPTURE_RESULT_INVALID_STATE &&
+                 generation == 2,
+             "legacy-tainted handle accepted runtime revision one");
+  wdf_capture_destroy(&legacy_first);
+
+  wdf_capture_handle runtime_first = 0;
+  if (wdf_capture_create(&config, &runtime_first) != WDF_CAPTURE_RESULT_OK) {
+    return Expect(false, "runtime-first namespace handle could not be created");
+  }
+  wdf_capture_privacy_context_v1 legacy_v1 =
+      PrivacyContext(WDF_CAPTURE_POLICY_ALLOW, 1);
+  wdf_capture_runtime_authorization_v1 runtime_v2 =
+      RuntimeAuthorization(WDF_CAPTURE_POLICY_ALLOW, 2, 2);
+  const bool runtime_downgrades_once =
+      Expect(wdf_capture_update_runtime_authorization(
+                 runtime_first, &runtime_v1, &generation) ==
+                     WDF_CAPTURE_RESULT_OK &&
+                 generation == 2,
+             "runtime-first authorization was rejected") &&
+      Expect(wdf_capture_update_privacy_context(
+                 runtime_first, &legacy_v1) == WDF_CAPTURE_RESULT_OK,
+             "legacy downgrade did not synchronously revoke runtime mode") &&
+      Expect(wdf_capture_update_runtime_authorization(
+                 runtime_first, &runtime_v2, &generation) ==
+                     WDF_CAPTURE_RESULT_INVALID_STATE &&
+                 generation == 3,
+             "runtime mode resumed after a legacy downgrade");
+  wdf_capture_destroy(&runtime_first);
+  return legacy_taints_handle && runtime_downgrades_once;
+}
+
 bool TestStaleHandleCannotTargetRecreatedInstance() {
   wdf_capture_config_v1 config = ValidConfig();
   wdf_capture_handle first = 0;
@@ -307,7 +533,7 @@ bool TestStaleHandleCannotTargetRecreatedInstance() {
   return valid;
 }
 
-bool TestDestroyWakesAndWaitsForPoller() {
+bool TestConcurrentPollAndDestroyAreSafe() {
   wdf_capture_config_v1 config = ValidConfig();
   wdf_capture_handle handle = 0;
   if (wdf_capture_create(&config, &handle) != WDF_CAPTURE_RESULT_OK) {
@@ -321,29 +547,50 @@ bool TestDestroyWakesAndWaitsForPoller() {
   }
 
   const wdf_capture_handle poll_handle = handle;
+  std::atomic<bool> poll_call_started{false};
   std::atomic<wdf_capture_result> poll_result{
       WDF_CAPTURE_RESULT_INTERNAL_ERROR};
+  std::atomic<wdf_capture_state> poll_state{WDF_CAPTURE_STATE_UNAVAILABLE};
   std::thread poller([&] {
     wdf_capture_event_v1 event{};
     event.struct_size = sizeof(event);
     event.abi_version = WDF_CAPTURE_ABI_VERSION;
-    std::array<char, 64> buffer{};
+    std::array<char, 256> buffer{};
     uint32_t required = 0;
-    poll_result.store(wdf_capture_poll_event(
+    poll_call_started.store(true, std::memory_order_release);
+    poll_call_started.notify_one();
+    const wdf_capture_result result = wdf_capture_poll_event(
         poll_handle,
         5'000,
         &event,
         buffer.data(),
         static_cast<uint32_t>(buffer.size()),
-        &required));
+        &required);
+    if (result == WDF_CAPTURE_RESULT_OK) {
+      poll_state.store(event.state);
+    }
+    poll_result.store(result);
   });
+  poll_call_started.wait(false, std::memory_order_acquire);
+  // The public ABI has no observable hook after the native lease is acquired.
   std::this_thread::sleep_for(std::chrono::milliseconds(20));
+  const bool poll_was_pending = Expect(
+      poll_result.load(std::memory_order_acquire) ==
+          WDF_CAPTURE_RESULT_INTERNAL_ERROR,
+      "poll completed before the concurrent destroy began");
   const wdf_capture_result destroy_result = wdf_capture_destroy(&handle);
   poller.join();
-  return Expect(destroy_result == WDF_CAPTURE_RESULT_OK && handle == 0,
+  const wdf_capture_result observed_result = poll_result.load();
+  const wdf_capture_state observed_state = poll_state.load();
+  return poll_was_pending &&
+         Expect(destroy_result == WDF_CAPTURE_RESULT_OK && handle == 0,
                 "destroy failed during bounded poll") &&
-         Expect(poll_result.load() == WDF_CAPTURE_RESULT_INVALID_STATE,
-                "destroy did not wake the bounded poller");
+         Expect(observed_result == WDF_CAPTURE_RESULT_INVALID_ARGUMENT ||
+                    observed_result == WDF_CAPTURE_RESULT_INVALID_STATE ||
+                    (observed_result == WDF_CAPTURE_RESULT_OK &&
+                     (observed_state == WDF_CAPTURE_STATE_STOPPING ||
+                      observed_state == WDF_CAPTURE_STATE_STOPPED)),
+                "concurrent poll returned an invalid shutdown result");
 }
 
 bool TestEventStructureValidation() {
@@ -378,8 +625,10 @@ int main() {
       !TestTrulyShortVersionedStructures() ||
       !TestLifecycleIsPrivacyGatedAndUnavailable() ||
       !TestPrivacyRevisionNeverRegresses() ||
+      !TestRuntimeAuthorizationBarrierContract() ||
+      !TestLegacyAndRuntimeRevisionNamespacesCannotMix() ||
       !TestStaleHandleCannotTargetRecreatedInstance() ||
-      !TestDestroyWakesAndWaitsForPoller() ||
+      !TestConcurrentPollAndDestroyAreSafe() ||
       !TestEventStructureValidation()) {
     return 1;
   }

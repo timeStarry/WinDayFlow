@@ -23,7 +23,8 @@ bool IsRequiredEvent(const CaptureEvent& event) {
   if (event.kind != WDF_CAPTURE_EVENT_STATE_CHANGED) {
     return false;
   }
-  return event.state == WDF_CAPTURE_STATE_STOPPED ||
+  return event.state == WDF_CAPTURE_STATE_STOPPING ||
+         event.state == WDF_CAPTURE_STATE_STOPPED ||
          event.state == WDF_CAPTURE_STATE_FAULTED ||
          event.state == WDF_CAPTURE_STATE_BLOCKED_BY_CONSENT ||
          event.reason == WDF_CAPTURE_REASON_EXCLUDED_APPLICATION ||
@@ -46,7 +47,9 @@ uint64_t CaptureEventQueue::Push(wdf_capture_event_kind kind,
                                  wdf_capture_reason reason,
                                  wdf_capture_error error,
                                  std::string detail,
-                                 int64_t timestamp_unix_ms) {
+                                 int64_t timestamp_unix_ms,
+                                 uint64_t persistence_generation,
+                                 uint64_t target_epoch) {
   std::unique_lock lock(mutex_);
 
   if (closed_ || sequence_exhausted_) {
@@ -66,6 +69,8 @@ uint64_t CaptureEventQueue::Push(wdf_capture_event_kind kind,
   event.reason = reason;
   event.error = error;
   event.detail = std::move(detail);
+  event.persistence_generation = persistence_generation;
+  event.target_epoch = target_epoch;
 
   if (events_.size() == capacity_) {
     const auto removable = std::find_if(
@@ -144,6 +149,8 @@ CaptureEventReadResult CaptureEventQueue::Read(
   output.error = value.error;
   output.dropped_before = value.dropped_before;
   output.detail_utf8_length = static_cast<uint32_t>(value.detail.size());
+  output.persistence_generation = value.persistence_generation;
+  output.target_epoch = value.target_epoch;
   *event = output;
 
   if (detail_utf8 == nullptr || detail_utf8_capacity < required_size) {

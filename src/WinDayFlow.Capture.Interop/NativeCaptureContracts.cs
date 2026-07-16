@@ -12,6 +12,9 @@ public enum NativeCaptureCapabilities : ulong
     ScreenCapture = 1UL << 2,
     H264Chunks = 1UL << 3,
     EvidenceExtraction = 1UL << 4,
+    TargetScopedAuthorization = 1UL << 5,
+    PersistenceGenerationBarrier = 1UL << 6,
+    DeterministicStop = 1UL << 7,
 }
 
 public enum NativeCapturePolicyDecision
@@ -195,7 +198,9 @@ public sealed record NativeCaptureChunkCommitted
         DateTimeOffset committedAt,
         string artifactIdentifier,
         CaptureState state,
-        uint droppedBefore)
+        uint droppedBefore,
+        ulong persistenceGeneration = 0,
+        ulong targetEpoch = 0)
     {
         if (sequence == 0)
         {
@@ -221,11 +226,21 @@ public sealed record NativeCaptureChunkCommitted
                 "The committed native capture chunk state is not defined.");
         }
 
+
+        if ((persistenceGeneration == 0) != (targetEpoch == 0))
+        {
+            throw new ArgumentException(
+                "A committed native capture chunk must provide both persistence generation and target epoch, or neither for a legacy source.",
+                nameof(persistenceGeneration));
+        }
+
         Sequence = sequence;
         CommittedAt = committedAt;
         ArtifactIdentifier = artifactIdentifier;
         State = state;
         DroppedBefore = droppedBefore;
+        PersistenceGeneration = persistenceGeneration;
+        TargetEpoch = targetEpoch;
     }
 
     public ulong Sequence { get; }
@@ -237,6 +252,10 @@ public sealed record NativeCaptureChunkCommitted
     public CaptureState State { get; }
 
     public uint DroppedBefore { get; }
+
+    public ulong PersistenceGeneration { get; }
+
+    public ulong TargetEpoch { get; }
 }
 
 public sealed class NativeCaptureChunkCommittedEventArgs : EventArgs
@@ -255,13 +274,35 @@ public readonly record struct NativeCaptureAbiLayout(
     int ConfigOutputDirectoryOffset,
     int PrivacyContextSize,
     int PrivacyPolicyRevisionOffset,
+    int RuntimeAuthorizationSize,
+    int RuntimeAuthorizationRevisionOffset,
+    int RuntimeAuthorizationTargetEpochOffset,
+    int RuntimeAuthorizationDecisionOffset,
     int EventSize,
-    int EventSequenceOffset);
+    int EventSequenceOffset,
+    int EventPersistenceGenerationOffset,
+    int EventTargetEpochOffset);
 
 public static class NativeCaptureAbiContract
 {
     public const uint AbiVersion = 1;
     public const int X64StructureSize = 80;
+    public const int X64RuntimeAuthorizationStructureSize = 112;
+
+    public const NativeCaptureCapabilities FoundationCapabilities =
+        NativeCaptureCapabilities.PrivacyGuard
+        | NativeCaptureCapabilities.EventQueue;
+
+    public const NativeCaptureCapabilities RuntimeSafetyCapabilities =
+        FoundationCapabilities
+        | NativeCaptureCapabilities.TargetScopedAuthorization
+        | NativeCaptureCapabilities.PersistenceGenerationBarrier
+        | NativeCaptureCapabilities.DeterministicStop;
+
+    public const NativeCaptureCapabilities SafeScreenCaptureCapabilities =
+        RuntimeSafetyCapabilities
+        | NativeCaptureCapabilities.ScreenCapture
+        | NativeCaptureCapabilities.H264Chunks;
 
     public static NativeCaptureAbiLayout GetManagedLayout()
     {
@@ -273,8 +314,19 @@ public static class NativeCaptureAbiContract
             Marshal.SizeOf<NativeCapturePrivacyContextV1>(),
             checked((int)Marshal.OffsetOf<NativeCapturePrivacyContextV1>(
                 nameof(NativeCapturePrivacyContextV1.PolicyRevision))),
+            Marshal.SizeOf<NativeCaptureRuntimeAuthorizationV1>(),
+            checked((int)Marshal.OffsetOf<NativeCaptureRuntimeAuthorizationV1>(
+                nameof(NativeCaptureRuntimeAuthorizationV1.RuntimePolicyRevision))),
+            checked((int)Marshal.OffsetOf<NativeCaptureRuntimeAuthorizationV1>(
+                nameof(NativeCaptureRuntimeAuthorizationV1.TargetEpoch))),
+            checked((int)Marshal.OffsetOf<NativeCaptureRuntimeAuthorizationV1>(
+                nameof(NativeCaptureRuntimeAuthorizationV1.ConsentGranted))),
             Marshal.SizeOf<NativeCaptureEventV1>(),
             checked((int)Marshal.OffsetOf<NativeCaptureEventV1>(
-                nameof(NativeCaptureEventV1.Sequence))));
+                nameof(NativeCaptureEventV1.Sequence))),
+            checked((int)Marshal.OffsetOf<NativeCaptureEventV1>(
+                nameof(NativeCaptureEventV1.PersistenceGeneration))),
+            checked((int)Marshal.OffsetOf<NativeCaptureEventV1>(
+                nameof(NativeCaptureEventV1.TargetEpoch))));
     }
 }

@@ -186,6 +186,43 @@ public sealed class NativeCapturePrivacyCoordinatorTests
     }
 
     [Fact]
+    public async Task MissingCaptureTargetIsATemporaryFailClosedState()
+    {
+        foreach (var missingTarget in new[]
+                 {
+                     NativeCaptureTargetIdentity.Unknown,
+                     NativeCaptureTargetIdentity.Absent,
+                 })
+        {
+            var target = new TestPrivacyTarget();
+            var initial = NativeCapturePrivacyContext.FailClosed(runtimePolicyRevision: 1);
+            using var coordinator = new NativeCapturePrivacyCoordinator(target, initial);
+            var settings = CreateEnabledSettings();
+            var allowed = CreateAllowedSignals();
+            var missing = new NativeCapturePrivacySignals(
+                allowed.SessionUnlocked,
+                allowed.SecureDesktopClear,
+                allowed.RemoteSession,
+                allowed.PresentationMode,
+                allowed.ApplicationAllowed,
+                allowed.WindowAllowed,
+                allowed.StorageAvailable,
+                allowed.CaptureIdentity,
+                missingTarget);
+
+            await coordinator.UpdateSignalsAsync(missing);
+            await CommitAsync(coordinator, AppSettings.Default, settings);
+
+            Assert.False(coordinator.IsCaptureAuthorized);
+            Assert.Equal(
+                NativeCapturePolicyDecision.Unknown,
+                coordinator.LastAppliedContext.ApplicationAllowed);
+            await coordinator.UpdateSignalsAsync(allowed);
+            Assert.True(coordinator.IsCaptureAuthorized);
+        }
+    }
+
+    [Fact]
     public async Task SignalBlockObservedDuringPreparedAuthorizingCommitPreventsStaleAllow()
     {
         var target = new TestPrivacyTarget();
@@ -325,6 +362,126 @@ public sealed class NativeCapturePrivacyCoordinatorTests
         Assert.Equal(
             NativeCapturePolicyDecision.Allow,
             coordinator.LastAppliedContext.PresentationAllowed);
+    }
+
+    [Fact]
+    public async Task AllowedTargetChangeAdvancesRuntimeAndPersistenceGenerations()
+    {
+        var target = new TestPrivacyTarget();
+        var initial = NativeCapturePrivacyContext.FailClosed(runtimePolicyRevision: 1);
+        using var coordinator = new NativeCapturePrivacyCoordinator(target, initial);
+        var settings = CreateEnabledSettings();
+        var firstSignals = CreateAllowedSignals();
+        await coordinator.UpdateSignalsAsync(firstSignals);
+        await CommitAsync(coordinator, AppSettings.Default, settings);
+        var previousRevision = coordinator.LastAppliedContext.RuntimePolicyRevision;
+        var previousGeneration = coordinator.LastPersistenceGeneration;
+        var secondTarget = NativeCaptureTargetIdentity.Present(
+            windowHandle: 0x5678,
+            processId: 43,
+            processCreationTime100ns: 101,
+            targetEpoch: 2);
+
+        await coordinator.UpdateSignalsAsync(CopySignals(
+            firstSignals,
+            target: secondTarget));
+
+        Assert.Equal(previousRevision + 1, coordinator.LastAppliedContext.RuntimePolicyRevision);
+        Assert.True(coordinator.LastPersistenceGeneration > previousGeneration);
+        Assert.Equal(secondTarget, coordinator.LastAppliedAuthorization.Target);
+        Assert.Equal(secondTarget, target.Authorizations[^1].Target);
+    }
+
+    [Fact]
+    public async Task AllowedTargetChangeDropsAuthorizationUntilNativeAcknowledgesIt()
+    {
+        var target = new TestPrivacyTarget();
+        var initial = NativeCapturePrivacyContext.FailClosed(runtimePolicyRevision: 1);
+        using var coordinator = new NativeCapturePrivacyCoordinator(target, initial);
+        var settings = CreateEnabledSettings();
+        var firstSignals = CreateAllowedSignals();
+        await coordinator.UpdateSignalsAsync(firstSignals);
+        await CommitAsync(coordinator, AppSettings.Default, settings);
+        target.BlockNextUpdate();
+        var secondTarget = NativeCaptureTargetIdentity.Present(
+            windowHandle: 0x5678,
+            processId: 43,
+            processCreationTime100ns: 101,
+            targetEpoch: 2);
+
+        var update = coordinator.UpdateSignalsAsync(CopySignals(
+            firstSignals,
+            target: secondTarget));
+        await target.UpdateStarted.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.False(coordinator.IsCaptureAuthorized);
+        target.ReleaseUpdate();
+        await update;
+        Assert.True(coordinator.IsCaptureAuthorized);
+    }
+
+    [Fact]
+    public async Task QuiesceWaitsForAnOutstandingUpdateThenMakesTargetInaccessible()
+    {
+        var target = new TestPrivacyTarget();
+        var initial = NativeCapturePrivacyContext.FailClosed(runtimePolicyRevision: 1);
+        using var coordinator = new NativeCapturePrivacyCoordinator(target, initial);
+        var settings = CreateEnabledSettings();
+        var allowed = CreateAllowedSignals();
+        await coordinator.UpdateSignalsAsync(allowed);
+        await CommitAsync(coordinator, AppSettings.Default, settings);
+        target.BlockNextUpdate();
+        var update = coordinator.UpdateSignalsAsync(CopySignals(
+            allowed,
+            remoteSession: NativeCaptureConditionState.Active));
+        await target.UpdateStarted.WaitAsync(TimeSpan.FromSeconds(5));
+
+        var quiesce = coordinator.QuiesceAsync();
+        Assert.False(coordinator.IsCaptureAuthorized);
+        Assert.False(quiesce.IsCompleted);
+        target.ReleaseUpdate();
+        await update;
+        await quiesce;
+
+        Assert.Equal(1, target.RevokeCount);
+        Assert.Equal(
+            NativeCaptureTargetIdentityState.Unknown,
+            coordinator.LastAppliedAuthorization.Target.State);
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => coordinator.UpdateSignalsAsync(allowed));
+    }
+
+    [Fact]
+    public async Task ReentrantQuiesceSubscriberObservesTheSingleFlightTask()
+    {
+        var target = new TestPrivacyTarget();
+        var initial = NativeCapturePrivacyContext.FailClosed(runtimePolicyRevision: 1);
+        using var coordinator = new NativeCapturePrivacyCoordinator(target, initial);
+        var settings = CreateEnabledSettings();
+        var allowed = CreateAllowedSignals();
+        await coordinator.UpdateSignalsAsync(allowed);
+        await CommitAsync(coordinator, AppSettings.Default, settings);
+        var updatesBefore = target.Authorizations.Count;
+        Task? reentrant = null;
+        var subscriberCompleted = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        coordinator.AuthorizationChanged += (_, eventArgs) =>
+        {
+            if (!eventArgs.IsCaptureAuthorized)
+            {
+                reentrant = coordinator.QuiesceAsync();
+                reentrant.GetAwaiter().GetResult();
+                subscriberCompleted.TrySetResult();
+            }
+        };
+
+        var first = coordinator.QuiesceAsync();
+        await first;
+        await subscriberCompleted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Same(first, reentrant);
+        Assert.Equal(updatesBefore + 1, target.Authorizations.Count);
+        Assert.Equal(1, target.RevokeCount);
     }
 
     [Fact]
@@ -473,7 +630,12 @@ public sealed class NativeCapturePrivacyCoordinatorTests
             NativeCaptureConditionState.Inactive,
             NativeCapturePolicyDecision.Allow,
             NativeCapturePolicyDecision.Allow,
-            NativeCapturePolicyDecision.Allow);
+            NativeCapturePolicyDecision.Allow,
+            Target: NativeCaptureTargetIdentity.Present(
+                windowHandle: 0x1234,
+                processId: 42,
+                processCreationTime100ns: 100,
+                targetEpoch: 1));
     }
 
     private static AppSettings CreateRevokedSettings(AppSettings settings)
@@ -489,7 +651,8 @@ public sealed class NativeCapturePrivacyCoordinatorTests
     private static NativeCapturePrivacySignals CopySignals(
         NativeCapturePrivacySignals source,
         NativeCaptureConditionState? remoteSession = null,
-        NativeCaptureConditionState? presentationMode = null)
+        NativeCaptureConditionState? presentationMode = null,
+        NativeCaptureTargetIdentity? target = null)
     {
         return new NativeCapturePrivacySignals(
             source.SessionUnlocked,
@@ -499,23 +662,31 @@ public sealed class NativeCapturePrivacyCoordinatorTests
             source.ApplicationAllowed,
             source.WindowAllowed,
             source.StorageAvailable,
-            source.CaptureIdentity);
+            source.CaptureIdentity,
+            target ?? source.Target);
     }
 
-    private sealed class TestPrivacyTarget : INativeCapturePrivacyTarget
+    private sealed class TestPrivacyTarget : INativeCaptureAuthorizationTarget
     {
         private TaskCompletionSource _updateStarted = CreateCompletionSource();
         private TaskCompletionSource _releaseUpdate = CreateCompletionSource();
         private bool _blockNextUpdate;
+        private long _persistenceGeneration;
 
         public List<NativeCapturePrivacyContext> Contexts { get; } = [];
 
+        public List<NativeCaptureRuntimeAuthorization> Authorizations { get; } = [];
+
         public Exception? UpdateException { get; set; }
+
+        public Exception? RevokeException { get; set; }
+
+        public int RevokeCount { get; private set; }
 
         public Task UpdateStarted => _updateStarted.Task;
 
-        public async Task UpdatePrivacyContextAsync(
-            NativeCapturePrivacyContext context,
+        public async Task<ulong> UpdateRuntimeAuthorizationAsync(
+            NativeCaptureRuntimeAuthorization authorization,
             CancellationToken cancellationToken = default)
         {
             if (_blockNextUpdate)
@@ -530,7 +701,24 @@ public sealed class NativeCapturePrivacyCoordinatorTests
                 throw exception;
             }
 
-            Contexts.Add(context);
+            Contexts.Add(authorization.PrivacyContext);
+            Authorizations.Add(authorization);
+            return checked((ulong)Interlocked.Increment(
+                ref _persistenceGeneration));
+        }
+
+        public Task<ulong> RevokeRuntimeAuthorizationAsync(
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (RevokeException is { } exception)
+            {
+                throw exception;
+            }
+
+            RevokeCount++;
+            return Task.FromResult(checked((ulong)Interlocked.Increment(
+                ref _persistenceGeneration)));
         }
 
         public void BlockNextUpdate()
@@ -548,7 +736,9 @@ public sealed class NativeCapturePrivacyCoordinatorTests
         public void Reset()
         {
             Contexts.Clear();
+            Authorizations.Clear();
             UpdateException = null;
+            RevokeException = null;
         }
 
         private static TaskCompletionSource CreateCompletionSource()

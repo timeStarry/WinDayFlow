@@ -246,9 +246,9 @@ src/
 |-- WinDayFlow.Application/         Use cases, orchestration, workers
 |-- WinDayFlow.Domain/              Models, value objects, policies, rules
 |-- WinDayFlow.Infrastructure/      SQLite, providers, logging, settings, update
-|-- WinDayFlow.Capture.Interop/     P/Invoke boundary plus fail-closed adapter
-`-- WinDayFlow.Capture.Native/      x64 C++20 DLL, C ABI, policy, queue, pixel tests
-    `-- tests/                      Five native CTest executable targets
+|-- WinDayFlow.Capture.Interop/     P/Invoke, fail-closed owner and quiescence
+`-- WinDayFlow.Capture.Native/      x64 C++20 DLL, C ABI, policy and safety core
+    `-- tests/                      Six native CTest executable targets
 
 tests/
 |-- WinDayFlow.Domain.Tests/
@@ -258,7 +258,8 @@ tests/
 `-- WinDayFlow.IntegrationTests/    (planned)
 
 docs/
-`-- ARCHITECTURE.md
+|-- ARCHITECTURE.md
+`-- adr/                           Accepted capture boundary and policy decisions
 ```
 
 The current managed dependencies point inward, with App acting as the
@@ -272,7 +273,7 @@ Infrastructure -> Application, Domain
 Capture.Interop -> Application
 
 Current: Capture.Interop <-> Capture.Native is built and integration-tested
-Runtime: App remains unavailable until the persistence barrier and full detectors exist
+Runtime: App remains unavailable until the real writer, target verifier, and event monitor exist
 ```
 
 `ICaptureService` and `ICaptureBackend` are owned by Application. The
@@ -284,12 +285,16 @@ already stopped. `IAppSettingsCommitBarrier` and
 `ICaptureRuntimeAuthorization` add a process-local latch before repository
 writes and lifecycle calls. Capture.Interop supplies both
 `UnavailableCaptureBackend` and `NativeCaptureBackend`. The latter negotiates
-ABI/capabilities, owns the opaque handle through `SafeHandle`, updates versioned
-privacy context, and polls bounded native events without callbacks. It remains
-unregistered because lock, secure-desktop, Remote Desktop, presentation,
-application/window, and storage detectors are not complete. The native
-foundation does not reference managed UI or domain assemblies. The App project
-may reference concrete adapters for
+the complete safety-capability mask, owns the opaque handle through `SafeHandle`,
+updates versioned privacy context and target-scoped runtime authorization, and
+polls bounded native events without callbacks. An explicit asynchronous owner
+quiesces by applying Block, stopping, joining, and destroying in order;
+`SafeHandle` remains a final fallback rather than the normal shutdown proof.
+The native backend remains unregistered because the real Windows target
+verifier, event-driven privacy monitor, and DXGI/WIC/Media Foundation writer are
+not connected to that safety boundary. The native foundation does not reference
+managed UI or domain assemblies. The App project may reference concrete
+adapters for
 dependency-injection registration; feature code consumes their inward-facing
 contracts. The domain project must not reference WinUI, SQLite, HTTP, Windows
 App SDK, or the native capture implementation.
@@ -392,6 +397,13 @@ bounded window-title operators, ordered first-match reporting, complete-snapshot
 concurrency, and the atomic capture-off/privacy-revision transition. It does not
 authorize live capture or live window enumeration.
 
+[ADR 0003](adr/0003-native-capture-safety-core.md), "Native Capture Safety
+Core," fixes the additive C ABI v1 runtime-authorization layout, target and
+instance identity, native persistence generations, shared/unique write-permit
+linearization, revoke and quiescence ordering, and the complete capability mask.
+It deliberately leaves `ScreenCapture` disabled until a real writer and Windows
+observers use those contracts end to end.
+
 `CaptureStatus` is a stable machine-readable contract, not just display text.
 It carries an unsigned 64-bit `Sequence`, `CaptureReasonCode`, and
 `CaptureErrorCode` in addition to state, timestamp, and optional localized
@@ -432,6 +444,37 @@ settings repository save, reconciles concurrent signals to the latest snapshot,
 assigns a process-local `ulong` runtime policy generation, and never derives it
 from the persisted privacy revision. Once a restrictive Prepare or signal drops
 the process latch, caller cancellation cannot cancel the native block update.
+The additive 112-byte runtime-authorization contract binds that decision to an
+HWND/PID/process-creation-time target tuple and target epoch. The native-issued
+permit adds an internal native-instance epoch and persistence generation. The
+safety core validates immutable acquisition snapshots again under a shared
+write permit, while Block or an effective revoke takes the unique side, drains
+existing permits, and advances the generation. The legacy privacy-context
+update can block but cannot mint a write permit. Legacy and target-scoped
+revisions use independent ordering rules. The first valid legacy update also
+revokes target authority and permanently prevents further target-scoped
+authorization on that native handle; switching back requires handle
+recreation, so the two revision namespaces cannot revive one another.
+
+This safety core does not yet close Start/Resume admission. The current
+Application service and runtime owner observe a Boolean authorization snapshot
+and then call a tokenless backend method. An Allow A-to-B update between those
+operations can admit work for a generation or target different from the one the
+caller checked. For live activation, the same native instance must issue an
+admission stamp bound to its owner; Start/Resume must carry the expected
+persistence generation and target epoch, and the native/owner boundary must
+atomically compare both with the current fully allowed authorization before a
+worker can enter capture. A stale or foreign stamp fails closed, and every
+effective Allow transition requires a new stamp. The Boolean remains useful for
+UI state and early rejection but is not authority.
+
+The current sticky automatic Stop is likewise a conservative foundation, not
+the final dynamic-policy model. The event monitor and owner must explicitly
+classify lock, application/window exclusion, and Unknown transitions as either
+an evidence Pause that preserves a quiescent session or a sticky session Stop
+that tears it down. Recovery, target changes, and repeated signals require
+tests for both paths. This milestone does not implement that distinction.
+
 The inactive `WindowsCapturePrivacyProbe` can synchronously sample documented
 Windows 10 1809+ signals for session unlock, input desktop, RDP/remote control,
 Windows Presentation Mode, and storage headroom. API failure or ambiguity is
@@ -441,10 +484,11 @@ typed matcher now evaluates persisted application and window rule scopes
 independently and returns only a matched rule ID. Each observed identity and
 title is `Unknown`, known `Absent`, or `Present`; Unknown and malformed present
 identities fail closed when a rule requires them, while Absent is a conclusive
-non-match. Live identity acquisition, event-driven Windows signal monitoring,
-write-time revalidation, and App registration remain pending.
-Phase 1 activates the implemented native backend after platform privacy inputs
-and screen-capture capability are complete, then adds evidence-extraction
+non-match. A real Windows target verifier, live identity acquisition,
+event-driven signal monitoring, real-writer permit integration, and App
+registration remain pending. Phase 1 activates the implemented native backend
+only after those platform inputs and the complete screen-capture capability
+mask are present, then adds evidence-extraction
 interfaces under Capture.Interop. Capture options come from validated
 application settings; extraction is not added as an unrelated method on the
 lifecycle service. The adapter maps native events to `CaptureStatus` and
@@ -454,7 +498,7 @@ Interop remains coarse-grained. There are no per-frame managed callbacks.
 Native events are queued and marshalled onto the appropriate managed
 dispatcher.
 
-### 9.1 Current Native Foundation Slice
+### 9.1 Current Native Foundation and Safety-Core Slice
 
 The repository now contains an independently buildable x64 C++20 DLL and C ABI
 v1 foundation under `WinDayFlow.Capture.Native`. Its implemented boundary has:
@@ -462,41 +506,50 @@ v1 foundation under `WinDayFlow.Capture.Native`. Its implemented boundary has:
 - fixed-width numeric enums, opaque handles, and C-compatible POD structures
   whose first fields are `struct_size` and `abi_version`, with caller-owned UTF-8
   buffers and catch-all `noexcept` exports;
+- the additive 112-byte flat runtime-authorization input defined by ADR 0003,
+  containing the monotonic runtime policy revision, target epoch, numeric
+  HWND/PID/process-creation-time tuple, target flags, and eight policy decisions;
+- a native-issued permit token that adds native-instance and persistence
+  generations, plus shared/unique admission linearization that prevents legacy
+  privacy Allow updates from minting persistence authority;
 - validated capture-policy inputs and a bounded, polled event queue with
   monotonic sequence numbers and `dropped_before` gap reporting, without native
-  callbacks into managed or UI code;
-- explicit `wdf_capture_request_stop`, bounded `wdf_capture_wait_stopped`, and
-  blocking, idempotent `wdf_capture_destroy` operations as the shutdown surface;
-  and
-- a versioned privacy context for consent, lock, secure desktop, remote session,
-  presentation, application/window exclusion, and storage decisions. Every
-  value must be explicitly allowed; unknown or blocked state fails closed.
+  callbacks into managed or UI code; and
+- explicit nonblocking stop, bounded wait-for-join, and one blocking destroy for
+  each valid handle, coordinated by a single-flight managed owner that applies
+  Block/revoke before stop, join, and exactly-once destroy.
 
-This is a contract and safety foundation, not a usable recorder. The managed
-P/Invoke adapter and real-DLL contract tests are implemented, but platform
-privacy-context detection, DXGI acquisition, Media Foundation encoding,
-evidence persistence, and extraction are not wired.
-`wdf_capture_get_capabilities` advertises only the privacy guard and event queue;
-the screen-capture, H.264, and extraction capability bits remain disabled.
-Start/Resume therefore return unavailable/not-implemented after policy checks,
-the App continues to use `UnavailableCaptureBackend`, and the shell recording
-control remains disabled. No live frame or context metadata can be persisted by
-this slice.
+This is a contract and synthetic safety foundation, not a usable recorder. The
+native and managed tests prove target/PID reuse rejection, target and instance
+epochs, persistence-generation invalidation, permit linearization, quiescence,
+timeout/failure quarantine, ABI layout, and capability dependencies. They do
+not prove a real capture write path.
 
-The current native privacy update is not yet a persistence barrier: it replaces
-the guarded context but cannot prove that work acquired under an older runtime
-generation will never be encoded, renamed, or committed afterward. A future
-screen-capture capability must add acquire-to-persist generation validation and
-advertise an explicit privacy-barrier capability. The App must not register the
-native backend for live capture until that contract and its interruption tests
-exist.
+The complete live mask requires privacy guard, event queue, target-scoped
+authorization, persistence-generation barrier, deterministic stop, screen
+capture, and H.264 chunk capabilities. Evidence extraction is independent.
+`ScreenCapture` remains deliberately disabled, so the live mask is incomplete.
+Start/Resume remain unavailable, the App continues to use
+`UnavailableCaptureBackend`, and the shell recording control remains disabled.
 
-The current coordinator also does not own or destroy its native target. Its
-managed invalidation event requests a sticky Stop when a native update faults or
-the coordinator is disposed, but that cannot prove an old native Allow was
-revoked if the target update or Stop fails. Live activation therefore also
-requires an explicit asynchronous ownership contract that applies Block before
-release and stops and destroys the native handle on failure or timeout.
+The remaining activation gates include one command-admission contract as well
+as integration work. Start/Resume must atomically validate an issuer-bound
+expected persistence generation and target epoch. A real Windows target
+verifier must supply and revalidate the target tuple and epoch; an event-driven
+monitor must publish every supported privacy transition and select evidence
+Pause versus sticky session Stop; and the real DXGI/WIC/Media Foundation pixel
+and metadata writer must carry the native permit through encode, temporary
+output, final rename, and committed-event publication. Atomic filesystem
+interruption, cleanup, disk-full, recovery, and Windows lifecycle tests must
+then prove that end-to-end path. Until those gates pass, no live frame or
+context metadata can be persisted and App DI must continue to register
+`UnavailableCaptureBackend`.
+
+The safety-core implementation and ADR are original WinDayFlow work. They do
+not modify any of the six QiDayflow-derived files or require a provenance
+manifest/hash update. A later adaptation of QiDayflow `capture_service.*` or a
+change to an existing derived file still follows the provenance workflow before
+commit or distribution.
 
 Capture invariants:
 
@@ -898,12 +951,13 @@ the user explicitly enables a future telemetry feature.
 
 ### Native
 
-- The current native foundation is exercised by five CTest executables:
+- The current native foundation is exercised by six CTest executables:
   `pixel_buffer_tests`, `capture_policy_tests`, `capture_event_queue_tests`,
-  `capture_c_api_tests`, and the C17 `c_header_compatibility_test`. All five
-  have passed local x64 Debug and Release runs; Release also runs in Windows CI.
-  These tests prove the current ABI, policy, queue, C header, and pixel/runtime
-  foundation, not live screen capture. The native build script explicitly
+  `capture_safety_core_tests`, `capture_c_api_tests`, and the C17
+  `c_header_compatibility_test`. These tests prove the current ABI, policy,
+  queue, C header, pixel/runtime foundation, and synthetic safety-core
+  authorization and quiescence contracts, not a live DXGI-to-artifact write
+  chain. The native build script explicitly
   selects an installed Visual Studio generator, filters ambient
   `CMAKE_GENERATOR*` overrides, and retains x64 multi-configuration output.
 - Pixel-buffer and scaling correctness.
@@ -954,14 +1008,18 @@ Phases are release gates, not a claim of strict implementation order. As of
 2026-07-16, the no-capture manual-timeline portions of Phases 2 and 3 plus
 schema v4, consent policy v2, persistent retention/exclusion/session choices,
 and user-authored typed exclusion rules are implemented. Phase 1 also has
-Accepted ADRs 0001 and 0002, verified QiDayflow source provenance, the x64 C++20
-C ABI v1 foundation, five native tests in Debug and Release, the managed
-adapter, the inactive runtime privacy coordinator, the pure exclusion matcher,
-and the on-demand Windows privacy probe. The coordinator includes cancellable-
-call hardening and sticky invalidation generations, but live identity
-acquisition, native target ownership, and write-time persistence revalidation
-remain open activation gates. Live capture and managed-adapter runtime
-activation remain disabled, so no phase exit criterion is met.
+Accepted ADRs 0001 through 0003, verified QiDayflow source provenance, the x64
+C++20 C ABI v1 foundation, six native tests, the target-scoped safety core, the
+managed asynchronous owner/quiescence contract, the inactive runtime privacy
+coordinator, the pure exclusion matcher, and the on-demand Windows privacy
+probe. The safety core covers synthetic target reuse, generation,
+acquire-to-persist permit, and stop/join/destroy races. The real Windows target
+verifier, event-driven privacy monitor, DXGI/WIC/Media Foundation writer, and
+atomic artifact publisher remain open activation gates. Issuer-bound,
+generation/target-stamped Start/Resume admission and the evidence-Pause versus
+sticky-Stop dynamic policy are also unresolved. `ScreenCapture` and
+managed-adapter runtime activation remain disabled, so no phase exit criterion
+is met.
 
 ### Phase 0: Foundation
 
