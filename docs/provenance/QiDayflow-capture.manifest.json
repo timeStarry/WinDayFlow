@@ -63,7 +63,7 @@
     {
       "local": {
         "path": "src/WinDayFlow.Capture.Native/tests/capture_policy_tests.cpp",
-        "sha256": "06E1B9C0FD0D4A2C4CA35F61B536AEF0FF8BA2F933A2AD1163A16A5D933469DB"
+        "sha256": "9E6461B6ABF628A9C81FB4789A6132510063BBC6AA062ED85E299CB1016A65FF"
       },
       "upstream": {
         "path": "windows/runner/capture_runtime_test.cpp",

@@ -272,7 +272,7 @@ Infrastructure -> Application, Domain
 Capture.Interop -> Application
 
 Current: Capture.Interop <-> Capture.Native is built and integration-tested
-Runtime: App still registers UnavailableCaptureBackend until privacy detectors exist
+Runtime: App remains unavailable until the persistence barrier and full detectors exist
 ```
 
 `ICaptureService` and `ICaptureBackend` are owned by Application. The
@@ -280,7 +280,9 @@ Application-layer `ConsentGatedCaptureService` implements the feature-facing
 service, rejects Start/Resume unless capture is enabled and current recording
 consent covers the active privacy revision, and always allows Pause/Stop through
 the authorization gate. Redundant Stop calls are idempotent once the backend is
-already stopped. Capture.Interop supplies both
+already stopped. `IAppSettingsCommitBarrier` and
+`ICaptureRuntimeAuthorization` add a process-local latch before repository
+writes and lifecycle calls. Capture.Interop supplies both
 `UnavailableCaptureBackend` and `NativeCaptureBackend`. The latter negotiates
 ABI/capabilities, owns the opaque handle through `SafeHandle`, updates versioned
 privacy context, and polls bounded native events without callbacks. It remains
@@ -413,6 +415,24 @@ state-machine decisions use the stable fields.
 The current Application layer also defines the matching `ICaptureBackend`
 lifecycle contract. `ConsentGatedCaptureService` projects backend state while
 giving unavailable and faulted technology states priority over consent state.
+`AppSettingsService` runs commit-barrier Prepare before persistence, then
+Committed after persistence and its in-memory snapshot update; Aborted never
+restores a restrictive runtime latch. Start/Resume check that latch inside the
+capture lifecycle gate. Runtime invalidation carries a separate monotonic
+generation; once observed, the lifecycle service completes one sticky Stop
+boundary even if authorization quickly recovers. Capture.Interop's tested
+coordinator serializes native updates without holding the native gate across a
+settings repository save, reconciles concurrent signals to the latest snapshot,
+assigns a process-local `ulong` runtime policy generation, and never derives it
+from the persisted privacy revision. Once a restrictive Prepare or signal drops
+the process latch, caller cancellation cannot cancel the native block update.
+The inactive `WindowsCapturePrivacyProbe` can synchronously sample documented
+Windows 10 1809+ signals for session unlock, input desktop, RDP/remote control,
+Windows Presentation Mode, and storage headroom. API failure or ambiguity is
+isolated per signal and becomes Unknown while later signals continue sampling;
+application/window identity remains Unknown and no window title is read.
+Event-driven Windows signal monitoring, write-time revalidation, and App
+registration remain pending.
 Phase 1 activates the implemented native backend after platform privacy inputs
 and screen-capture capability are complete, then adds evidence-extraction
 interfaces under Capture.Interop. Capture options come from validated
@@ -452,6 +472,21 @@ Start/Resume therefore return unavailable/not-implemented after policy checks,
 the App continues to use `UnavailableCaptureBackend`, and the shell recording
 control remains disabled. No live frame or context metadata can be persisted by
 this slice.
+
+The current native privacy update is not yet a persistence barrier: it replaces
+the guarded context but cannot prove that work acquired under an older runtime
+generation will never be encoded, renamed, or committed afterward. A future
+screen-capture capability must add acquire-to-persist generation validation and
+advertise an explicit privacy-barrier capability. The App must not register the
+native backend for live capture until that contract and its interruption tests
+exist.
+
+The current coordinator also does not own or destroy its native target. Its
+managed invalidation event requests a sticky Stop when a native update faults or
+the coordinator is disposed, but that cannot prove an old native Allow was
+revoked if the target update or Stop fails. Live activation therefore also
+requires an explicit asynchronous ownership contract that applies Block before
+release and stops and destroys the native handle on failure or timeout.
 
 Capture invariants:
 
@@ -670,6 +705,11 @@ application-level database encryption.
   default plus user-selectable retention, sensitive-application exclusion,
   remote-session pause, and screen-sharing pause choices. Full first-run
   onboarding and user-authored application/window rule lists remain Phase 1 work.
+- The current `pause_during_screen_sharing` storage name is retained for schema
+  compatibility, but the Windows UI describes only Windows Presentation Mode.
+  Windows has no public, universal signal for arbitrary third-party screen
+  sharing; unsupported sharing contexts remain unknown and fail closed rather
+  than being reported as positively detected.
 - Consent history is not considered fully audit-ready until immutable snapshots
   record the concrete disclosure and privacy values accepted at each revision.
   The current stale metadata is sufficient only to reject superseded consent.
@@ -689,6 +729,9 @@ application-level database encryption.
   and presentation or screen-sharing contexts use explicit policies with a
   conservative pause default and visible override state. Sleep, session switch,
   and resume transitions are auditable and never silently backfill evidence.
+- An unknown privacy input uses the generic policy-blocked reason. Specific
+  reasons such as session locked, remote session, or excluded application are
+  shown only after that condition is positively observed.
 - API secrets are protected for the current Windows user using DPAPI.
 - Production logs and startup diagnostics must reject or redact secrets,
   authorization headers, base64/JPEG data, and raw window titles by
@@ -891,9 +934,13 @@ Phases are release gates, not a claim of strict implementation order. As of
 2026-07-16, the no-capture manual-timeline portions of Phases 2 and 3 plus
 schema v3, consent policy v2, and persistent retention/exclusion/session choices
 are implemented. Phase 1 also has Accepted ADR 0001, verified QiDayflow source
-provenance, the x64 C++20 C ABI v1 foundation, and five native tests in Debug and
-Release. Live capture and managed-adapter runtime activation remain disabled,
-so no phase exit criterion is met.
+provenance, the x64 C++20 C ABI v1 foundation, five native tests in Debug and
+Release, the managed adapter, the inactive runtime privacy coordinator, and the
+on-demand Windows privacy probe. The coordinator now includes cancellable-call
+hardening and sticky invalidation generations, but native target ownership and
+write-time persistence revalidation remain open activation gates. Live capture
+and managed-adapter runtime activation remain disabled, so no phase exit
+criterion is met.
 
 ### Phase 0: Foundation
 

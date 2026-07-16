@@ -56,17 +56,26 @@ contains:
   pixel, scheduling, queue, and ABI contract tests;
 - a managed P/Invoke adapter with x64 ABI layout checks, safe-handle ownership,
   bounded event polling, privacy-revision updates, capability negotiation, and
-  real-DLL integration tests; the App still fails closed because the native
-  binary does not yet advertise screen capture;
+  real-DLL integration tests;
+- a tested settings commit barrier, process-local capture latch with monotonic
+  invalidation generations, sticky automatic-stop handling, a pure Windows
+  privacy-policy composer, and a native coordinator whose runtime generations
+  are deliberately independent from persisted consent revisions; the App still
+  uses the unavailable path because the native binary does not yet advertise a
+  write-safe screen-capture capability;
+- an inactive, fail-closed Windows probe for session lock, input desktop,
+  Remote Desktop, Windows Presentation Mode, and storage headroom; application
+  and window identity remain unknown until exclusion rules are implemented;
 - domain, application, infrastructure, presentation, and capture-interoperability
   project boundaries with automated persistence and mutation tests; and
 - an unpackaged, self-contained development bundle for manual UI verification.
 
 Manual activities, consent, and privacy settings are stored at
 `%LOCALAPPDATA%\WinDayFlow\Data\windayflow.db` and survive application restarts.
-The DXGI/WIC/Media Foundation engine, platform privacy detectors, analysis queue
-and providers, generated Daily and Weekly views, journal editing, and timeline-
-grounded chat are **not integrated yet**. The native foundation deliberately
+The DXGI/WIC/Media Foundation engine, native persistence barrier, event-driven
+privacy monitoring, analysis queue and providers, generated Daily and Weekly
+views, journal editing, and timeline-grounded chat are **not integrated yet**.
+The native foundation deliberately
 advertises no screen-capture capability, and the app reports capture as
 unavailable even after consent is recorded. The development bundle can be used
 as a local manual timeline, but it is not yet a functional recorder.
@@ -167,7 +176,8 @@ project or its maintainers.
 Both reference repositories publish their source under the MIT License. If
 WinDayFlow incorporates or derives substantive code from either repository, the
 applicable copyright and permission notices must be preserved and the source
-provenance recorded. Their names, branding, logos, fonts, screenshots, and
+provenance recorded. Their upstream names are used only for attribution and
+never to imply project affiliation. Branding, logos, fonts, screenshots, and
 other visual assets are not reused by WinDayFlow unless separately licensed and
 explicitly documented.
 

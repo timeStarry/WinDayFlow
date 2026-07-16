@@ -311,10 +311,10 @@
                                 <RowDefinition Height="Auto" />
                             </Grid.RowDefinitions>
                             <StackPanel VerticalAlignment="Center" Spacing="2">
-                                <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}" Text="演示与屏幕共享" />
+                                <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}" Text="Windows 演示模式" />
                                 <TextBlock
                                     Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                    Text="检测到演示或屏幕共享状态时暂停并显示原因。"
+                                    Text="进入 Windows 演示模式时暂停；其他屏幕共享应用尚不能通用检测。"
                                     TextWrapping="Wrap" />
                             </StackPanel>
                             <ToggleSwitch
@@ -323,7 +323,7 @@
                                 HorizontalAlignment="Right"
                                 VerticalAlignment="Center"
                                 AutomationProperties.AutomationId="ScreenSharingPauseToggle"
-                                AutomationProperties.Name="屏幕共享期间暂停"
+                                AutomationProperties.Name="Windows 演示模式期间暂停"
                                 IsEnabled="{x:Bind ViewModel.CanChangePrivacy, Mode=OneWay}"
                                 IsOn="{x:Bind ViewModel.PauseDuringScreenSharing, Mode=OneWay}"
                                 OffContent="继续"

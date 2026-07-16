@@ -171,6 +171,36 @@ try {
     $manifest = Get-Content -Raw -LiteralPath $manifestPath -Encoding utf8 |
         ConvertFrom-Json -Depth 16
 
+    $provenancePath = Join-Path `
+        $root 'docs\provenance\QiDayflow-capture.md'
+    Assert-ProvenanceCondition `
+        -Condition (Test-Path -LiteralPath $provenancePath -PathType Leaf) `
+        -Message "Native provenance record does not exist: $provenancePath."
+    $provenanceText = Get-Content `
+        -Raw `
+        -LiteralPath $provenancePath `
+        -Encoding utf8
+    Assert-ProvenanceCondition `
+        -Condition (-not $provenanceText.Contains(
+            'WORKTREE (pre-initial commit)',
+            [System.StringComparison]::Ordinal)) `
+        -Message 'The Markdown provenance ledger still contains a pre-initial-commit marker.'
+
+    $ledgerPattern = '(?m)^\| `(?<local>[^`]+)` \| [^|\r\n]+ \| `(?<hash>[0-9A-F]{64})` \| `(?<commit>[^`]+)` \| [^|\r\n]+ \|\r?$'
+    $ledgerRows = [System.Collections.Generic.Dictionary[string, object]]::new(
+        [System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($ledgerMatch in [regex]::Matches($provenanceText, $ledgerPattern)) {
+        $localPath = $ledgerMatch.Groups['local'].Value
+        Assert-ProvenanceCondition `
+            -Condition $ledgerRows.TryAdd(
+                $localPath,
+                [pscustomobject]@{
+                    Hash = $ledgerMatch.Groups['hash'].Value
+                    Commit = $ledgerMatch.Groups['commit'].Value
+                }) `
+            -Message "Duplicate Markdown provenance ledger path: $localPath."
+    }
+
     Assert-JsonProperties `
         -Object $manifest `
         -Expected @('schemaVersion', 'source', 'derivedFiles') `
@@ -223,6 +253,11 @@ try {
     Assert-ProvenanceCondition `
         -Condition ($manifest.derivedFiles.Count -eq 6) `
         -Message 'manifest.derivedFiles must contain the six reviewed derived files.'
+    Assert-ProvenanceCondition `
+        -Condition ($ledgerRows.Count -eq $manifest.derivedFiles.Count) `
+        -Message 'The Markdown provenance ledger must contain exactly the manifest derived files.'
+
+    $null = Get-Command git -CommandType Application -ErrorAction Stop
 
     $localPaths = [System.Collections.Generic.HashSet[string]]::new(
         [System.StringComparer]::OrdinalIgnoreCase)
@@ -271,6 +306,38 @@ try {
             -Condition $upstreamPaths.Add([string]$entry.upstream.path) `
             -Message "Duplicate upstream provenance path: $($entry.upstream.path)."
 
+        Assert-ProvenanceCondition `
+            -Condition $ledgerRows.ContainsKey([string]$entry.local.path) `
+            -Message "Markdown provenance ledger entry is missing: $($entry.local.path)."
+        $ledgerRow = $ledgerRows[[string]$entry.local.path]
+        Assert-ProvenanceCondition `
+            -Condition ($ledgerRow.Hash -ceq [string]$entry.local.sha256) `
+            -Message "Markdown provenance hash differs from the manifest for $($entry.local.path)."
+
+        $verifiedCommit = [string]$ledgerRow.Commit
+        if ($verifiedCommit -ceq 'WORKTREE (pending commit)') {
+            $null = & git -C $root diff --quiet HEAD -- $entry.local.path
+            $gitExitCode = $LASTEXITCODE
+            Assert-ProvenanceCondition `
+                -Condition ($gitExitCode -eq 1) `
+                -Message ("The pending provenance marker for {0} requires an uncommitted file change; git exited {1}." -f
+                    $entry.local.path, $gitExitCode)
+        }
+        else {
+            Assert-ProvenanceCondition `
+                -Condition ($verifiedCommit -cmatch '\A[0-9a-f]{40}\z') `
+                -Message "Invalid last-verified commit for $($entry.local.path): $verifiedCommit."
+            $gitObject = '{0}:{1}' -f $verifiedCommit, $entry.local.path
+            $null = & git -C $root cat-file -e $gitObject
+            Assert-ProvenanceCondition `
+                -Condition ($LASTEXITCODE -eq 0) `
+                -Message "The last-verified commit does not contain $($entry.local.path): $verifiedCommit."
+            $null = & git -C $root diff --quiet $verifiedCommit -- $entry.local.path
+            Assert-ProvenanceCondition `
+                -Condition ($LASTEXITCODE -eq 0) `
+                -Message "The current file differs from its last-verified commit: $($entry.local.path)."
+        }
+
         $localFile = Resolve-RepositoryFile `
             -Root $root `
             -RelativePath $entry.local.path
@@ -286,7 +353,7 @@ try {
     }
 
     Write-Host (
-        'Verified the pinned MIT license and {0} native derived files against {1}@{2}.' -f
+        'Verified the pinned MIT license, synchronized Markdown ledger, and {0} native derived files against {1}@{2}.' -f
         $verifiedCount,
         $manifest.source.repository,
         $manifest.source.pinnedCommit)

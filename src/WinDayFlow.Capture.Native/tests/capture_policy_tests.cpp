@@ -136,8 +136,8 @@ bool TestPrivacyGuardFailsClosed() {
   context.policy_revision = 1;
   auto decision = windayflow::capture::EvaluatePrivacyContext(context);
   if (!Expect(!decision.allowed &&
-                  decision.reason == WDF_CAPTURE_REASON_CONSENT_REQUIRED,
-              "unknown consent did not fail closed")) {
+                  decision.reason == WDF_CAPTURE_REASON_POLICY_BLOCKED,
+              "unknown consent did not fail closed as an unknown policy")) {
     return false;
   }
 
@@ -159,9 +159,17 @@ bool TestPrivacyGuardFailsClosed() {
 
   context.session_unlocked = WDF_CAPTURE_POLICY_UNKNOWN;
   decision = windayflow::capture::EvaluatePrivacyContext(context);
+  if (!Expect(!decision.allowed &&
+                  decision.reason == WDF_CAPTURE_REASON_POLICY_BLOCKED,
+              "unknown session state was reported as a confirmed lock")) {
+    return false;
+  }
+
+  context.session_unlocked = WDF_CAPTURE_POLICY_BLOCK;
+  decision = windayflow::capture::EvaluatePrivacyContext(context);
   return Expect(!decision.allowed &&
                     decision.reason == WDF_CAPTURE_REASON_SESSION_LOCKED,
-                "unknown session state did not fail closed");
+                "confirmed session lock did not retain its specific reason");
 }
 
 }  // namespace

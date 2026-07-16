@@ -5,9 +5,13 @@ namespace {
 
 PrivacyDecision RequireAllowed(wdf_capture_policy_decision decision,
                                wdf_capture_reason reason) {
-  return decision == WDF_CAPTURE_POLICY_ALLOW
-             ? PrivacyDecision{true, WDF_CAPTURE_REASON_NONE}
-             : PrivacyDecision{false, reason};
+  if (decision == WDF_CAPTURE_POLICY_ALLOW) {
+    return PrivacyDecision{true, WDF_CAPTURE_REASON_NONE};
+  }
+  return PrivacyDecision{
+      false,
+      decision == WDF_CAPTURE_POLICY_BLOCK ? reason
+                                           : WDF_CAPTURE_REASON_POLICY_BLOCKED};
 }
 
 }  // namespace

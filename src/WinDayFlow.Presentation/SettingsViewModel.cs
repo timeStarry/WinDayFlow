@@ -111,7 +111,7 @@ public sealed partial class SettingsViewModel : ObservableObject, IDisposable
         " · ",
         ExcludeSensitiveApplications ? "排除敏感应用" : "不自动排除敏感应用",
         PauseInRemoteSessions ? "远程会话暂停" : "远程会话继续",
-        PauseDuringScreenSharing ? "屏幕共享暂停" : "屏幕共享继续");
+        PauseDuringScreenSharing ? "Windows 演示模式暂停" : "Windows 演示模式继续");
 
     public string CaptureAvailabilityText => _captureService.CurrentStatus.State switch
     {

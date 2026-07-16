@@ -1,3 +1,6 @@
+using System.Diagnostics;
+using System.Runtime.ExceptionServices;
+
 namespace WinDayFlow.Application.Settings;
 
 public sealed class AppSettingsService : IDisposable
@@ -6,15 +9,18 @@ public sealed class AppSettingsService : IDisposable
 
     private readonly IAppSettingsRepository _repository;
     private readonly TimeProvider _timeProvider;
+    private readonly IAppSettingsCommitBarrier _commitBarrier;
     private readonly SemaphoreSlim _writeGate = new(1, 1);
     private bool _disposed;
 
     public AppSettingsService(
         IAppSettingsRepository repository,
-        TimeProvider? timeProvider = null)
+        TimeProvider? timeProvider = null,
+        IAppSettingsCommitBarrier? commitBarrier = null)
     {
         _repository = repository ?? throw new ArgumentNullException(nameof(repository));
         _timeProvider = timeProvider ?? TimeProvider.System;
+        _commitBarrier = commitBarrier ?? NoOpAppSettingsCommitBarrier.Instance;
     }
 
     public AppSettings Current { get; private set; } = AppSettings.Default;
@@ -31,6 +37,8 @@ public sealed class AppSettingsService : IDisposable
 
         AppSettings? previous = null;
         AppSettings? current = null;
+        var settingsApplied = false;
+        ExceptionDispatchInfo? operationFailure = null;
 
         await _writeGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
@@ -41,28 +49,30 @@ public sealed class AppSettingsService : IDisposable
                 ?? throw new InvalidOperationException(
                     "The settings repository returned no settings snapshot.");
 
+            previous = Current;
             current = EnsureCaptureConsentIsCurrent(loaded);
-            if (current != loaded)
+            try
             {
-                await _repository
-                    .SaveAsync(current, cancellationToken)
+                await ApplySnapshotAsync(
+                        previous,
+                        current,
+                        saveRequired: current != loaded,
+                        () => settingsApplied = true,
+                        cancellationToken)
                     .ConfigureAwait(false);
             }
-
-            if (Current == current)
+            catch (Exception exception)
             {
-                return;
+                operationFailure = ExceptionDispatchInfo.Capture(exception);
             }
-
-            previous = Current;
-            Current = current;
         }
         finally
         {
             _writeGate.Release();
         }
 
-        OnSettingsChanged(previous!, current!);
+        NotifyAppliedChange(previous!, current!, settingsApplied, operationFailure);
+        operationFailure?.Throw();
     }
 
     public Task SetThemeAsync(
@@ -180,6 +190,8 @@ public sealed class AppSettingsService : IDisposable
 
         AppSettings? previous = null;
         AppSettings? current = null;
+        var settingsApplied = false;
+        ExceptionDispatchInfo? operationFailure = null;
 
         await _writeGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
@@ -194,18 +206,115 @@ public sealed class AppSettingsService : IDisposable
                 return;
             }
 
-            await _repository
-                .SaveAsync(current, cancellationToken)
-                .ConfigureAwait(false);
-
-            Current = current;
+            try
+            {
+                await ApplySnapshotAsync(
+                        previous,
+                        current,
+                        saveRequired: true,
+                        () => settingsApplied = true,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception exception)
+            {
+                operationFailure = ExceptionDispatchInfo.Capture(exception);
+            }
         }
         finally
         {
             _writeGate.Release();
         }
 
-        OnSettingsChanged(previous, current);
+        NotifyAppliedChange(previous, current, settingsApplied, operationFailure);
+        operationFailure?.Throw();
+    }
+
+    private async Task ApplySnapshotAsync(
+        AppSettings previous,
+        AppSettings current,
+        bool saveRequired,
+        Action markSettingsApplied,
+        CancellationToken cancellationToken)
+    {
+        var settingsApplied = false;
+        try
+        {
+            await _commitBarrier
+                .PrepareAsync(previous, current, cancellationToken)
+                .ConfigureAwait(false);
+
+            if (saveRequired)
+            {
+                await _repository
+                    .SaveAsync(current, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+
+            Current = current;
+            settingsApplied = true;
+            markSettingsApplied();
+
+            await _commitBarrier
+                .CommittedAsync(previous, current, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception failure)
+        {
+            await NotifyAbortedWithoutMaskingAsync(
+                    previous,
+                    current,
+                    settingsApplied,
+                    failure)
+                .ConfigureAwait(false);
+            throw;
+        }
+    }
+
+    private async Task NotifyAbortedWithoutMaskingAsync(
+        AppSettings previous,
+        AppSettings proposed,
+        bool settingsApplied,
+        Exception failure)
+    {
+        try
+        {
+            await _commitBarrier
+                .AbortedAsync(
+                    previous,
+                    proposed,
+                    settingsApplied,
+                    failure,
+                    CancellationToken.None)
+                .ConfigureAwait(false);
+        }
+        catch (Exception abortFailure)
+        {
+            Debug.WriteLine(
+                $"The app settings commit barrier failed while handling an abort: {abortFailure}");
+        }
+    }
+
+    private void NotifyAppliedChange(
+        AppSettings previous,
+        AppSettings current,
+        bool settingsApplied,
+        ExceptionDispatchInfo? operationFailure)
+    {
+        if (!settingsApplied || previous == current)
+        {
+            return;
+        }
+
+        try
+        {
+            OnSettingsChanged(previous, current);
+        }
+        catch (Exception notificationFailure) when (operationFailure is not null)
+        {
+            Debug.WriteLine(
+                $"An app settings subscriber failed after the settings operation had already failed: {notificationFailure}");
+        }
     }
 
     private static AppSettings EnsureCaptureConsentIsCurrent(AppSettings settings)

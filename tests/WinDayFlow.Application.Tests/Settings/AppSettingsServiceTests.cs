@@ -7,6 +7,10 @@ public sealed class AppSettingsServiceTests
 {
     private static readonly DateTimeOffset ConsentTime =
         new(2026, 7, 16, 5, 30, 0, TimeSpan.Zero);
+    private static readonly string[] PrepareCommittedCalls = ["prepare", "committed"];
+    private static readonly string[] PrepareAbortedCalls = ["prepare", "aborted"];
+    private static readonly string[] PrepareCommittedAbortedCalls =
+        ["prepare", "committed", "aborted"];
 
     [Fact]
     public void DefaultSettingsAreLocalAndCaptureSafe()
@@ -68,7 +72,10 @@ public sealed class AppSettingsServiceTests
             CloudAnalysisEnabled: true,
             RecordingConsent: null);
         var repository = new TestSettingsRepository(stored);
-        using var service = new AppSettingsService(repository);
+        var barrier = new TestCommitBarrier();
+        using var service = new AppSettingsService(
+            repository,
+            commitBarrier: barrier);
         AppSettingsChangedEventArgs? change = null;
         object? sender = null;
         service.SettingsChanged += (source, args) =>
@@ -86,6 +93,7 @@ public sealed class AppSettingsServiceTests
         Assert.Same(stored, change.Current);
         Assert.Equal(1, repository.GetCallCount);
         Assert.Empty(repository.SavedSettings);
+        Assert.Equal(PrepareCommittedCalls, barrier.Calls);
     }
 
     [Theory]
@@ -247,6 +255,107 @@ public sealed class AppSettingsServiceTests
     }
 
     [Fact]
+    public async Task RestrictivePrepareCompletesBeforeSettingsAreSaved()
+    {
+        var privacy = CapturePrivacySettings.Default;
+        var consent = new RecordingConsent(
+            AppSettingsService.CurrentRecordingConsentVersion,
+            ConsentTime,
+            privacy.Revision);
+        var stored = new AppSettings(
+            AppThemePreference.System,
+            CaptureEnabled: true,
+            CloudAnalysisEnabled: false,
+            consent,
+            privacy);
+        var repository = new TestSettingsRepository(stored);
+        var barrier = new TestCommitBarrier();
+        using var service = new AppSettingsService(
+            repository,
+            commitBarrier: barrier);
+        await service.InitializeAsync();
+        barrier.ResetObservations();
+        barrier.BlockNextPrepare();
+
+        var revoke = service.RevokeRecordingConsentAsync();
+        await barrier.PrepareStarted.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(0, repository.SaveCallCount);
+        Assert.True(service.Current.CaptureEnabled);
+        Assert.NotNull(service.Current.RecordingConsent);
+
+        barrier.ReleasePrepare();
+        await revoke;
+
+        Assert.Equal(1, repository.SaveCallCount);
+        Assert.False(service.Current.CaptureEnabled);
+        Assert.Null(service.Current.RecordingConsent);
+        Assert.Equal(PrepareCommittedCalls, barrier.Calls);
+    }
+
+    [Fact]
+    public async Task SaveFailureCallsAbortAndAbortFailureDoesNotMaskOriginalFailure()
+    {
+        var privacy = CapturePrivacySettings.Default;
+        var consent = new RecordingConsent(
+            AppSettingsService.CurrentRecordingConsentVersion,
+            ConsentTime,
+            privacy.Revision);
+        var stored = new AppSettings(
+            AppThemePreference.System,
+            CaptureEnabled: true,
+            CloudAnalysisEnabled: false,
+            consent,
+            privacy);
+        var repository = new TestSettingsRepository(stored);
+        var barrier = new TestCommitBarrier();
+        using var service = new AppSettingsService(
+            repository,
+            commitBarrier: barrier);
+        await service.InitializeAsync();
+        barrier.ResetObservations();
+        var saveFailure = new InvalidOperationException("save failed");
+        var abortFailure = new InvalidOperationException("abort failed");
+        repository.SaveException = saveFailure;
+        barrier.AbortException = abortFailure;
+
+        var thrown = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => service.RevokeRecordingConsentAsync());
+
+        Assert.Same(saveFailure, thrown);
+        Assert.Same(saveFailure, barrier.AbortedFailure);
+        Assert.False(barrier.AbortedSettingsApplied);
+        Assert.True(service.Current.CaptureEnabled);
+        Assert.Same(consent, service.Current.RecordingConsent);
+        Assert.Equal(PrepareAbortedCalls, barrier.Calls);
+    }
+
+    [Fact]
+    public async Task CommitFailureKeepsPersistedCurrentAndPublishesTheAppliedChange()
+    {
+        var repository = new TestSettingsRepository();
+        var barrier = new TestCommitBarrier();
+        var commitFailure = new InvalidOperationException("commit failed");
+        barrier.CommitException = commitFailure;
+        using var service = new AppSettingsService(
+            repository,
+            commitBarrier: barrier);
+        var eventCount = 0;
+        service.SettingsChanged += (_, _) => eventCount++;
+
+        var thrown = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => service.SetThemeAsync(AppThemePreference.Dark));
+
+        Assert.Same(commitFailure, thrown);
+        Assert.Equal(AppThemePreference.Dark, service.Current.Theme);
+        Assert.Equal(service.Current, Assert.Single(repository.SavedSettings));
+        Assert.True(barrier.AbortedSettingsApplied);
+        Assert.Same(commitFailure, barrier.AbortedFailure);
+        Assert.Equal(PrepareCommittedAbortedCalls, barrier.Calls);
+        Assert.Equal(1, eventCount);
+    }
+
+    [Fact]
     public async Task ConcurrentWritesAreSerialized()
     {
         var repository = new TestSettingsRepository
@@ -313,6 +422,8 @@ public sealed class AppSettingsServiceTests
 
         public bool BlockFirstSave { get; init; }
 
+        public Exception? SaveException { get; set; }
+
         public int GetCallCount { get; private set; }
 
         public int SaveCallCount => Volatile.Read(ref _saveCallCount);
@@ -351,6 +462,11 @@ public sealed class AppSettingsServiceTests
                 }
 
                 cancellationToken.ThrowIfCancellationRequested();
+                if (SaveException is { } saveException)
+                {
+                    throw saveException;
+                }
+
                 _settings = settings;
                 SavedSettings.Add(settings);
             }
@@ -381,6 +497,93 @@ public sealed class AppSettingsServiceTests
 
                 current = observed;
             }
+        }
+    }
+
+    private sealed class TestCommitBarrier : IAppSettingsCommitBarrier
+    {
+        private TaskCompletionSource _prepareStarted = CreateCompletionSource();
+        private TaskCompletionSource _releasePrepare = CreateCompletionSource();
+        private bool _blockNextPrepare;
+
+        public List<string> Calls { get; } = [];
+
+        public Exception? CommitException { get; set; }
+
+        public Exception? AbortException { get; set; }
+
+        public Exception? AbortedFailure { get; private set; }
+
+        public bool AbortedSettingsApplied { get; private set; }
+
+        public Task PrepareStarted => _prepareStarted.Task;
+
+        public async Task PrepareAsync(
+            AppSettings previous,
+            AppSettings proposed,
+            CancellationToken cancellationToken = default)
+        {
+            Calls.Add("prepare");
+            if (!_blockNextPrepare)
+            {
+                return;
+            }
+
+            _blockNextPrepare = false;
+            _prepareStarted.TrySetResult();
+            await _releasePrepare.Task.WaitAsync(cancellationToken);
+        }
+
+        public Task CommittedAsync(
+            AppSettings previous,
+            AppSettings current,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Calls.Add("committed");
+            return CommitException is { } exception
+                ? Task.FromException(exception)
+                : Task.CompletedTask;
+        }
+
+        public Task AbortedAsync(
+            AppSettings previous,
+            AppSettings proposed,
+            bool settingsApplied,
+            Exception failure,
+            CancellationToken cancellationToken = default)
+        {
+            Calls.Add("aborted");
+            AbortedSettingsApplied = settingsApplied;
+            AbortedFailure = failure;
+            return AbortException is { } exception
+                ? Task.FromException(exception)
+                : Task.CompletedTask;
+        }
+
+        public void BlockNextPrepare()
+        {
+            _prepareStarted = CreateCompletionSource();
+            _releasePrepare = CreateCompletionSource();
+            _blockNextPrepare = true;
+        }
+
+        public void ReleasePrepare()
+        {
+            _releasePrepare.TrySetResult();
+        }
+
+        public void ResetObservations()
+        {
+            Calls.Clear();
+            AbortedFailure = null;
+            AbortedSettingsApplied = false;
+        }
+
+        private static TaskCompletionSource CreateCompletionSource()
+        {
+            return new TaskCompletionSource(
+                TaskCreationOptions.RunContinuationsAsynchronously);
         }
     }
 

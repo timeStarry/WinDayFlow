@@ -12,23 +12,31 @@ public sealed class ConsentGatedCaptureService : ICaptureService, IDisposable
     private readonly object _sync = new();
     private readonly ICaptureBackend _backend;
     private readonly AppSettingsService _settings;
+    private readonly ICaptureRuntimeAuthorization _runtimeAuthorization;
     private readonly SemaphoreSlim _lifecycleGate = new(1, 1);
     private readonly CancellationTokenSource _lifetimeCancellation = new();
     private CaptureStatus _status;
     private EventHandler<CaptureStatusChangedEventArgs>? _statusChanged;
     private int _consentStopScheduled;
+    private long _pendingRuntimeInvalidationGeneration;
+    private long _handledRuntimeInvalidationGeneration;
     private bool _disposed;
 
     public ConsentGatedCaptureService(
         ICaptureBackend backend,
-        AppSettingsService settings)
+        AppSettingsService settings,
+        ICaptureRuntimeAuthorization runtimeAuthorization)
     {
         _backend = backend ?? throw new ArgumentNullException(nameof(backend));
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
+        _runtimeAuthorization = runtimeAuthorization
+            ?? throw new ArgumentNullException(nameof(runtimeAuthorization));
         _status = ProjectStatus(_backend.CurrentStatus, current: null);
 
         _backend.StatusChanged += OnBackendStatusChanged;
         _settings.SettingsChanged += OnSettingsChanged;
+        _runtimeAuthorization.AuthorizationChanged += OnRuntimeAuthorizationChanged;
+        ObserveRuntimeInvalidation(_runtimeAuthorization.InvalidationGeneration);
         ScheduleConsentStopIfRequired(_backend.CurrentStatus);
     }
 
@@ -101,9 +109,10 @@ public sealed class ConsentGatedCaptureService : ICaptureService, IDisposable
             _statusChanged = null;
         }
 
-        _lifetimeCancellation.Cancel();
         _backend.StatusChanged -= OnBackendStatusChanged;
         _settings.SettingsChanged -= OnSettingsChanged;
+        _runtimeAuthorization.AuthorizationChanged -= OnRuntimeAuthorizationChanged;
+        _lifetimeCancellation.Cancel();
     }
 
     private async Task InvokeBackendAsync(
@@ -150,6 +159,17 @@ public sealed class ConsentGatedCaptureService : ICaptureService, IDisposable
         AppSettingsChangedEventArgs eventArgs)
     {
         _ = eventArgs;
+        var backendStatus = _backend.CurrentStatus;
+        UpdateStatus(backendStatus);
+        ScheduleConsentStopIfRequired(backendStatus);
+    }
+
+    private void OnRuntimeAuthorizationChanged(
+        object? sender,
+        CaptureRuntimeAuthorizationChangedEventArgs eventArgs)
+    {
+        _ = sender;
+        ObserveRuntimeInvalidation(eventArgs.InvalidationGeneration);
         var backendStatus = _backend.CurrentStatus;
         UpdateStatus(backendStatus);
         ScheduleConsentStopIfRequired(backendStatus);
@@ -229,9 +249,11 @@ public sealed class ConsentGatedCaptureService : ICaptureService, IDisposable
 
     private void ScheduleConsentStopIfRequired(CaptureStatus backendStatus)
     {
-        if (HasCaptureAuthorization()
-            || !ShouldInitiateConsentStop(backendStatus.State)
-            || IsDisposed()
+        var hasPendingRuntimeInvalidation = HasPendingRuntimeInvalidation();
+        if (IsDisposed()
+            || (!hasPendingRuntimeInvalidation
+                && (HasCaptureAuthorization()
+                    || !ShouldInitiateConsentStop(backendStatus.State)))
             || Interlocked.CompareExchange(ref _consentStopScheduled, 1, 0) != 0)
         {
             return;
@@ -243,6 +265,9 @@ public sealed class ConsentGatedCaptureService : ICaptureService, IDisposable
     private async Task StopForMissingConsentAsync()
     {
         var entered = false;
+        var handledRuntimeGeneration = 0L;
+        var stopFailed = false;
+        var stopAttempted = false;
         CaptureStatus? failureStatus = null;
         try
         {
@@ -251,9 +276,14 @@ public sealed class ConsentGatedCaptureService : ICaptureService, IDisposable
                 .ConfigureAwait(false);
             entered = true;
 
-            if (!HasCaptureAuthorization()
+            handledRuntimeGeneration = Volatile.Read(
+                ref _pendingRuntimeInvalidationGeneration);
+            if ((handledRuntimeGeneration
+                    > Volatile.Read(ref _handledRuntimeInvalidationGeneration)
+                    || !HasCaptureAuthorization())
                 && ShouldInitiateConsentStop(_backend.CurrentStatus.State))
             {
+                stopAttempted = true;
                 await _backend
                     .StopAsync(_lifetimeCancellation.Token)
                     .ConfigureAwait(false);
@@ -264,6 +294,7 @@ public sealed class ConsentGatedCaptureService : ICaptureService, IDisposable
         }
         catch (Exception)
         {
+            stopFailed = true;
             var backendStatus = _backend.CurrentStatus;
             failureStatus = MayRetainCaptureResources(backendStatus.State)
                 ? backendStatus with { Detail = ConsentStopFailedDetail }
@@ -271,13 +302,65 @@ public sealed class ConsentGatedCaptureService : ICaptureService, IDisposable
         }
         finally
         {
+            AdvanceHandledRuntimeInvalidation(handledRuntimeGeneration);
             if (entered)
             {
                 _lifecycleGate.Release();
             }
 
             Interlocked.Exchange(ref _consentStopScheduled, 0);
-            UpdateStatus(failureStatus ?? _backend.CurrentStatus);
+            var backendStatus = failureStatus ?? _backend.CurrentStatus;
+            UpdateStatus(backendStatus);
+            if (HasPendingRuntimeInvalidation()
+                || (!stopAttempted
+                    && !stopFailed
+                    && !HasCaptureAuthorization()
+                    && ShouldInitiateConsentStop(backendStatus.State)))
+            {
+                ScheduleConsentStopIfRequired(backendStatus);
+            }
+        }
+    }
+
+    private void ObserveRuntimeInvalidation(long generation)
+    {
+        if (generation <= 0)
+        {
+            return;
+        }
+
+        AdvanceGeneration(ref _pendingRuntimeInvalidationGeneration, generation);
+    }
+
+    private bool HasPendingRuntimeInvalidation()
+    {
+        return Volatile.Read(ref _pendingRuntimeInvalidationGeneration)
+            > Volatile.Read(ref _handledRuntimeInvalidationGeneration);
+    }
+
+    private void AdvanceHandledRuntimeInvalidation(long generation)
+    {
+        if (generation > 0)
+        {
+            AdvanceGeneration(ref _handledRuntimeInvalidationGeneration, generation);
+        }
+    }
+
+    private static void AdvanceGeneration(ref long location, long generation)
+    {
+        var current = Volatile.Read(ref location);
+        while (generation > current)
+        {
+            var observed = Interlocked.CompareExchange(
+                ref location,
+                generation,
+                current);
+            if (observed == current)
+            {
+                return;
+            }
+
+            current = observed;
         }
     }
 
@@ -300,7 +383,8 @@ public sealed class ConsentGatedCaptureService : ICaptureService, IDisposable
     private bool HasCaptureAuthorization()
     {
         return _settings.Current.CaptureEnabled
-            && _settings.HasValidRecordingConsent;
+            && _settings.HasValidRecordingConsent
+            && _runtimeAuthorization.IsCaptureAuthorized;
     }
 
     private bool IsDisposed()

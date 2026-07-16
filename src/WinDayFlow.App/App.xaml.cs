@@ -35,6 +35,10 @@ public partial class App : Microsoft.UI.Xaml.Application
                 services.AddSingleton(connectionFactory);
                 services.AddSingleton<SqliteDatabaseInitializer>();
                 services.AddSingleton<IAppSettingsRepository, SqliteAppSettingsRepository>();
+                services.AddSingleton<IAppSettingsCommitBarrier>(
+                    NoOpAppSettingsCommitBarrier.Instance);
+                services.AddSingleton<ICaptureRuntimeAuthorization>(
+                    DenyCaptureRuntimeAuthorization.Instance);
                 services.AddSingleton<AppSettingsService>();
                 services.AddSingleton<SqliteTimelineRepository>();
                 services.AddSingleton<ITimelineStore>(static provider =>

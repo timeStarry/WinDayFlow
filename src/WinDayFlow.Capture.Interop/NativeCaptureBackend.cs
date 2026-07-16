@@ -6,7 +6,8 @@ using WinDayFlow.Application.Capture;
 
 namespace WinDayFlow.Capture.Interop;
 
-public sealed class NativeCaptureBackend : ICaptureBackend, IDisposable
+public sealed class NativeCaptureBackend
+    : ICaptureBackend, INativeCapturePrivacyTarget, IDisposable
 {
     private const string FoundationUnavailableDetail =
         "原生录制基础已加载；实时屏幕捕获能力尚未启用。";
@@ -414,7 +415,7 @@ public sealed class NativeCaptureBackend : ICaptureBackend, IDisposable
             ApplicationAllowed = (int)context.ApplicationAllowed,
             WindowAllowed = (int)context.WindowAllowed,
             StorageAvailable = (int)context.StorageAvailable,
-            PolicyRevision = context.PolicyRevision,
+            PolicyRevision = context.RuntimePolicyRevision,
         };
         ThrowForResult(
             _nativeApi.UpdatePrivacyContext(

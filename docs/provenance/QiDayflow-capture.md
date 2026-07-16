@@ -122,18 +122,19 @@ the notice required for derived QiDayflow material.
 
 ## Derived-File Ledger and Local Hash Rules
 
-The following derived files are present. The repository has not yet created its
-initial commit, so the commit field remains an explicit worktree marker until
-that commit exists.
+The following derived files are present. The five unchanged foundation files
+were last verified in the initial foundation commit. A worktree marker is used
+only while preparing a derived-file change and must be replaced by the resulting
+WinDayFlow commit in the immediate provenance follow-up.
 
 | Local file | Upstream input or inputs | Local SHA-256 | Last verified WinDayFlow commit | Modification summary |
 | --- | --- | --- | --- | --- |
-| `src/WinDayFlow.Capture.Native/internal/pixel_buffer.h` | `windows/runner/capture_pixel_buffer.h` | `6C9FD5370BDFB230300137F6046EEA37555214D0E4F5CD34508E597BE4FB8A05` | `WORKTREE (pre-initial commit)` | Renamed the namespace and include guard while keeping all C++ types internal. |
-| `src/WinDayFlow.Capture.Native/internal/pixel_buffer.cpp` | `windows/runner/capture_pixel_buffer.cpp` | `2E2A2D55EA51FD25D0E3BEC875DE78F1480DFEE2FA1CD76108295DF1D6C67ADD` | `WORKTREE (pre-initial commit)` | Added shared overflow helpers, safe minimum-`ptrdiff_t` stride magnitude, exact last-row buffer bounds, and final-row pointer-arithmetic guards. |
-| `src/WinDayFlow.Capture.Native/internal/capture_policy.h` | `windows/runner/capture_runtime.h` | `90C3A37EE700DFBC53E4F4FD05BEFFC2FC502852ADB5AA7188D91DC9764D05E2` | `WORKTREE (pre-initial commit)` | Replaced inherited fixed intervals with validated millisecond policy inputs and removed the platform-thread stop plan from this helper. |
-| `src/WinDayFlow.Capture.Native/internal/capture_policy.cpp` | `windows/runner/capture_runtime.cpp` | `51A526E9C101721CF0E54A675103665121A1373EC3C1C38BD9A5FA1080F8E69E` | `WORKTREE (pre-initial commit)` | Parameterized frame, context, and chunk cadence; retained saturating schedule, media timing, chunk, CPU, and memory calculations. |
-| `src/WinDayFlow.Capture.Native/tests/pixel_buffer_tests.cpp` | `windows/runner/capture_pixel_buffer_test.cpp` | `7DD6C4A0215528265B8D8E453B51872F2E10452DDC4D818E3F6CD51AD49D8A7F` | `WORKTREE (pre-initial commit)` | Preserved top-down regression coverage and added exact padded-row bounds, negative stride, one-row positive/negative/minimum stride, short buffer, zero stride, and overflow cases. |
-| `src/WinDayFlow.Capture.Native/tests/capture_policy_tests.cpp` | `windows/runner/capture_runtime_test.cpp` | `06E1B9C0FD0D4A2C4CA35F61B536AEF0FF8BA2F933A2AD1163A16A5D933469DB` | `WORKTREE (pre-initial commit)` | Adapted timing and scheduling assertions to versioned policy inputs and added fail-closed privacy decision coverage. |
+| `src/WinDayFlow.Capture.Native/internal/pixel_buffer.h` | `windows/runner/capture_pixel_buffer.h` | `6C9FD5370BDFB230300137F6046EEA37555214D0E4F5CD34508E597BE4FB8A05` | `1807bf8152ff361976c1336f6cfbba35c4d9cfd9` | Renamed the namespace and include guard while keeping all C++ types internal. |
+| `src/WinDayFlow.Capture.Native/internal/pixel_buffer.cpp` | `windows/runner/capture_pixel_buffer.cpp` | `2E2A2D55EA51FD25D0E3BEC875DE78F1480DFEE2FA1CD76108295DF1D6C67ADD` | `1807bf8152ff361976c1336f6cfbba35c4d9cfd9` | Added shared overflow helpers, safe minimum-`ptrdiff_t` stride magnitude, exact last-row buffer bounds, and final-row pointer-arithmetic guards. |
+| `src/WinDayFlow.Capture.Native/internal/capture_policy.h` | `windows/runner/capture_runtime.h` | `90C3A37EE700DFBC53E4F4FD05BEFFC2FC502852ADB5AA7188D91DC9764D05E2` | `1807bf8152ff361976c1336f6cfbba35c4d9cfd9` | Replaced inherited fixed intervals with validated millisecond policy inputs and removed the platform-thread stop plan from this helper. |
+| `src/WinDayFlow.Capture.Native/internal/capture_policy.cpp` | `windows/runner/capture_runtime.cpp` | `51A526E9C101721CF0E54A675103665121A1373EC3C1C38BD9A5FA1080F8E69E` | `1807bf8152ff361976c1336f6cfbba35c4d9cfd9` | Parameterized frame, context, and chunk cadence; retained saturating schedule, media timing, chunk, CPU, and memory calculations. |
+| `src/WinDayFlow.Capture.Native/tests/pixel_buffer_tests.cpp` | `windows/runner/capture_pixel_buffer_test.cpp` | `7DD6C4A0215528265B8D8E453B51872F2E10452DDC4D818E3F6CD51AD49D8A7F` | `1807bf8152ff361976c1336f6cfbba35c4d9cfd9` | Preserved top-down regression coverage and added exact padded-row bounds, negative stride, one-row positive/negative/minimum stride, short buffer, zero stride, and overflow cases. |
+| `src/WinDayFlow.Capture.Native/tests/capture_policy_tests.cpp` | `windows/runner/capture_runtime_test.cpp` | `9E6461B6ABF628A9C81FB4789A6132510063BBC6AA062ED85E299CB1016A65FF` | `WORKTREE (pending commit)` | Adapted timing and scheduling assertions to versioned policy inputs and added generic fail-closed handling for unknown privacy inputs. |
 
 Maintain the ledger under the following rules:
 

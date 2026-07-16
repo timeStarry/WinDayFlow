@@ -114,7 +114,7 @@ public sealed record NativeCapturePrivacyContext(
     NativeCapturePolicyDecision ApplicationAllowed,
     NativeCapturePolicyDecision WindowAllowed,
     NativeCapturePolicyDecision StorageAvailable,
-    ulong PolicyRevision)
+    ulong RuntimePolicyRevision)
 {
     public NativeCapturePolicyDecision ConsentGranted { get; } =
         ValidateDecision(ConsentGranted, nameof(ConsentGranted));
@@ -140,15 +140,15 @@ public sealed record NativeCapturePrivacyContext(
     public NativeCapturePolicyDecision StorageAvailable { get; } =
         ValidateDecision(StorageAvailable, nameof(StorageAvailable));
 
-    public ulong PolicyRevision { get; } = PolicyRevision > 0
-        ? PolicyRevision
+    public ulong RuntimePolicyRevision { get; } = RuntimePolicyRevision > 0
+        ? RuntimePolicyRevision
         : throw new ArgumentOutOfRangeException(
-            nameof(PolicyRevision),
-            PolicyRevision,
+            nameof(RuntimePolicyRevision),
+            RuntimePolicyRevision,
             "The native privacy policy revision must be positive.");
 
     public static NativeCapturePrivacyContext FailClosed(
-        ulong policyRevision,
+        ulong runtimePolicyRevision,
         bool consentGranted = false)
     {
         return new NativeCapturePrivacyContext(
@@ -162,7 +162,7 @@ public sealed record NativeCapturePrivacyContext(
             NativeCapturePolicyDecision.Unknown,
             NativeCapturePolicyDecision.Unknown,
             NativeCapturePolicyDecision.Unknown,
-            policyRevision);
+            runtimePolicyRevision);
     }
 
     private static NativeCapturePolicyDecision ValidateDecision(

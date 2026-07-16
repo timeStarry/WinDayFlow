@@ -14,7 +14,7 @@ public sealed class ConsentGatedCaptureServiceTests
     {
         using var settings = await CreateSettingsAsync(useOutdatedConsent);
         var backend = new StubCaptureBackend(CaptureState.Stopped);
-        using var service = new ConsentGatedCaptureService(backend, settings);
+        using var service = CreateService(backend, settings);
 
         Assert.Equal(CaptureState.BlockedByConsent, service.CurrentStatus.State);
 
@@ -33,7 +33,7 @@ public sealed class ConsentGatedCaptureServiceTests
         using var settings = await CreateSettingsAsync();
         await settings.GrantRecordingConsentAsync();
         var backend = new StubCaptureBackend(CaptureState.Stopped);
-        using var service = new ConsentGatedCaptureService(backend, settings);
+        using var service = CreateService(backend, settings);
 
         Assert.Equal(CaptureState.Stopped, service.CurrentStatus.State);
 
@@ -51,7 +51,7 @@ public sealed class ConsentGatedCaptureServiceTests
     {
         using var settings = await CreateConsentedSettingsAsync();
         var backend = new StubCaptureBackend(CaptureState.Stopped);
-        using var service = new ConsentGatedCaptureService(backend, settings);
+        using var service = CreateService(backend, settings);
 
         await service.StartAsync();
         await service.PauseAsync();
@@ -66,11 +66,30 @@ public sealed class ConsentGatedCaptureServiceTests
     }
 
     [Fact]
+    public async Task RuntimeAuthorizationBlocksStartAndResumeBeforeTheyReachBackend()
+    {
+        using var settings = await CreateConsentedSettingsAsync();
+        var backend = new StubCaptureBackend(CaptureState.Stopped);
+        using var service = new ConsentGatedCaptureService(
+            backend,
+            settings,
+            new TestRuntimeAuthorization(isCaptureAuthorized: false));
+
+        await Assert.ThrowsAsync<RecordingConsentRequiredException>(
+            () => service.StartAsync());
+        await Assert.ThrowsAsync<RecordingConsentRequiredException>(
+            () => service.ResumeAsync());
+
+        Assert.Equal(0, backend.StartCount);
+        Assert.Equal(0, backend.ResumeCount);
+    }
+
+    [Fact]
     public async Task RevokingConsentStopsBackendBeforePublishingBlockedStatus()
     {
         using var settings = await CreateConsentedSettingsAsync();
         var backend = new StubCaptureBackend(CaptureState.Paused);
-        using var service = new ConsentGatedCaptureService(backend, settings);
+        using var service = CreateService(backend, settings);
         var transitions = new List<CaptureStatusChangedEventArgs>();
         service.StatusChanged += (_, eventArgs) => transitions.Add(eventArgs);
 
@@ -96,7 +115,7 @@ public sealed class ConsentGatedCaptureServiceTests
         {
             TransitionOnCommands = false,
         };
-        using var service = new ConsentGatedCaptureService(backend, settings);
+        using var service = CreateService(backend, settings);
 
         await service.PauseAsync();
         await service.StopAsync();
@@ -111,7 +130,7 @@ public sealed class ConsentGatedCaptureServiceTests
     {
         using var settings = await CreateConsentedSettingsAsync();
         var backend = new StubCaptureBackend(CaptureState.Recording);
-        using var service = new ConsentGatedCaptureService(backend, settings);
+        using var service = CreateService(backend, settings);
 
         await settings.SetCaptureEnabledAsync(enabled: false);
         await backend.StopCompleted.WaitAsync(TimeSpan.FromSeconds(5));
@@ -133,7 +152,7 @@ public sealed class ConsentGatedCaptureServiceTests
         {
             StopOperation = _ => throw new InvalidOperationException("stop failed"),
         };
-        using var service = new ConsentGatedCaptureService(backend, settings);
+        using var service = CreateService(backend, settings);
 
         await settings.SetCaptureEnabledAsync(enabled: false);
         await backend.StopCompleted.WaitAsync(TimeSpan.FromSeconds(5));
@@ -157,7 +176,7 @@ public sealed class ConsentGatedCaptureServiceTests
         {
             StopOperation = _ => throw new InvalidOperationException("stop failed"),
         };
-        using var service = new ConsentGatedCaptureService(backend, settings);
+        using var service = CreateService(backend, settings);
 
         await settings.SetCaptureEnabledAsync(enabled: false);
         await backend.StopCompleted.WaitAsync(TimeSpan.FromSeconds(5));
@@ -178,7 +197,7 @@ public sealed class ConsentGatedCaptureServiceTests
         {
             StopOperation = _ => throw new InvalidOperationException("stop failed"),
         };
-        using var service = new ConsentGatedCaptureService(backend, settings);
+        using var service = CreateService(backend, settings);
 
         await settings.SetCaptureEnabledAsync(enabled: false);
         await backend.StopCompleted.WaitAsync(TimeSpan.FromSeconds(5));
@@ -204,7 +223,7 @@ public sealed class ConsentGatedCaptureServiceTests
         {
             StopOperation = token => releaseStop.Task.WaitAsync(token),
         };
-        using var service = new ConsentGatedCaptureService(backend, settings);
+        using var service = CreateService(backend, settings);
 
         await settings.SetCaptureEnabledAsync(enabled: false);
         await backend.StopStarted.WaitAsync(TimeSpan.FromSeconds(5));
@@ -227,7 +246,7 @@ public sealed class ConsentGatedCaptureServiceTests
         {
             StopOperation = token => releaseStop.Task.WaitAsync(token),
         };
-        using var service = new ConsentGatedCaptureService(backend, settings);
+        using var service = CreateService(backend, settings);
 
         Assert.Equal(CaptureState.Unavailable, service.CurrentStatus.State);
 
@@ -248,7 +267,7 @@ public sealed class ConsentGatedCaptureServiceTests
     {
         using var settings = await CreateConsentedSettingsAsync();
         var backend = new StubCaptureBackend(CaptureState.Stopped);
-        using var service = new ConsentGatedCaptureService(backend, settings);
+        using var service = CreateService(backend, settings);
         var transitions = new List<CaptureStatusChangedEventArgs>();
         service.StatusChanged += (_, eventArgs) => transitions.Add(eventArgs);
 
@@ -271,7 +290,7 @@ public sealed class ConsentGatedCaptureServiceTests
         {
             StopOperation = token => releaseStop.Task.WaitAsync(token),
         };
-        using var service = new ConsentGatedCaptureService(backend, settings);
+        using var service = CreateService(backend, settings);
         var transitions = new List<CaptureStatusChangedEventArgs>();
         service.StatusChanged += (_, eventArgs) => transitions.Add(eventArgs);
 
@@ -311,7 +330,7 @@ public sealed class ConsentGatedCaptureServiceTests
         {
             StopOperation = _ => throw new InvalidOperationException("stop failed"),
         };
-        using var service = new ConsentGatedCaptureService(backend, settings);
+        using var service = CreateService(backend, settings);
 
         backend.TransitionTo(CaptureState.Recording);
         await backend.StopCompleted.WaitAsync(TimeSpan.FromSeconds(5));
@@ -333,7 +352,7 @@ public sealed class ConsentGatedCaptureServiceTests
         {
             StartOperation = token => releaseStart.Task.WaitAsync(token),
         };
-        using var service = new ConsentGatedCaptureService(backend, settings);
+        using var service = CreateService(backend, settings);
 
         var start = service.StartAsync();
         await backend.StartStarted.WaitAsync(TimeSpan.FromSeconds(5));
@@ -351,11 +370,142 @@ public sealed class ConsentGatedCaptureServiceTests
     }
 
     [Fact]
+    public async Task RevocationLatchBlocksAQueuedStartBeforeSettingsArePersisted()
+    {
+        var privacy = CapturePrivacySettings.Default;
+        var consent = new RecordingConsent(
+            AppSettingsService.CurrentRecordingConsentVersion,
+            new DateTimeOffset(2026, 7, 16, 0, 0, 0, TimeSpan.Zero),
+            privacy.Revision);
+        var initial = new AppSettings(
+            AppThemePreference.System,
+            CaptureEnabled: true,
+            CloudAnalysisEnabled: false,
+            consent,
+            privacy);
+        var runtimeAuthorization = new LatchingRuntimeAuthorization();
+        using var settings = new AppSettingsService(
+            new InMemorySettingsRepository(initial),
+            commitBarrier: runtimeAuthorization);
+        await settings.InitializeAsync();
+        runtimeAuthorization.BlockNextRestrictivePrepare();
+        var releasePause = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var backend = new StubCaptureBackend(CaptureState.Recording)
+        {
+            TransitionOnCommands = false,
+            PauseOperation = token => releasePause.Task.WaitAsync(token),
+        };
+        using var service = new ConsentGatedCaptureService(
+            backend,
+            settings,
+            runtimeAuthorization);
+
+        var pause = service.PauseAsync();
+        await backend.PauseStarted.WaitAsync(TimeSpan.FromSeconds(5));
+        var start = service.StartAsync();
+        var revoke = settings.RevokeRecordingConsentAsync();
+        await runtimeAuthorization.BlockStarted.WaitAsync(TimeSpan.FromSeconds(5));
+
+        releasePause.TrySetResult();
+        await pause;
+        await Assert.ThrowsAsync<RecordingConsentRequiredException>(() => start);
+
+        Assert.True(settings.Current.CaptureEnabled);
+        Assert.True(settings.HasValidRecordingConsent);
+        Assert.Equal(0, backend.StartCount);
+
+        runtimeAuthorization.ReleaseBlock();
+        await revoke;
+        await backend.StopCompleted.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.False(settings.Current.CaptureEnabled);
+        Assert.False(settings.HasValidRecordingConsent);
+    }
+
+    [Fact]
+    public async Task RuntimeInvalidationStopsActiveCaptureEvenWhenAuthorizationRecovers()
+    {
+        using var settings = await CreateConsentedSettingsAsync();
+        var runtimeAuthorization = new MutableRuntimeAuthorization(
+            isCaptureAuthorized: true);
+        var releasePause = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var backend = new StubCaptureBackend(CaptureState.Recording)
+        {
+            TransitionOnCommands = false,
+            PauseOperation = token => releasePause.Task.WaitAsync(token),
+        };
+        using var service = new ConsentGatedCaptureService(
+            backend,
+            settings,
+            runtimeAuthorization);
+        var pause = service.PauseAsync();
+        await backend.PauseStarted.WaitAsync(TimeSpan.FromSeconds(5));
+
+        runtimeAuthorization.SetCaptureAuthorized(authorized: false);
+        runtimeAuthorization.SetCaptureAuthorized(authorized: true);
+        releasePause.TrySetResult();
+
+        await pause.WaitAsync(TimeSpan.FromSeconds(5));
+        await backend.StopCompleted.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.True(runtimeAuthorization.IsCaptureAuthorized);
+        Assert.Equal(1, backend.StopCount);
+    }
+
+    [Fact]
+    public async Task ConstructorObservesAnInvalidationThatPrecededSubscription()
+    {
+        using var settings = await CreateConsentedSettingsAsync();
+        var runtimeAuthorization = new MutableRuntimeAuthorization(
+            isCaptureAuthorized: true);
+        runtimeAuthorization.SetCaptureAuthorized(authorized: false);
+        runtimeAuthorization.SetCaptureAuthorized(authorized: true);
+        var backend = new StubCaptureBackend(CaptureState.Recording);
+
+        using var service = new ConsentGatedCaptureService(
+            backend,
+            settings,
+            runtimeAuthorization);
+        await backend.StopCompleted.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(1, runtimeAuthorization.InvalidationGeneration);
+        Assert.Equal(1, backend.StopCount);
+    }
+
+    [Fact]
+    public async Task DisposeUnsubscribesRuntimeAuthorizationAndCancelsBackgroundStop()
+    {
+        using var settings = await CreateConsentedSettingsAsync();
+        var runtimeAuthorization = new MutableRuntimeAuthorization(
+            isCaptureAuthorized: true);
+        var backend = new StubCaptureBackend(CaptureState.Recording)
+        {
+            StopOperation = static token => Task.Delay(Timeout.Infinite, token),
+        };
+        var service = new ConsentGatedCaptureService(
+            backend,
+            settings,
+            runtimeAuthorization);
+        runtimeAuthorization.SetCaptureAuthorized(authorized: false);
+        await backend.StopStarted.WaitAsync(TimeSpan.FromSeconds(5));
+
+        service.Dispose();
+        await backend.StopCompleted.WaitAsync(TimeSpan.FromSeconds(5));
+        runtimeAuthorization.SetCaptureAuthorized(authorized: true);
+        runtimeAuthorization.SetCaptureAuthorized(authorized: false);
+
+        Assert.Equal(0, runtimeAuthorization.SubscriberCount);
+        Assert.Equal(1, backend.StopCount);
+    }
+
+    [Fact]
     public async Task DisposeUnsubscribesFromBackendAndSettingsChanges()
     {
         using var settings = await CreateConsentedSettingsAsync();
         var backend = new StubCaptureBackend(CaptureState.Stopped);
-        var service = new ConsentGatedCaptureService(backend, settings);
+        var service = CreateService(backend, settings);
         var original = service.CurrentStatus;
         var eventCount = 0;
         service.StatusChanged += (_, _) => eventCount++;
@@ -386,6 +536,16 @@ public sealed class ConsentGatedCaptureServiceTests
         var settings = new AppSettingsService(new InMemorySettingsRepository(initial));
         await settings.InitializeAsync();
         return settings;
+    }
+
+    private static ConsentGatedCaptureService CreateService(
+        ICaptureBackend backend,
+        AppSettingsService settings)
+    {
+        return new ConsentGatedCaptureService(
+            backend,
+            settings,
+            new TestRuntimeAuthorization(isCaptureAuthorized: true));
     }
 
     private static async Task<AppSettingsService> CreateConsentedSettingsAsync()
@@ -445,9 +605,13 @@ public sealed class ConsentGatedCaptureServiceTests
 
         public Func<CancellationToken, Task>? StartOperation { get; init; }
 
+        public Func<CancellationToken, Task>? PauseOperation { get; init; }
+
         public Func<CancellationToken, Task>? StopOperation { get; init; }
 
         public Task StartStarted => _startStarted.Task;
+
+        public Task PauseStarted => _pauseStarted.Task;
 
         public Task StopStarted => _stopStarted.Task;
 
@@ -456,6 +620,8 @@ public sealed class ConsentGatedCaptureServiceTests
         public int SubscriberCount => _statusChanged?.GetInvocationList().Length ?? 0;
 
         private readonly TaskCompletionSource _startStarted =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _pauseStarted =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly TaskCompletionSource _stopStarted =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -484,16 +650,20 @@ public sealed class ConsentGatedCaptureServiceTests
             }
         }
 
-        public Task PauseAsync(CancellationToken cancellationToken = default)
+        public async Task PauseAsync(CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
             PauseCount++;
+            _pauseStarted.TrySetResult();
+            if (PauseOperation is not null)
+            {
+                await PauseOperation(cancellationToken);
+            }
+
             if (TransitionOnCommands)
             {
                 TransitionTo(CaptureState.Paused);
             }
-
-            return Task.CompletedTask;
         }
 
         public Task ResumeAsync(CancellationToken cancellationToken = default)
@@ -565,6 +735,139 @@ public sealed class ConsentGatedCaptureServiceTests
                 ErrorCode: state == CaptureState.Faulted
                     ? CaptureErrorCode.Unknown
                     : CaptureErrorCode.None);
+        }
+    }
+
+    private sealed class TestRuntimeAuthorization(bool isCaptureAuthorized)
+        : ICaptureRuntimeAuthorization
+    {
+        public bool IsCaptureAuthorized { get; } = isCaptureAuthorized;
+
+        public long InvalidationGeneration => 0;
+
+        public event EventHandler<CaptureRuntimeAuthorizationChangedEventArgs>? AuthorizationChanged
+        {
+            add { }
+            remove { }
+        }
+    }
+
+    private sealed class LatchingRuntimeAuthorization
+        : IAppSettingsCommitBarrier, ICaptureRuntimeAuthorization
+    {
+        private readonly TaskCompletionSource _blockStarted = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _releaseBlock = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _authorized = 1;
+        private int _blockNextRestrictivePrepare;
+        private long _invalidationGeneration;
+
+        public bool IsCaptureAuthorized => Volatile.Read(ref _authorized) != 0;
+
+        public long InvalidationGeneration =>
+            Volatile.Read(ref _invalidationGeneration);
+
+        public Task BlockStarted => _blockStarted.Task;
+
+        public event EventHandler<CaptureRuntimeAuthorizationChangedEventArgs>? AuthorizationChanged;
+
+        public async Task PrepareAsync(
+            AppSettings previous,
+            AppSettings proposed,
+            CancellationToken cancellationToken = default)
+        {
+            if (Interlocked.Exchange(ref _blockNextRestrictivePrepare, 0) == 0
+                || !previous.CaptureEnabled
+                || proposed.CaptureEnabled)
+            {
+                return;
+            }
+
+            Volatile.Write(ref _authorized, 0);
+            var generation = Interlocked.Increment(ref _invalidationGeneration);
+            AuthorizationChanged?.Invoke(
+                this,
+                new CaptureRuntimeAuthorizationChangedEventArgs(
+                    isCaptureAuthorized: false,
+                    generation));
+            _blockStarted.TrySetResult();
+            await _releaseBlock.Task.WaitAsync(cancellationToken);
+        }
+
+        public Task CommittedAsync(
+            AppSettings previous,
+            AppSettings current,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.CompletedTask;
+        }
+
+        public Task AbortedAsync(
+            AppSettings previous,
+            AppSettings proposed,
+            bool settingsApplied,
+            Exception failure,
+            CancellationToken cancellationToken = default)
+        {
+            return Task.CompletedTask;
+        }
+
+        public void BlockNextRestrictivePrepare()
+        {
+            Interlocked.Exchange(ref _blockNextRestrictivePrepare, 1);
+        }
+
+        public void ReleaseBlock()
+        {
+            _releaseBlock.TrySetResult();
+        }
+    }
+
+    private sealed class MutableRuntimeAuthorization(bool isCaptureAuthorized)
+        : ICaptureRuntimeAuthorization
+    {
+        private EventHandler<CaptureRuntimeAuthorizationChangedEventArgs>?
+            _authorizationChanged;
+        private int _authorized = isCaptureAuthorized ? 1 : 0;
+        private long _invalidationGeneration;
+
+        public bool IsCaptureAuthorized => Volatile.Read(ref _authorized) != 0;
+
+        public long InvalidationGeneration =>
+            Volatile.Read(ref _invalidationGeneration);
+
+        public int SubscriberCount =>
+            _authorizationChanged?.GetInvocationList().Length ?? 0;
+
+        public event EventHandler<CaptureRuntimeAuthorizationChangedEventArgs>?
+            AuthorizationChanged
+        {
+            add => _authorizationChanged += value;
+            remove => _authorizationChanged -= value;
+        }
+
+        public void SetCaptureAuthorized(bool authorized)
+        {
+            var previous = Interlocked.Exchange(
+                ref _authorized,
+                authorized ? 1 : 0) != 0;
+            if (previous == authorized)
+            {
+                return;
+            }
+
+            if (!authorized)
+            {
+                Interlocked.Increment(ref _invalidationGeneration);
+            }
+
+            _authorizationChanged?.Invoke(
+                this,
+                new CaptureRuntimeAuthorizationChangedEventArgs(
+                    authorized,
+                    InvalidationGeneration));
         }
     }
 }

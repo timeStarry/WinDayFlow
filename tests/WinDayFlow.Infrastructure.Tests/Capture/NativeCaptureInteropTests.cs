@@ -96,7 +96,7 @@ public sealed class NativeCaptureInteropTests
                 captureIntervalMilliseconds: 20_000,
                 chunkDurationMilliseconds: 10_000));
         Assert.Throws<ArgumentOutOfRangeException>(
-            () => NativeCapturePrivacyContext.FailClosed(policyRevision: 0));
+            () => NativeCapturePrivacyContext.FailClosed(runtimePolicyRevision: 0));
         Assert.Throws<ArgumentOutOfRangeException>(
             () => new NativeCapturePrivacyContext(
                 (NativeCapturePolicyDecision)99,
@@ -107,7 +107,7 @@ public sealed class NativeCaptureInteropTests
                 NativeCapturePolicyDecision.Unknown,
                 NativeCapturePolicyDecision.Unknown,
                 NativeCapturePolicyDecision.Unknown,
-                PolicyRevision: 1));
+                RuntimePolicyRevision: 1));
     }
 
     [Fact]
@@ -163,7 +163,7 @@ public sealed class NativeCaptureInteropTests
         }
 
         using var directory = new TemporaryDirectory();
-        var revisionOne = NativeCapturePrivacyContext.FailClosed(policyRevision: 1);
+        var revisionOne = NativeCapturePrivacyContext.FailClosed(runtimePolicyRevision: 1);
         using var backend = new NativeCaptureBackend(
             new NativeCaptureConfiguration(directory.Path),
             revisionOne);
@@ -183,7 +183,7 @@ public sealed class NativeCaptureInteropTests
         var conflicting = await Assert.ThrowsAsync<NativeCaptureException>(
             () => backend.UpdatePrivacyContextAsync(CopyPrivacyContext(
                 revisionTwo,
-                revisionTwo.PolicyRevision,
+                revisionTwo.RuntimePolicyRevision,
                 NativeCapturePolicyDecision.Allow)));
         Assert.Equal(-8, conflicting.ResultCode);
     }
@@ -205,7 +205,7 @@ public sealed class NativeCaptureInteropTests
 
         await Assert.ThrowsAsync<ObjectDisposedException>(
             () => backend.UpdatePrivacyContextAsync(
-                NativeCapturePrivacyContext.FailClosed(policyRevision: 2)));
+                NativeCapturePrivacyContext.FailClosed(runtimePolicyRevision: 2)));
     }
 
     [Fact]
@@ -335,7 +335,7 @@ public sealed class NativeCaptureInteropTests
     {
         return new NativeCaptureBackend(
             new NativeCaptureConfiguration(outputDirectory),
-            NativeCapturePrivacyContext.FailClosed(policyRevision: 1));
+            NativeCapturePrivacyContext.FailClosed(runtimePolicyRevision: 1));
     }
 
     private static NativeCaptureBackend CreateBackend(
@@ -344,7 +344,7 @@ public sealed class NativeCaptureInteropTests
     {
         return new NativeCaptureBackend(
             new NativeCaptureConfiguration(outputDirectory),
-            NativeCapturePrivacyContext.FailClosed(policyRevision: 1),
+            NativeCapturePrivacyContext.FailClosed(runtimePolicyRevision: 1),
             nativeApi);
     }
 
