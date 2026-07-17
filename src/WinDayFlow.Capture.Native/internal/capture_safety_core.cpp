@@ -23,10 +23,9 @@ uint64_t AllocateInstanceEpoch() {
   while (current != 0) {
     const uint64_t next =
         current == std::numeric_limits<uint64_t>::max() ? 0 : current + 1U;
-    if (g_next_instance_epoch.compare_exchange_weak(current,
-                                                    next,
-                                                    std::memory_order_relaxed,
-                                                    std::memory_order_relaxed)) {
+    if (g_next_instance_epoch.compare_exchange_weak(
+            current, next, std::memory_order_relaxed,
+            std::memory_order_relaxed)) {
       return current;
     }
   }
@@ -34,27 +33,22 @@ uint64_t AllocateInstanceEpoch() {
 }
 
 bool IsValidDisplayDeviceKey(std::wstring_view value) {
-  if (value.empty() ||
-      value.size() > kMaximumDisplayDeviceKeyCharacters) {
+  if (value.empty() || value.size() > kMaximumDisplayDeviceKeyCharacters) {
     return false;
   }
 
   std::array<WORD, kMaximumDisplayDeviceKeyCharacters> character_types{};
-  if (GetStringTypeW(CT_CTYPE1,
-                     value.data(),
-                     static_cast<int>(value.size()),
+  if (GetStringTypeW(CT_CTYPE1, value.data(), static_cast<int>(value.size()),
                      character_types.data()) == 0) {
     return false;
   }
 
   bool all_whitespace = true;
   for (size_t index = 0; index < value.size(); ++index) {
-    if (value[index] == L'\0' ||
-        (character_types[index] & C1_CNTRL) != 0) {
+    if (value[index] == L'\0' || (character_types[index] & C1_CNTRL) != 0) {
       return false;
     }
-    all_whitespace =
-        all_whitespace && (character_types[index] & C1_SPACE) != 0;
+    all_whitespace = all_whitespace && (character_types[index] & C1_SPACE) != 0;
   }
   return !all_whitespace;
 }
@@ -74,10 +68,8 @@ bool DisplayDeviceKeysEqual(std::wstring_view left, std::wstring_view right) {
   if (left.empty()) {
     return true;
   }
-  return CompareStringOrdinal(left.data(),
-                              static_cast<int>(left.size()),
-                              right.data(),
-                              static_cast<int>(right.size()),
+  return CompareStringOrdinal(left.data(), static_cast<int>(left.size()),
+                              right.data(), static_cast<int>(right.size()),
                               TRUE) == CSTR_EQUAL;
 }
 
@@ -91,17 +83,14 @@ bool IsValidCommand(CaptureCommand command) {
          command == CaptureCommand::kResume;
 }
 
-bool GenerateCommandAdmissionNonce(uint64_t* nonce_low,
-                                   uint64_t* nonce_high) {
+bool GenerateCommandAdmissionNonce(uint64_t* nonce_low, uint64_t* nonce_high) {
   if (nonce_low == nullptr || nonce_high == nullptr) {
     return false;
   }
   std::array<uint64_t, 2> nonce{};
   const NTSTATUS status = BCryptGenRandom(
-      nullptr,
-      reinterpret_cast<PUCHAR>(nonce.data()),
-      static_cast<ULONG>(sizeof(nonce)),
-      BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+      nullptr, reinterpret_cast<PUCHAR>(nonce.data()),
+      static_cast<ULONG>(sizeof(nonce)), BCRYPT_USE_SYSTEM_PREFERRED_RNG);
   if (status != 0 || (nonce[0] == 0 && nonce[1] == 0)) {
     return false;
   }
@@ -116,8 +105,7 @@ bool CaptureTargetIdentity::operator==(
     const CaptureTargetIdentity& other) const {
   return window_handle == other.window_handle &&
          process_id == other.process_id &&
-         process_creation_time_100ns ==
-             other.process_creation_time_100ns &&
+         process_creation_time_100ns == other.process_creation_time_100ns &&
          target_epoch == other.target_epoch &&
          display_monitor_handle == other.display_monitor_handle &&
          DisplayDeviceKeysEqual(display_device_key, other.display_device_key);
@@ -131,20 +119,18 @@ CaptureSafetyCore::CaptureSafetyCore()
     : CaptureSafetyCore(AllocateInstanceEpoch(), 1, {}, 2, {}) {}
 
 CaptureSafetyCore::CaptureSafetyCore(
-    uint64_t instance_epoch,
-    uint64_t initial_persistence_generation,
+    uint64_t instance_epoch, uint64_t initial_persistence_generation,
     CommandAdmissionNonceGenerator nonce_generator,
     uint64_t initial_admission_stamp,
     AuthorizationCommitHook authorization_commit_hook)
     : instance_epoch_(instance_epoch),
       persistence_generation_(initial_persistence_generation),
-      generation_exhausted_(instance_epoch == 0 ||
-                             initial_persistence_generation == 0 ||
-                             initial_admission_stamp == 0 ||
-                             (initial_admission_stamp & 1U) != 0),
+      generation_exhausted_(
+          instance_epoch == 0 || initial_persistence_generation == 0 ||
+          initial_admission_stamp == 0 || (initial_admission_stamp & 1U) != 0),
       admission_stamp_(initial_admission_stamp & ~uint64_t{1}),
       nonce_generator_(nonce_generator ? std::move(nonce_generator)
-                                        : GenerateCommandAdmissionNonce),
+                                       : GenerateCommandAdmissionNonce),
       authorization_commit_hook_(std::move(authorization_commit_hook)),
       observable_{initial_persistence_generation, 0} {}
 
@@ -152,8 +138,8 @@ CaptureSafetyUpdateResult CaptureSafetyCore::UpdateRuntimeAuthorization(
     const RuntimeAuthorization& authorization,
     uint64_t* persistence_generation) {
   const CaptureSafetyUpdateTicket ticket = BeginAuthorizationUpdate();
-  return CompleteRuntimeAuthorization(
-      ticket, authorization, persistence_generation);
+  return CompleteRuntimeAuthorization(ticket, authorization,
+                                      persistence_generation);
 }
 
 CaptureSafetyUpdateResult CaptureSafetyCore::CompleteRuntimeAuthorization(
@@ -161,37 +147,26 @@ CaptureSafetyUpdateResult CaptureSafetyCore::CompleteRuntimeAuthorization(
     const RuntimeAuthorization& authorization,
     uint64_t* persistence_generation) {
   std::unique_lock lock(mutex_);
-  return UpdateUnderLock(
-      authorization,
-      false,
-      true,
-      ticket,
-      persistence_generation);
+  return UpdateUnderLock(authorization, false, true, ticket,
+                         persistence_generation);
 }
 
 CaptureSafetyUpdateResult CaptureSafetyCore::UpdateLegacyPrivacyContext(
-    const PrivacyContext& context,
-    uint64_t* persistence_generation) {
+    const PrivacyContext& context, uint64_t* persistence_generation) {
   const CaptureSafetyUpdateTicket ticket = BeginAuthorizationUpdate();
-  return CompleteLegacyPrivacyContext(
-      ticket, context, persistence_generation);
+  return CompleteLegacyPrivacyContext(ticket, context, persistence_generation);
 }
 
 CaptureSafetyUpdateResult CaptureSafetyCore::CompleteLegacyPrivacyContext(
-    const CaptureSafetyUpdateTicket& ticket,
-    const PrivacyContext& context,
+    const CaptureSafetyUpdateTicket& ticket, const PrivacyContext& context,
     uint64_t* persistence_generation) {
   std::unique_lock lock(mutex_);
-  return UpdateUnderLock(
-      RuntimeAuthorization{context, std::nullopt},
-      true,
-      false,
-      ticket,
-      persistence_generation);
+  return UpdateUnderLock(RuntimeAuthorization{context, std::nullopt}, true,
+                         false, ticket, persistence_generation);
 }
 
-CaptureSafetyUpdateTicket CaptureSafetyCore::BeginAuthorizationUpdate()
-    noexcept {
+CaptureSafetyUpdateTicket
+CaptureSafetyCore::BeginAuthorizationUpdate() noexcept {
   return CloseAdmission();
 }
 
@@ -205,9 +180,8 @@ void CaptureSafetyCore::BeginRevoke() noexcept {
   static_cast<void>(CloseAdmission());
 }
 
-bool CaptureSafetyCore::FinalizeRevoke(
-    uint32_t timeout_ms,
-    uint64_t* persistence_generation) {
+bool CaptureSafetyCore::FinalizeRevoke(uint32_t timeout_ms,
+                                       uint64_t* persistence_generation) {
   if (persistence_generation == nullptr) {
     return false;
   }
@@ -218,8 +192,7 @@ bool CaptureSafetyCore::FinalizeRevoke(
   }
 
   *persistence_generation = persistence_generation_;
-  if (generation_exhausted_ ||
-      (revoked_ && !current_.target.has_value())) {
+  if (generation_exhausted_ || (revoked_ && !current_.target.has_value())) {
     return true;
   }
   if (!AdvanceGenerationUnderLock()) {
@@ -257,10 +230,8 @@ CaptureSafetyUpdateResult CaptureSafetyCore::Revoke(
 }
 
 CaptureCommandAdmissionResult CaptureSafetyCore::IssueCommandAdmission(
-    CaptureCommand command,
-    uint64_t expected_persistence_generation,
-    uint64_t expected_target_epoch,
-    uint64_t runtime_owner_epoch,
+    CaptureCommand command, uint64_t expected_persistence_generation,
+    uint64_t expected_target_epoch, uint64_t runtime_owner_epoch,
     CaptureCommandAdmission* admission) {
   if (admission == nullptr || !IsValidCommand(command) ||
       expected_persistence_generation == 0 || expected_target_epoch == 0 ||
@@ -312,8 +283,7 @@ CaptureCommandAdmissionResult CaptureSafetyCore::IssueCommandAdmission(
       nonce_high,
   };
   if (value.runtime_policy_revision == 0 ||
-      admission_stamp_.load(std::memory_order_acquire) !=
-          authorization_epoch) {
+      admission_stamp_.load(std::memory_order_acquire) != authorization_epoch) {
     return CaptureCommandAdmissionResult::kAdmissionRejected;
   }
 
@@ -323,12 +293,9 @@ CaptureCommandAdmissionResult CaptureSafetyCore::IssueCommandAdmission(
   return CaptureCommandAdmissionResult::kOk;
 }
 
-CaptureCommandAdmissionResult
-CaptureSafetyCore::AcquireCommandAdmissionPermit(
-    const CaptureCommandAdmission& admission,
-    CaptureCommand expected_command,
-    uint64_t runtime_owner_epoch,
-    CaptureCommandAdmissionPermit* permit) const {
+CaptureCommandAdmissionResult CaptureSafetyCore::AcquireCommandAdmissionPermit(
+    const CaptureCommandAdmission& admission, CaptureCommand expected_command,
+    uint64_t runtime_owner_epoch, CaptureCommandAdmissionPermit* permit) const {
   if (permit == nullptr || !IsValidCommand(expected_command) ||
       runtime_owner_epoch == 0) {
     return CaptureCommandAdmissionResult::kInvalidArgument;
@@ -341,9 +308,9 @@ CaptureSafetyCore::AcquireCommandAdmissionPermit(
   }
 
   const IssuedCommandAdmission issued = *issued_command_admission_;
-  const bool nonce_matches = admission.nonce_low == issued.admission.nonce_low &&
-                             admission.nonce_high ==
-                                 issued.admission.nonce_high;
+  const bool nonce_matches =
+      admission.nonce_low == issued.admission.nonce_low &&
+      admission.nonce_high == issued.admission.nonce_high;
   if (!nonce_matches) {
     return CaptureCommandAdmissionResult::kAdmissionRejected;
   }
@@ -373,11 +340,9 @@ CaptureSafetyCore::AcquireCommandAdmissionPermit(
   }
 
   *permit = CaptureCommandAdmissionPermit(
-      std::move(safety_lock),
-      expected_command,
-      runtime_owner_epoch,
-      PersistenceToken{
-          instance_epoch_, persistence_generation_, issued.target});
+      std::move(safety_lock), expected_command, runtime_owner_epoch,
+      PersistenceToken{instance_epoch_, persistence_generation_,
+                       issued.target});
   return CaptureCommandAdmissionResult::kOk;
 }
 
@@ -387,34 +352,41 @@ std::optional<PersistenceToken> CaptureSafetyCore::MintPersistenceToken(
     return std::nullopt;
   }
   std::shared_lock lock(mutex_);
-  if (!admission_open() ||
-      generation_exhausted_ || revoked_ || !current_.target.has_value() ||
-      !IsFullyAllowed(current_.privacy) ||
+  if (!admission_open() || generation_exhausted_ || revoked_ ||
+      !current_.target.has_value() || !IsFullyAllowed(current_.privacy) ||
       !HasSameTargetTuple(*current_.target, observed_target)) {
     return std::nullopt;
   }
 
-  return PersistenceToken{
-      instance_epoch_, persistence_generation_, observed_target};
+  return PersistenceToken{instance_epoch_, persistence_generation_,
+                          observed_target};
 }
 
 PersistencePermit CaptureSafetyCore::AcquirePersistencePermit(
     const PersistenceToken& token,
     const CaptureTargetIdentity& observed_target) const {
-  if (!admission_open()) {
+  const uint64_t authorization_epoch =
+      admission_stamp_.load(std::memory_order_acquire);
+  if ((authorization_epoch & 1U) == 0) {
     return {};
   }
   std::shared_lock lock(mutex_);
-  if (!admission_open() ||
+  if (admission_stamp_.load(std::memory_order_acquire) != authorization_epoch ||
       !IsCurrentTokenUnderLock(token, observed_target)) {
     return {};
   }
-  return PersistencePermit(std::move(lock));
+  return PersistencePermit(this, std::move(lock), authorization_epoch);
 }
 
-uint64_t CaptureSafetyCore::instance_epoch() const {
-  return instance_epoch_;
+bool CaptureSafetyCore::IsPersistencePermitCurrent(
+    const PersistencePermit& permit) const noexcept {
+  return permit && permit.issuer_ == this &&
+         permit.authorization_epoch() != 0 &&
+         admission_stamp_.load(std::memory_order_acquire) ==
+             permit.authorization_epoch();
 }
+
+uint64_t CaptureSafetyCore::instance_epoch() const { return instance_epoch_; }
 
 uint64_t CaptureSafetyCore::persistence_generation() const {
   return observable_snapshot().persistence_generation;
@@ -448,10 +420,8 @@ PrivacyContext CaptureSafetyCore::privacy_context() const {
 }
 
 CaptureSafetyUpdateResult CaptureSafetyCore::UpdateUnderLock(
-    const RuntimeAuthorization& authorization,
-    bool allow_missing_target,
-    bool require_contiguous_revision,
-    const CaptureSafetyUpdateTicket& ticket,
+    const RuntimeAuthorization& authorization, bool allow_missing_target,
+    bool require_contiguous_revision, const CaptureSafetyUpdateTicket& ticket,
     uint64_t* persistence_generation) {
   if (persistence_generation == nullptr) {
     return CaptureSafetyUpdateResult::kInvalidArgument;
@@ -508,25 +478,21 @@ CaptureSafetyUpdateResult CaptureSafetyCore::UpdateUnderLock(
       return CaptureSafetyUpdateResult::kStalePolicy;
     }
     if (revision == current_revision) {
-      const bool same_snapshot = legacy_update
-                                     ? last_legacy_privacy_.has_value() &&
-                                           *last_legacy_privacy_ ==
-                                               authorization.privacy
-                                     : authorization == current_;
+      const bool same_snapshot =
+          legacy_update ? last_legacy_privacy_.has_value() &&
+                              *last_legacy_privacy_ == authorization.privacy
+                        : authorization == current_;
       if (same_snapshot) {
         if (admission_stamp_.load(std::memory_order_acquire) !=
             ticket.admission_stamp) {
           return admission_mismatch_result();
         }
         if (!legacy_update && ticket.admission_was_open &&
-            authorization.target.has_value() &&
-            fully_allowed) {
+            authorization.target.has_value() && fully_allowed) {
           uint64_t expected = ticket.admission_stamp;
           if (!admission_stamp_.compare_exchange_strong(
-                  expected,
-                  ticket.admission_stamp | 1U,
-                  std::memory_order_acq_rel,
-                  std::memory_order_acquire)) {
+                  expected, ticket.admission_stamp | 1U,
+                  std::memory_order_acq_rel, std::memory_order_acquire)) {
             return admission_mismatch_result();
           }
         }
@@ -573,8 +539,7 @@ CaptureSafetyUpdateResult CaptureSafetyCore::UpdateUnderLock(
   } else {
     runtime_policy_revision_ = revision;
   }
-  revoked_ = !authorization.target.has_value() ||
-             !fully_allowed;
+  revoked_ = !authorization.target.has_value() || !fully_allowed;
   if (authorization.target.has_value()) {
     last_target_ = authorization.target;
     maximum_target_epoch_ = authorization.target->target_epoch;
@@ -582,8 +547,7 @@ CaptureSafetyUpdateResult CaptureSafetyCore::UpdateUnderLock(
   PublishObservableUnderLock();
   *persistence_generation = persistence_generation_;
   if (!legacy_update && revoked_) {
-    ConfirmCallbackInvalidationUnderLock(
-        ticket.callback_invalidation_epoch);
+    ConfirmCallbackInvalidationUnderLock(ticket.callback_invalidation_epoch);
   }
   if (!revoked_) {
     if (authorization_commit_hook_) {
@@ -591,9 +555,7 @@ CaptureSafetyUpdateResult CaptureSafetyCore::UpdateUnderLock(
     }
     uint64_t expected = ticket.admission_stamp;
     static_cast<void>(admission_stamp_.compare_exchange_strong(
-        expected,
-        ticket.admission_stamp | 1U,
-        std::memory_order_acq_rel,
+        expected, ticket.admission_stamp | 1U, std::memory_order_acq_rel,
         std::memory_order_acquire));
   }
   return CaptureSafetyUpdateResult::kOk;
@@ -605,14 +567,11 @@ CaptureSafetyUpdateTicket CaptureSafetyCore::CloseAdmission() noexcept {
          std::numeric_limits<uint64_t>::max() - 2U) {
     const bool admission_was_open = (current & 1U) != 0;
     const uint64_t next = (current & ~uint64_t{1}) + 2U;
-    if (admission_stamp_.compare_exchange_weak(
-            current,
-            next,
-            std::memory_order_acq_rel,
-            std::memory_order_relaxed)) {
+    if (admission_stamp_.compare_exchange_weak(current, next,
+                                               std::memory_order_acq_rel,
+                                               std::memory_order_relaxed)) {
       return CaptureSafetyUpdateTicket{
-          next,
-          admission_was_open,
+          next, admission_was_open,
           callback_invalidation_epoch_.load(std::memory_order_acquire)};
     }
   }
@@ -621,8 +580,7 @@ CaptureSafetyUpdateTicket CaptureSafetyCore::CloseAdmission() noexcept {
     admission_stamp_.store(current & ~uint64_t{1}, std::memory_order_release);
   }
   return CaptureSafetyUpdateTicket{
-      0,
-      admission_was_open,
+      0, admission_was_open,
       callback_invalidation_epoch_.load(std::memory_order_acquire)};
 }
 
@@ -632,9 +590,7 @@ uint64_t CaptureSafetyCore::AdvanceCallbackInvalidationEpoch() noexcept {
   while (current != std::numeric_limits<uint64_t>::max()) {
     const uint64_t next = current + 1U;
     if (callback_invalidation_epoch_.compare_exchange_weak(
-            current,
-            next,
-            std::memory_order_acq_rel,
+            current, next, std::memory_order_acq_rel,
             std::memory_order_relaxed)) {
       return next;
     }

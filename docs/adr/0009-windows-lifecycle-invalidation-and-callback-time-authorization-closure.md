@@ -310,22 +310,24 @@ native and managed suites must pass.
 
 These tests close the system-event registration and callback-time admission
 foundations. The real registration smoke does not synthesize every operating-
-system transition, and no current test proves a DXGI frame-to-atomic-artifact
-writer. Live lifecycle, held-permit stage, disk-full, access-loss, recovery, and
-publication-order tests remain required before writer capabilities can be
-advertised.
+system transition. ADR 0010 later added independently tested DXGI, WIC, H.264,
+manifest, and atomic-store components, but no current test proves their C ABI
+frame-to-artifact worker orchestration. Live lifecycle, held-permit stage,
+disk-full, access-loss, recovery, and publication-order tests remain required
+before writer capabilities can be advertised.
 
 ## Provenance
 
 The hidden system-event window, WTS and suspend/resume integration,
 generation-bound holds, callback-time native authorization contract,
 implementation, tests, and this ADR are original WinDayFlow work. They are not
-derived from QiDayflow and do not change the six files covered by
-`docs/provenance/QiDayflow-capture.manifest.json`.
+derived from QiDayflow and did not change the six foundation files that the
+provenance manifest covered when this lifecycle work was introduced.
 
-Any later copy or close adaptation of QiDayflow writer code still requires its
-source header, provenance ledger, manifest hash, third-party notice, and pinned
-upstream revision to be updated before distribution.
+ADR 0010 subsequently added reviewed writer-component adaptations and updated
+the source headers, provenance ledger, manifest hashes, third-party notice, and
+pinned upstream record. The lifecycle notification and callback gate described
+by this ADR remain original WinDayFlow work.
 
 ## Consequences
 

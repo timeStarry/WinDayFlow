@@ -251,8 +251,8 @@ try {
         -Condition ($manifest.derivedFiles -is [System.Array]) `
         -Message 'manifest.derivedFiles must be a JSON array.'
     Assert-ProvenanceCondition `
-        -Condition ($manifest.derivedFiles.Count -eq 6) `
-        -Message 'manifest.derivedFiles must contain the six reviewed derived files.'
+        -Condition ($manifest.derivedFiles.Count -eq 16) `
+        -Message 'manifest.derivedFiles must contain the sixteen reviewed derived files.'
     Assert-ProvenanceCondition `
         -Condition ($ledgerRows.Count -eq $manifest.derivedFiles.Count) `
         -Message 'The Markdown provenance ledger must contain exactly the manifest derived files.'
@@ -261,8 +261,6 @@ try {
 
     $localPaths = [System.Collections.Generic.HashSet[string]]::new(
         [System.StringComparer]::OrdinalIgnoreCase)
-    $upstreamPaths = [System.Collections.Generic.HashSet[string]]::new(
-        [System.StringComparer]::Ordinal)
     $verifiedCount = 0
 
     foreach ($entry in $manifest.derivedFiles) {
@@ -303,10 +301,6 @@ try {
             -Condition $localPaths.Add([string]$entry.local.path) `
             -Message "Duplicate local provenance path: $($entry.local.path)."
         Assert-ProvenanceCondition `
-            -Condition $upstreamPaths.Add([string]$entry.upstream.path) `
-            -Message "Duplicate upstream provenance path: $($entry.upstream.path)."
-
-        Assert-ProvenanceCondition `
             -Condition $ledgerRows.ContainsKey([string]$entry.local.path) `
             -Message "Markdown provenance ledger entry is missing: $($entry.local.path)."
         $ledgerRow = $ledgerRows[[string]$entry.local.path]
@@ -316,10 +310,16 @@ try {
 
         $verifiedCommit = [string]$ledgerRow.Commit
         if ($verifiedCommit -ceq 'WORKTREE (pending commit)') {
-            $null = & git -C $root diff --quiet HEAD -- $entry.local.path
+            $pendingStatus = & git -C $root status `
+                --porcelain=v1 `
+                --untracked-files=all `
+                -- `
+                $entry.local.path
             $gitExitCode = $LASTEXITCODE
             Assert-ProvenanceCondition `
-                -Condition ($gitExitCode -eq 1) `
+                -Condition ($gitExitCode -eq 0 -and
+                    -not [string]::IsNullOrWhiteSpace(
+                        ($pendingStatus -join [System.Environment]::NewLine))) `
                 -Message ("The pending provenance marker for {0} requires an uncommitted file change; git exited {1}." -f
                     $entry.local.path, $gitExitCode)
         }

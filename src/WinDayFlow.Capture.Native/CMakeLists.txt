@@ -9,20 +9,27 @@ endif()
 include(CTest)
 
 add_library(windayflow_capture_core STATIC
+  internal/atomic_chunk_store.cpp
   internal/capture_event_queue.cpp
   internal/capture_policy.cpp
   internal/capture_runtime_owner.cpp
   internal/capture_safety_core.cpp
+  internal/chunk_manifest.cpp
+  internal/dxgi_desktop_frame_source.cpp
   internal/dxgi_output_resolver.cpp
+  internal/mf_h264_chunk_writer.cpp
   internal/pixel_buffer.cpp
-  internal/privacy_guard.cpp)
+  internal/privacy_guard.cpp
+  internal/wic_bgra_scaler.cpp
+  internal/windows_capture_target_observer.cpp)
 
 target_compile_features(windayflow_capture_core PUBLIC cxx_std_20)
 target_include_directories(windayflow_capture_core
   PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/internal)
-target_link_libraries(windayflow_capture_core PUBLIC bcrypt dxgi)
+target_link_libraries(windayflow_capture_core PUBLIC
+  bcrypt d3d11 dxgi mf mfplat mfreadwrite mfuuid ole32 user32 windowscodecs)
 
 add_library(windayflow_capture SHARED
   src/capture_c_api.cpp
@@ -83,17 +90,47 @@ if(BUILD_TESTING)
   add_windayflow_native_test(pixel_buffer_tests tests/pixel_buffer_tests.cpp)
   target_link_libraries(pixel_buffer_tests PRIVATE windayflow_capture_core)
 
+  add_windayflow_native_test(atomic_chunk_store_tests
+    tests/atomic_chunk_store_tests.cpp)
+  target_link_libraries(atomic_chunk_store_tests PRIVATE
+    windayflow_capture_core)
+
   add_windayflow_native_test(capture_policy_tests tests/capture_policy_tests.cpp)
   target_link_libraries(capture_policy_tests PRIVATE windayflow_capture_core)
 
   add_windayflow_native_test(capture_event_queue_tests tests/capture_event_queue_tests.cpp)
   target_link_libraries(capture_event_queue_tests PRIVATE windayflow_capture_core)
 
+  add_windayflow_native_test(chunk_manifest_tests
+    tests/chunk_manifest_tests.cpp)
+  target_link_libraries(chunk_manifest_tests PRIVATE
+    windayflow_capture_core)
+
   add_windayflow_native_test(capture_safety_core_tests tests/capture_safety_core_tests.cpp)
   target_link_libraries(capture_safety_core_tests PRIVATE windayflow_capture_core)
 
   add_windayflow_native_test(dxgi_output_resolver_tests tests/dxgi_output_resolver_tests.cpp)
   target_link_libraries(dxgi_output_resolver_tests PRIVATE windayflow_capture_core)
+
+  add_windayflow_native_test(dxgi_desktop_frame_source_tests
+    tests/dxgi_desktop_frame_source_tests.cpp)
+  target_link_libraries(dxgi_desktop_frame_source_tests PRIVATE
+    windayflow_capture_core)
+
+  add_windayflow_native_test(windows_capture_target_observer_tests
+    tests/windows_capture_target_observer_tests.cpp)
+  target_link_libraries(windows_capture_target_observer_tests PRIVATE
+    windayflow_capture_core)
+
+  add_windayflow_native_test(wic_bgra_scaler_tests
+    tests/wic_bgra_scaler_tests.cpp)
+  target_link_libraries(wic_bgra_scaler_tests PRIVATE
+    windayflow_capture_core)
+
+  add_windayflow_native_test(mf_h264_chunk_writer_tests
+    tests/mf_h264_chunk_writer_tests.cpp)
+  target_link_libraries(mf_h264_chunk_writer_tests PRIVATE
+    windayflow_capture_core)
 
   add_windayflow_native_test(capture_c_api_tests tests/capture_c_api_tests.cpp)
   target_link_libraries(capture_c_api_tests PRIVATE windayflow_capture)

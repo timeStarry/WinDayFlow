@@ -23,8 +23,32 @@ the pinned source:
 - `windows/runner/capture_pixel_buffer.cpp`
 - `windows/runner/capture_runtime.h`
 - `windows/runner/capture_runtime.cpp`
+- `windows/runner/capture_service.cpp`
 - `windows/runner/capture_pixel_buffer_test.cpp`
 - `windows/runner/capture_runtime_test.cpp`
+
+The corresponding local derived production files are:
+
+- `src/WinDayFlow.Capture.Native/internal/pixel_buffer.h`
+- `src/WinDayFlow.Capture.Native/internal/pixel_buffer.cpp`
+- `src/WinDayFlow.Capture.Native/internal/capture_policy.h`
+- `src/WinDayFlow.Capture.Native/internal/capture_policy.cpp`
+- `src/WinDayFlow.Capture.Native/internal/atomic_chunk_store.h`
+- `src/WinDayFlow.Capture.Native/internal/atomic_chunk_store.cpp`
+- `src/WinDayFlow.Capture.Native/internal/chunk_manifest.h`
+- `src/WinDayFlow.Capture.Native/internal/chunk_manifest.cpp`
+- `src/WinDayFlow.Capture.Native/internal/dxgi_desktop_frame_source.h`
+- `src/WinDayFlow.Capture.Native/internal/dxgi_desktop_frame_source.cpp`
+- `src/WinDayFlow.Capture.Native/internal/mf_h264_chunk_writer.h`
+- `src/WinDayFlow.Capture.Native/internal/mf_h264_chunk_writer.cpp`
+- `src/WinDayFlow.Capture.Native/internal/wic_bgra_scaler.h`
+- `src/WinDayFlow.Capture.Native/internal/wic_bgra_scaler.cpp`
+
+The corresponding derived native tests are
+`src/WinDayFlow.Capture.Native/tests/pixel_buffer_tests.cpp` and
+`src/WinDayFlow.Capture.Native/tests/capture_policy_tests.cpp`. The writer
+tests are new WinDayFlow tests because the pinned upstream has no native
+capture-service test.
 
 The following notice applies to those derived components:
 

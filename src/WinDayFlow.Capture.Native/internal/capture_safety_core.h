@@ -93,6 +93,8 @@ enum class CaptureSafetyUpdateResult {
   kAuthorizationSuperseded,
 };
 
+class CaptureSafetyCore;
+
 class PersistencePermit {
  public:
   PersistencePermit() = default;
@@ -102,13 +104,20 @@ class PersistencePermit {
   PersistencePermit& operator=(PersistencePermit&&) noexcept = default;
 
   explicit operator bool() const { return lock_.owns_lock(); }
+  uint64_t authorization_epoch() const noexcept { return authorization_epoch_; }
 
  private:
   friend class CaptureSafetyCore;
-  explicit PersistencePermit(std::shared_lock<std::shared_timed_mutex> lock)
-      : lock_(std::move(lock)) {}
+  PersistencePermit(const CaptureSafetyCore* issuer,
+                    std::shared_lock<std::shared_timed_mutex> lock,
+                    uint64_t authorization_epoch)
+      : issuer_(issuer),
+        lock_(std::move(lock)),
+        authorization_epoch_(authorization_epoch) {}
 
+  const CaptureSafetyCore* issuer_ = nullptr;
   std::shared_lock<std::shared_timed_mutex> lock_;
+  uint64_t authorization_epoch_ = 0;
 };
 
 class CaptureCommandAdmissionPermit {
@@ -131,11 +140,10 @@ class CaptureCommandAdmissionPermit {
 
  private:
   friend class CaptureSafetyCore;
-  CaptureCommandAdmissionPermit(
-      std::shared_lock<std::shared_timed_mutex> lock,
-      CaptureCommand command,
-      uint64_t runtime_owner_epoch,
-      PersistenceToken persistence_token)
+  CaptureCommandAdmissionPermit(std::shared_lock<std::shared_timed_mutex> lock,
+                                CaptureCommand command,
+                                uint64_t runtime_owner_epoch,
+                                PersistenceToken persistence_token)
       : lock_(std::move(lock)),
         command_(command),
         runtime_owner_epoch_(runtime_owner_epoch),
@@ -151,17 +159,16 @@ class CaptureSafetyCore {
  public:
   CaptureSafetyCore();
   CaptureSafetyCore(uint64_t instance_epoch,
-                     uint64_t initial_persistence_generation,
-                     CommandAdmissionNonceGenerator nonce_generator = {},
-                     uint64_t initial_admission_stamp = 2,
-                     AuthorizationCommitHook authorization_commit_hook = {});
+                    uint64_t initial_persistence_generation,
+                    CommandAdmissionNonceGenerator nonce_generator = {},
+                    uint64_t initial_admission_stamp = 2,
+                    AuthorizationCommitHook authorization_commit_hook = {});
 
   CaptureSafetyUpdateResult UpdateRuntimeAuthorization(
       const RuntimeAuthorization& authorization,
       uint64_t* persistence_generation);
   CaptureSafetyUpdateResult UpdateLegacyPrivacyContext(
-      const PrivacyContext& context,
-      uint64_t* persistence_generation);
+      const PrivacyContext& context, uint64_t* persistence_generation);
   CaptureSafetyUpdateTicket BeginAuthorizationUpdate() noexcept;
   uint64_t InvalidateAuthorizationAdmission() noexcept;
   CaptureSafetyUpdateResult CompleteRuntimeAuthorization(
@@ -169,23 +176,18 @@ class CaptureSafetyCore {
       const RuntimeAuthorization& authorization,
       uint64_t* persistence_generation);
   CaptureSafetyUpdateResult CompleteLegacyPrivacyContext(
-      const CaptureSafetyUpdateTicket& ticket,
-      const PrivacyContext& context,
+      const CaptureSafetyUpdateTicket& ticket, const PrivacyContext& context,
       uint64_t* persistence_generation);
   void BeginRevoke() noexcept;
-  bool FinalizeRevoke(uint32_t timeout_ms,
-                      uint64_t* persistence_generation);
+  bool FinalizeRevoke(uint32_t timeout_ms, uint64_t* persistence_generation);
   CaptureSafetyUpdateResult Revoke(uint64_t* persistence_generation);
 
   CaptureCommandAdmissionResult IssueCommandAdmission(
-      CaptureCommand command,
-      uint64_t expected_persistence_generation,
-      uint64_t expected_target_epoch,
-      uint64_t runtime_owner_epoch,
+      CaptureCommand command, uint64_t expected_persistence_generation,
+      uint64_t expected_target_epoch, uint64_t runtime_owner_epoch,
       CaptureCommandAdmission* admission);
   CaptureCommandAdmissionResult AcquireCommandAdmissionPermit(
-      const CaptureCommandAdmission& admission,
-      CaptureCommand expected_command,
+      const CaptureCommandAdmission& admission, CaptureCommand expected_command,
       uint64_t runtime_owner_epoch,
       CaptureCommandAdmissionPermit* permit) const;
 
@@ -194,6 +196,8 @@ class CaptureSafetyCore {
   PersistencePermit AcquirePersistencePermit(
       const PersistenceToken& token,
       const CaptureTargetIdentity& observed_target) const;
+  bool IsPersistencePermitCurrent(
+      const PersistencePermit& permit) const noexcept;
 
   uint64_t instance_epoch() const;
   uint64_t persistence_generation() const;
@@ -206,10 +210,8 @@ class CaptureSafetyCore {
 
  private:
   CaptureSafetyUpdateResult UpdateUnderLock(
-      const RuntimeAuthorization& authorization,
-      bool allow_missing_target,
-      bool require_contiguous_revision,
-      const CaptureSafetyUpdateTicket& ticket,
+      const RuntimeAuthorization& authorization, bool allow_missing_target,
+      bool require_contiguous_revision, const CaptureSafetyUpdateTicket& ticket,
       uint64_t* persistence_generation);
   CaptureSafetyUpdateTicket CloseAdmission() noexcept;
   uint64_t AdvanceCallbackInvalidationEpoch() noexcept;

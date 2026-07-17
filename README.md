@@ -65,6 +65,14 @@ contains:
   runtime owner epoch; capability bit 11 and a dedicated C ABI export now let a
   Windows callback close native command and persistence admission immediately,
   without waiting for an already-held persistence permit;
+- real but not yet C-ABI-connected native writer components: a strict
+  no-fallback HWND/PID/process-creation/display observer, pre/post fingerprinted
+  DXGI Desktop Duplication source with an 8K/126.6 MiB BGRA ceiling, bounded
+  even-dimension WIC scaler, 64 MiB fail-closed in-memory Media Foundation H.264
+  writer, typed privacy-safe manifest, handle-identity-bound whole-directory
+  chunk store with observable retryable rollback, queue-bound required-event
+  reservation, and a Pause/Resume control mailbox that transfers persistence
+  tokens by value;
 - a managed P/Invoke adapter with x64 ABI layout checks, safe-handle ownership,
   bounded event polling, privacy-revision updates, complete display-scoped
   safety-capability negotiation, issuer-bound opaque admission stamps,
@@ -113,23 +121,26 @@ contains:
 Manual activities, consent, privacy settings, and user-authored exclusion rules
 are stored at `%LOCALAPPDATA%\WinDayFlow\Data\windayflow.db` and survive
 application restarts.
-The real DXGI/WIC/Media Foundation acquisition and persistence path, analysis
+The C-ABI-connected DXGI/WIC/Media Foundation worker and persistence path,
+analysis
 queue and providers, generated Daily and Weekly views, journal editing, and
 timeline-grounded chat are **not integrated yet**. The foreground verifier and
 event monitor are inactive foundations, not a live activation claim:
 image-bound publisher-signer verification, unique hosted-app attribution,
-presentation notifications, periodic storage refresh, writer-side DXGI binding
-and generation/permit revalidation, and the real DXGI/WIC/Media Foundation
-writer remain open gates. The bounded title-read, conservative window-location
+presentation notifications, periodic storage refresh, worker-side stage
+orchestration and generation/permit revalidation, crash recovery/replay, and
+real consent-gated Desktop Duplication smoke remain open gates. The bounded
+title-read, conservative window-location
 invalidation, display-topology/current-session/power event source,
 display-scoped authorization, callback-time native admission closure, and
-strict no-fallback DXGI output resolver gates are closed; they do not prove
-foreground/top-level identity or that a real writer revalidates the resolved
-output before and after acquisition. Callback closure denies new native permits
+strict no-fallback DXGI output resolver gates are closed. The new native frame
+source revalidates the resolved output before and after acquisition, but no C
+ABI worker yet composes it with the target observer and stage permits. Callback
+closure denies new native permits
 and command admission, but it cannot interrupt a permit already held by a
-writer. The following generation-bound Block acknowledgement drains that
-boundary; a real writer must still revalidate at every acquisition, encode,
-metadata, rename, and committed-event phase.
+writer stage. The following generation-bound Block acknowledgement drains that
+boundary; the pending worker must use the implemented epoch post-check at every
+acquisition, encode, metadata, rename, and committed-event phase.
 Owner-bound Start/Resume admission is implemented:
 the Application service obtains a single-use opaque stamp, rechecks persisted
 and runtime authorization, and the native owner atomically consumes the stamp
@@ -171,6 +182,10 @@ The [Windows lifecycle invalidation and callback-time authorization ADR](docs/ad
 records the hidden-window system notification source, session and power holds,
 native callback gate, supersede outcomes, and Block-before-Allow recovery
 contract.
+The [transactional native capture writer-components ADR](docs/adr/0010-transactional-native-capture-writer-components.md)
+records strict native target/DXGI observation, bounded WIC and in-memory H.264,
+privacy-safe manifests, whole-directory publication, event reservation, runtime
+token handoff, and the remaining C ABI activation boundary.
 
 ## Platform Support
 
@@ -210,7 +225,7 @@ pwsh -File .\scripts\Build-Native.ps1 -Configuration Debug
 
 `Build-Native.ps1` selects an installed Visual Studio generator supported by
 CMake, ignores ambient `CMAKE_GENERATOR*` overrides, preserves x64
-multi-configuration output, builds the C++20 DLL, and runs all seven native C
+multi-configuration output, builds the C++20 DLL, and runs all thirteen native C
 and C++ tests with per-test timeouts. Use `-Fresh` to recreate CMake state, or
 `-Generator` to select a specific installed Visual Studio generator.
 

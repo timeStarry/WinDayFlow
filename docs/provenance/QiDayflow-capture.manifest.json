@@ -70,6 +70,116 @@
         "sha256": "541193A401AC7CBD039DB9AB86C9B0AAD5CF41F3633619B6643CAC5EBECD1E0E",
         "pinnedCommit": "8b82f8a3b23cb29f2b86ee1a6eff19b9343e2e1e"
       }
+    },
+    {
+      "local": {
+        "path": "src/WinDayFlow.Capture.Native/internal/atomic_chunk_store.h",
+        "sha256": "2EFB508275D7F183B774F310DB9CB5601D2033181689E8A8835E7F111715CD9E"
+      },
+      "upstream": {
+        "path": "windows/runner/capture_service.cpp",
+        "sha256": "FF967B90A95EFAA608BF6CDC4AD985299313A5A058D61A397A63847C3CA4E8FD",
+        "pinnedCommit": "8b82f8a3b23cb29f2b86ee1a6eff19b9343e2e1e"
+      }
+    },
+    {
+      "local": {
+        "path": "src/WinDayFlow.Capture.Native/internal/atomic_chunk_store.cpp",
+        "sha256": "9F9F0EBCD34E8769396152A57E9AE275FC31D0929F4C52F2D050348EE35437CB"
+      },
+      "upstream": {
+        "path": "windows/runner/capture_service.cpp",
+        "sha256": "FF967B90A95EFAA608BF6CDC4AD985299313A5A058D61A397A63847C3CA4E8FD",
+        "pinnedCommit": "8b82f8a3b23cb29f2b86ee1a6eff19b9343e2e1e"
+      }
+    },
+    {
+      "local": {
+        "path": "src/WinDayFlow.Capture.Native/internal/chunk_manifest.h",
+        "sha256": "E2B0A7412309D88B1A9995794E0C935246C262BEDF9718507948E1E60228DFF8"
+      },
+      "upstream": {
+        "path": "windows/runner/capture_service.cpp",
+        "sha256": "FF967B90A95EFAA608BF6CDC4AD985299313A5A058D61A397A63847C3CA4E8FD",
+        "pinnedCommit": "8b82f8a3b23cb29f2b86ee1a6eff19b9343e2e1e"
+      }
+    },
+    {
+      "local": {
+        "path": "src/WinDayFlow.Capture.Native/internal/chunk_manifest.cpp",
+        "sha256": "3C3F60B7AF4EEFD425DF583018A0890C3C64DBBBD66B4869EA9C558967CC8AD4"
+      },
+      "upstream": {
+        "path": "windows/runner/capture_service.cpp",
+        "sha256": "FF967B90A95EFAA608BF6CDC4AD985299313A5A058D61A397A63847C3CA4E8FD",
+        "pinnedCommit": "8b82f8a3b23cb29f2b86ee1a6eff19b9343e2e1e"
+      }
+    },
+    {
+      "local": {
+        "path": "src/WinDayFlow.Capture.Native/internal/dxgi_desktop_frame_source.h",
+        "sha256": "4FB1176088AF85D57804428CCC13BE277B73F702993767EF52DA1BADFB9FEDAB"
+      },
+      "upstream": {
+        "path": "windows/runner/capture_service.cpp",
+        "sha256": "FF967B90A95EFAA608BF6CDC4AD985299313A5A058D61A397A63847C3CA4E8FD",
+        "pinnedCommit": "8b82f8a3b23cb29f2b86ee1a6eff19b9343e2e1e"
+      }
+    },
+    {
+      "local": {
+        "path": "src/WinDayFlow.Capture.Native/internal/dxgi_desktop_frame_source.cpp",
+        "sha256": "3F3ED39083483E2CA6137D56ECCBAA760037C53577FAEC1BEAE83A48593987E1"
+      },
+      "upstream": {
+        "path": "windows/runner/capture_service.cpp",
+        "sha256": "FF967B90A95EFAA608BF6CDC4AD985299313A5A058D61A397A63847C3CA4E8FD",
+        "pinnedCommit": "8b82f8a3b23cb29f2b86ee1a6eff19b9343e2e1e"
+      }
+    },
+    {
+      "local": {
+        "path": "src/WinDayFlow.Capture.Native/internal/mf_h264_chunk_writer.h",
+        "sha256": "E93746B6A4F1824FAADBF0DB75F8BA8B3D633CA5613E9289D0FEFEB89329E913"
+      },
+      "upstream": {
+        "path": "windows/runner/capture_service.cpp",
+        "sha256": "FF967B90A95EFAA608BF6CDC4AD985299313A5A058D61A397A63847C3CA4E8FD",
+        "pinnedCommit": "8b82f8a3b23cb29f2b86ee1a6eff19b9343e2e1e"
+      }
+    },
+    {
+      "local": {
+        "path": "src/WinDayFlow.Capture.Native/internal/mf_h264_chunk_writer.cpp",
+        "sha256": "657F58428EF22BDBF718C9FE103D5A9AFBB74E836B9E6B8AE61AA897A3953529"
+      },
+      "upstream": {
+        "path": "windows/runner/capture_service.cpp",
+        "sha256": "FF967B90A95EFAA608BF6CDC4AD985299313A5A058D61A397A63847C3CA4E8FD",
+        "pinnedCommit": "8b82f8a3b23cb29f2b86ee1a6eff19b9343e2e1e"
+      }
+    },
+    {
+      "local": {
+        "path": "src/WinDayFlow.Capture.Native/internal/wic_bgra_scaler.h",
+        "sha256": "2AE028EB5AE7E1B1BBBB3338716657D84693D9AC40A63E946C7B17F9125BA874"
+      },
+      "upstream": {
+        "path": "windows/runner/capture_service.cpp",
+        "sha256": "FF967B90A95EFAA608BF6CDC4AD985299313A5A058D61A397A63847C3CA4E8FD",
+        "pinnedCommit": "8b82f8a3b23cb29f2b86ee1a6eff19b9343e2e1e"
+      }
+    },
+    {
+      "local": {
+        "path": "src/WinDayFlow.Capture.Native/internal/wic_bgra_scaler.cpp",
+        "sha256": "9849E326507839C87AE30A4D707CA7CEE5EF7E40A2F90E08D402CDA3FC33570C"
+      },
+      "upstream": {
+        "path": "windows/runner/capture_service.cpp",
+        "sha256": "FF967B90A95EFAA608BF6CDC4AD985299313A5A058D61A397A63847C3CA4E8FD",
+        "pinnedCommit": "8b82f8a3b23cb29f2b86ee1a6eff19b9343e2e1e"
+      }
     }
   ]
 }
