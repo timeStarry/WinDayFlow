@@ -583,6 +583,7 @@ public sealed class NativeCaptureRuntimeOwnerTests
         private bool _blockStart;
         private ulong _persistenceGeneration;
         private ulong _authorizationEpoch;
+        private long _callbackInvalidationGeneration;
 
         public NativeCaptureCapabilities AdvertisedCapabilities { get; init; } =
             NativeCaptureAbiContract.RuntimeOwnerCapabilities;
@@ -716,8 +717,17 @@ public sealed class NativeCaptureRuntimeOwnerTests
             return Task.CompletedTask;
         }
 
-        public async Task<ulong> UpdateRuntimeAuthorizationAsync(
+        public long InvalidateRuntimeAuthorization()
+        {
+            Operations.Add("Invalidate");
+            return Interlocked.Increment(
+                ref _callbackInvalidationGeneration);
+        }
+
+        public async Task<NativeCaptureAuthorizationUpdateResult>
+            UpdateRuntimeAuthorizationAsync(
             NativeCaptureRuntimeAuthorization authorization,
+            long expectedCallbackInvalidationGeneration,
             CancellationToken cancellationToken = default)
         {
             Operations.Add("Block");
@@ -733,7 +743,18 @@ public sealed class NativeCaptureRuntimeOwnerTests
                 throw failure;
             }
 
-            return ++_persistenceGeneration;
+            if (expectedCallbackInvalidationGeneration
+                != Volatile.Read(ref _callbackInvalidationGeneration))
+            {
+                return new NativeCaptureAuthorizationUpdateResult(
+                    _persistenceGeneration,
+                    NativeCaptureAuthorizationUpdateOutcome
+                        .SupersededBeforeCommit);
+            }
+
+            return new NativeCaptureAuthorizationUpdateResult(
+                ++_persistenceGeneration,
+                NativeCaptureAuthorizationUpdateOutcome.Applied);
         }
 
         public Task<ulong> RevokeRuntimeAuthorizationAsync(

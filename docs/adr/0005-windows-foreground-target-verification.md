@@ -40,10 +40,11 @@ the live target-verification activation gate or enable capture.
 
 One verification returns exactly three slices:
 
-- `NativeCaptureTargetIdentity`: HWND, PID, process creation time, and target
-  epoch for the native runtime-authorization tuple;
-- `WindowsCaptureDisplayTarget`: a managed-only HMONITOR and display device key;
-  and
+- `NativeCaptureTargetIdentity`: HWND, PID, process creation time, target epoch,
+  HMONITOR, and display device key for the complete native
+  runtime-authorization tuple;
+- `WindowsCaptureDisplayTarget`: the matching managed display observation used
+  to reject a mixed target/display sample; and
 - `NativeCaptureIdentitySnapshot`: typed executable-basename, package-family,
   publisher-certificate, and window-title observations for exclusion matching.
 
@@ -196,12 +197,13 @@ activation remains blocked by all of the following:
    observed independently of the process handle is insufficient.
 2. Hosted Windows surfaces must be attributed to one real child application.
    Unresolved or multiple attribution remains `Unknown`.
-3. The WinEvent-driven monitor defined by ADR 0006 must remain integrated with
-   this verifier so every relevant event synchronously invalidates the process
-   capture latch, observation generation, and target continuity before any
-   asynchronous target parsing or policy recomposition. Qualified window
-   location invalidation is implemented, but display topology, WTS session,
-   power/resume, presentation, and periodic storage signals remain open.
+3. App composition must activate the ADR 0006 system-event monitor and this
+   verifier under the same runtime owner. The implemented foundation
+   synchronously invalidates the process capture latch, native admission,
+   observation generation, and target continuity for qualified window location,
+   display topology, current-session WTS, and suspend/resume events before any
+   asynchronous target parsing or policy recomposition. Presentation
+   notifications and periodic storage signals remain open.
 4. ADR 0008 supplies strict native HMONITOR/device-key resolution. The real
    writer must use it to revalidate target and display before and after
    acquisition and enforce generation/permit freshness through every
@@ -249,10 +251,12 @@ process-handle release after timeout. ADR 0006/0007 tests also cover the exact
 `0x800B..0x800C` hook, object filters, location-event invalidation, and
 generation races during target/title sampling.
 
-Future activation tests must add real Windows
-display-topology/session/power/presentation/storage coverage, unique hosted-app
-attribution, image-bound signer verification, native display binding and DXGI
-output mapping, acquisition pre/post generation/permit enforcement, stale-work
+System-event and monitor tests cover display-topology mapping, current-session
+WTS transitions, suspend/resume, fail-closed session/power holds, and recovery
+through a new barrier and verified sample. Future activation tests must add
+presentation and periodic-storage coverage, unique hosted-app attribution,
+image-bound signer verification, real-writer use of native display binding and
+DXGI output mapping, acquisition and held-permit revalidation, stale-work
 rejection, atomic publication ordering, disk-full cleanup, restart recovery,
 and teardown across display and process replacement.
 

@@ -5,6 +5,7 @@ EXPORTS
   wdf_capture_create
   wdf_capture_update_privacy_context
   wdf_capture_update_runtime_authorization
+  wdf_capture_invalidate_runtime_authorization
   wdf_capture_revoke_runtime_authorization
   wdf_capture_issue_command_admission
   wdf_capture_start

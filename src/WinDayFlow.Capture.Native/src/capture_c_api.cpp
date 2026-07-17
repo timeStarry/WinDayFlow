@@ -338,6 +338,8 @@ wdf_capture_result MapSafetyUpdateResult(CaptureSafetyUpdateResult result) {
       return WDF_CAPTURE_RESULT_GENERATION_EXHAUSTED;
     case CaptureSafetyUpdateResult::kRevokedDuringUpdate:
       return WDF_CAPTURE_RESULT_INVALID_STATE;
+    case CaptureSafetyUpdateResult::kAuthorizationSuperseded:
+      return WDF_CAPTURE_RESULT_AUTHORIZATION_SUPERSEDED;
     default:
       return WDF_CAPTURE_RESULT_INTERNAL_ERROR;
   }
@@ -718,7 +720,8 @@ wdf_capture_get_capabilities(wdf_capture_capabilities* capabilities) noexcept {
                     WDF_CAPTURE_CAPABILITY_PERSISTENCE_GENERATION_BARRIER |
                     WDF_CAPTURE_CAPABILITY_DETERMINISTIC_STOP |
                     WDF_CAPTURE_CAPABILITY_DISPLAY_SCOPED_AUTHORIZATION |
-                    WDF_CAPTURE_CAPABILITY_DISPLAY_BOUND_COMMAND_ADMISSION;
+                    WDF_CAPTURE_CAPABILITY_DISPLAY_BOUND_COMMAND_ADMISSION |
+                    WDF_CAPTURE_CAPABILITY_CALLBACK_TIME_AUTHORIZATION_INVALIDATION;
     return WDF_CAPTURE_RESULT_OK;
   } catch (...) {
     return WDF_CAPTURE_RESULT_INTERNAL_ERROR;
@@ -864,6 +867,32 @@ wdf_capture_update_runtime_authorization(
       instance->privacy = instance->safety.privacy_context();
     }
     return MapSafetyUpdateResult(update_result);
+  } catch (...) {
+    return WDF_CAPTURE_RESULT_INTERNAL_ERROR;
+  }
+}
+
+extern "C" wdf_capture_result WDF_CAPTURE_CALL
+wdf_capture_invalidate_runtime_authorization(
+    wdf_capture_handle handle,
+    uint64_t* authorization_epoch) noexcept {
+  try {
+    if (authorization_epoch == nullptr) {
+      return WDF_CAPTURE_RESULT_INVALID_ARGUMENT;
+    }
+    *authorization_epoch = 0;
+    InstanceLease lease = AcquireInstance(handle);
+    if (!lease) {
+      return WDF_CAPTURE_RESULT_INVALID_ARGUMENT;
+    }
+
+    const uint64_t closed_epoch =
+        lease.get()->safety.InvalidateAuthorizationAdmission();
+    if (closed_epoch == 0) {
+      return WDF_CAPTURE_RESULT_GENERATION_EXHAUSTED;
+    }
+    *authorization_epoch = closed_epoch;
+    return WDF_CAPTURE_RESULT_OK;
   } catch (...) {
     return WDF_CAPTURE_RESULT_INTERNAL_ERROR;
   }

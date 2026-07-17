@@ -57,6 +57,8 @@ int main(void) {
        WDF_CAPTURE_CAPABILITY_DISPLAY_SCOPED_AUTHORIZATION) == 0 ||
       (capabilities &
        WDF_CAPTURE_CAPABILITY_DISPLAY_BOUND_COMMAND_ADMISSION) == 0 ||
+      (capabilities &
+       WDF_CAPTURE_CAPABILITY_CALLBACK_TIME_AUTHORIZATION_INVALIDATION) == 0 ||
       (capabilities & WDF_CAPTURE_CAPABILITY_SCREEN_CAPTURE) != 0 ||
       (capabilities & WDF_CAPTURE_CAPABILITY_H264_CHUNKS) != 0 ||
       (capabilities & WDF_CAPTURE_CAPABILITY_EVIDENCE_EXTRACTION) != 0) {
@@ -68,6 +70,9 @@ int main(void) {
   if (WDF_CAPTURE_CAPABILITY_COMMAND_ADMISSION != (1ULL << 8) ||
       WDF_CAPTURE_CAPABILITY_DISPLAY_SCOPED_AUTHORIZATION != (1ULL << 9) ||
       WDF_CAPTURE_CAPABILITY_DISPLAY_BOUND_COMMAND_ADMISSION != (1ULL << 10) ||
+      WDF_CAPTURE_CAPABILITY_CALLBACK_TIME_AUTHORIZATION_INVALIDATION !=
+          (1ULL << 11) ||
+      WDF_CAPTURE_RESULT_AUTHORIZATION_SUPERSEDED != -14 ||
       WDF_CAPTURE_TARGET_DISPLAY_PRESENT != (1U << 1) ||
       WDF_CAPTURE_RUNTIME_AUTHORIZATION_V1_LEGACY_SIZE != 112U ||
       WDF_CAPTURE_DISPLAY_DEVICE_KEY_UTF8_CAPACITY != 96U ||
@@ -129,6 +134,7 @@ int main(void) {
     wdf_capture_command_admission_v1 admission = {0};
     wdf_capture_handle handle = 0;
     uint64_t generation = 0;
+    uint64_t authorization_epoch = 0;
     static const char display_key[] = "\\\\.\\DISPLAY1";
     config.struct_size = (uint32_t)sizeof(config);
     config.abi_version = WDF_CAPTURE_ABI_VERSION;
@@ -220,6 +226,9 @@ int main(void) {
             WDF_CAPTURE_RESULT_ADMISSION_REJECTED ||
         wdf_capture_resume_authorized(handle, &admission) !=
             WDF_CAPTURE_RESULT_ADMISSION_REJECTED ||
+        wdf_capture_invalidate_runtime_authorization(
+            handle, &authorization_epoch) != WDF_CAPTURE_RESULT_OK ||
+        authorization_epoch == 0 || (authorization_epoch & 1U) != 0 ||
         wdf_capture_revoke_runtime_authorization(handle, &generation) !=
             WDF_CAPTURE_RESULT_OK ||
         generation != 4 ||

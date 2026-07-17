@@ -104,21 +104,29 @@ that the unchanged 64-byte command stamp is backed by a private issued record
 containing the complete target/display identity. This distinction is required
 for two-way capability negotiation: an old managed client sees bit 8 absent and
 refuses to create its runtime owner, while a new managed client rejects an old
-DLL that lacks bits 9 and 10. Neither direction reaches a first Allow update
-under a capability profile it does not understand.
+DLL that lacks bits 9, 10, and 11. Neither direction reaches a first Allow
+update under a capability profile it does not understand.
+
+`WDF_CAPTURE_CAPABILITY_CALLBACK_TIME_AUTHORIZATION_INVALIDATION` is bit 11. It
+proves that a Windows event callback can close native authorization admission
+with a lock-free atomic transition and that subsequent Allow/Block updates
+honor the native invalidation epoch. It depends on the display-scoped safety
+profile and is required by every current runtime owner.
 
 The managed runtime owner requires:
 
 ```text
 PrivacyGuard | EventQueue | TargetScopedAuthorization |
 PersistenceGenerationBarrier | DeterministicStop |
-DisplayScopedAuthorization | DisplayBoundCommandAdmission
+DisplayScopedAuthorization | CallbackTimeAuthorizationInvalidation |
+DisplayBoundCommandAdmission
 ```
 
 The safe screen-capture mask additionally requires `ScreenCapture` and
-`H264Chunks`. This milestone advertises display-scoped authorization and
-display-bound command admission but keeps both writer capabilities and
-`EvidenceExtraction` disabled.
+`H264Chunks`. This milestone advertises the eight runtime-owner foundation
+capabilities, including display-scoped authorization, display-bound command
+admission, and callback-time authorization invalidation, but keeps both writer
+capabilities and `EvidenceExtraction` disabled.
 
 ### Strict DXGI resolver
 
@@ -157,12 +165,15 @@ for recording. Before enabling `ScreenCapture`, the real native worker must:
 3. reject a frame that cannot obtain the current persistence permit;
 4. carry the same permit through encode, temporary output, atomic rename, and
    committed-event publication; and
-5. revoke on topology change, DXGI access loss, session/lifecycle changes, or
-   any ambiguous revalidation.
+5. reject already-held work at its next stage after topology, current-session
+   WTS, suspend/resume, DXGI access loss, presentation/storage changes, or any
+   ambiguous revalidation.
 
 Display topology notifications are hints, not proof. Callback-time native
-admission closure, periodic revalidation, worker token transfer on Start and
-Resume, and the complete writer lifecycle remain separate activation gates.
+admission closure is implemented, including pre-commit supersession,
+post-commit compensation, and Block acknowledgement. Periodic writer
+revalidation, held-permit checks, worker token transfer on Start and Resume, and
+the complete writer lifecycle remain separate activation gates.
 
 ## Verification
 
@@ -178,8 +189,9 @@ selected-description races without depending on test-machine display hardware.
 
 Managed tests cover x64 layout and marshalled bytes, required capability masks,
 complete target construction, redacted formatting, observation consistency,
-display-only authorization changes, and real-DLL compatibility. Debug and
-Release managed and native suites must pass.
+display-only authorization changes, callback-time supersession on both sides of
+native commit, Block acknowledgement, topology/WTS/power invalidation, and
+real-DLL compatibility. Debug and Release managed and native suites must pass.
 
 ## Provenance
 

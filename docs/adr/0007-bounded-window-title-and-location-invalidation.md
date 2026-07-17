@@ -137,15 +137,18 @@ This decision closes two previously open observation gates:
 - bounded window-title reads with rejection of late completion; and
 - event-driven conservative window-location invalidation.
 
-It does not activate capture. All of these gates remain open:
+It does not activate capture. Display-topology, current-session WTS, and
+suspend/resume events now join the invalidation and observation lifecycle. The
+following gates remain open:
 
 1. Publisher signer verification must be bound to the opened running image.
 2. Hosted Windows surfaces must be attributed to one unique child application.
-3. Display-topology, WTS session, power/resume, presentation, and periodic
-   storage signals must join the invalidation and observation lifecycle.
+3. Presentation and periodic storage signals must join the invalidation and
+   observation lifecycle.
 4. The real writer must use the strict ADR 0008 HMONITOR/device-key resolver and
    revalidate the selected output before and after acquisition.
-5. A writer-side generation/permit gate must reject stale authority through
+5. The callback-time native gate closes new admission, but a real writer must
+   reject stale callback generations and already-held permits through
    acquisition, encoding, temporary output, final publication, and event commit.
 6. The real DXGI/WIC/Media Foundation writer, recovery, and cleanup path must use
    that boundary end to end.
@@ -186,9 +189,11 @@ WinEvent and monitor tests must prove:
 - a location event racing target/title sampling makes the older generation
   stale and prevents publication.
 
-These deterministic contracts do not replace later Windows platform validation
-for display topology, session, power, presentation, storage, native DXGI
-binding, or real writer persistence races.
+The shared system-event and monitor suites now cover deterministic display
+topology, current-session WTS, suspend/resume, and hold recovery contracts.
+Those contracts do not replace later Windows platform validation for
+presentation, periodic storage, native DXGI binding, or real-writer persistence
+races.
 
 ## Provenance
 

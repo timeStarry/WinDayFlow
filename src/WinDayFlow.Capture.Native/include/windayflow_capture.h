@@ -43,6 +43,7 @@ enum {
   WDF_CAPTURE_RESULT_GENERATION_EXHAUSTED = -11,
   WDF_CAPTURE_RESULT_ADMISSION_REQUIRED = -12,
   WDF_CAPTURE_RESULT_ADMISSION_REJECTED = -13,
+  WDF_CAPTURE_RESULT_AUTHORIZATION_SUPERSEDED = -14,
   WDF_CAPTURE_RESULT_INTERNAL_ERROR = -255
 };
 
@@ -127,7 +128,8 @@ enum {
   WDF_CAPTURE_CAPABILITY_DETERMINISTIC_STOP = 1ULL << 7,
   WDF_CAPTURE_CAPABILITY_COMMAND_ADMISSION = 1ULL << 8,
   WDF_CAPTURE_CAPABILITY_DISPLAY_SCOPED_AUTHORIZATION = 1ULL << 9,
-  WDF_CAPTURE_CAPABILITY_DISPLAY_BOUND_COMMAND_ADMISSION = 1ULL << 10
+  WDF_CAPTURE_CAPABILITY_DISPLAY_BOUND_COMMAND_ADMISSION = 1ULL << 10,
+  WDF_CAPTURE_CAPABILITY_CALLBACK_TIME_AUTHORIZATION_INVALIDATION = 1ULL << 11
 };
 
 typedef int32_t wdf_capture_command;
@@ -392,6 +394,11 @@ wdf_capture_update_runtime_authorization(
     wdf_capture_handle handle,
     const wdf_capture_runtime_authorization_v1* context,
     uint64_t* persistence_generation) WDF_CAPTURE_NOEXCEPT;
+
+WDF_CAPTURE_API wdf_capture_result WDF_CAPTURE_CALL
+wdf_capture_invalidate_runtime_authorization(
+    wdf_capture_handle handle,
+    uint64_t* authorization_epoch) WDF_CAPTURE_NOEXCEPT;
 
 WDF_CAPTURE_API wdf_capture_result WDF_CAPTURE_CALL
 wdf_capture_revoke_runtime_authorization(

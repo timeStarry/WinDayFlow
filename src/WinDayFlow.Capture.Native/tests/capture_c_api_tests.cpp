@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -157,8 +158,11 @@ bool TestAbiAndArgumentValidation() {
                    (capabilities &
                     WDF_CAPTURE_CAPABILITY_DISPLAY_SCOPED_AUTHORIZATION) !=
                        0 &&
+                    (capabilities &
+                     WDF_CAPTURE_CAPABILITY_DISPLAY_BOUND_COMMAND_ADMISSION) !=
+                        0 &&
                    (capabilities &
-                    WDF_CAPTURE_CAPABILITY_DISPLAY_BOUND_COMMAND_ADMISSION) !=
+                    WDF_CAPTURE_CAPABILITY_CALLBACK_TIME_AUTHORIZATION_INVALIDATION) !=
                        0 &&
                    (capabilities & WDF_CAPTURE_CAPABILITY_SCREEN_CAPTURE) == 0 &&
                   (capabilities & WDF_CAPTURE_CAPABILITY_H264_CHUNKS) == 0 &&
@@ -649,6 +653,97 @@ bool TestRuntimeAuthorizationBarrierContract() {
          revision_and_target_rules;
 }
 
+bool TestCallbackTimeAuthorizationInvalidationContract() {
+  wdf_capture_config_v1 config = ValidConfig();
+  wdf_capture_handle handle = 0;
+  if (wdf_capture_create(&config, &handle) != WDF_CAPTURE_RESULT_OK) {
+    return Expect(false, "callback invalidation handle could not be created");
+  }
+
+  uint64_t authorization_epoch = 99;
+  if (!Expect(wdf_capture_invalidate_runtime_authorization(handle, nullptr) ==
+                  WDF_CAPTURE_RESULT_INVALID_ARGUMENT,
+              "callback invalidation accepted a null epoch output") ||
+      !Expect(wdf_capture_invalidate_runtime_authorization(
+                  std::numeric_limits<wdf_capture_handle>::max(),
+                  &authorization_epoch) == WDF_CAPTURE_RESULT_INVALID_ARGUMENT &&
+                  authorization_epoch == 0,
+              "callback invalidation accepted an invalid handle")) {
+    wdf_capture_destroy(&handle);
+    return false;
+  }
+
+  wdf_capture_runtime_authorization_v1 allow_v1 =
+      RuntimeAuthorization(WDF_CAPTURE_POLICY_ALLOW, 1);
+  uint64_t generation = 0;
+  wdf_capture_command_admission_v1 admission = EmptyAdmission();
+  if (wdf_capture_update_runtime_authorization(
+          handle, &allow_v1, &generation) != WDF_CAPTURE_RESULT_OK ||
+      wdf_capture_issue_command_admission(
+          handle,
+          WDF_CAPTURE_COMMAND_START,
+          generation,
+          allow_v1.target_epoch,
+          &admission) != WDF_CAPTURE_RESULT_OK) {
+    wdf_capture_destroy(&handle);
+    return Expect(false, "callback invalidation setup failed");
+  }
+
+  uint64_t first_epoch = 0;
+  uint64_t second_epoch = 0;
+  wdf_capture_command_admission_v1 rejected_admission = EmptyAdmission();
+  wdf_capture_runtime_authorization_v1 allow_v2 =
+      RuntimeAuthorization(WDF_CAPTURE_POLICY_ALLOW, 2, 2, 101);
+  wdf_capture_runtime_authorization_v1 block_v2 =
+      RuntimeAuthorization(WDF_CAPTURE_POLICY_BLOCK, 2);
+  wdf_capture_runtime_authorization_v1 allow_v3 =
+      RuntimeAuthorization(WDF_CAPTURE_POLICY_ALLOW, 3, 2, 101);
+  const bool contract =
+      Expect(wdf_capture_invalidate_runtime_authorization(
+                 handle, &first_epoch) == WDF_CAPTURE_RESULT_OK &&
+                 first_epoch != 0 && (first_epoch & 1U) == 0,
+             "callback invalidation did not return a closed epoch") &&
+      Expect(wdf_capture_start_authorized(handle, &admission) ==
+                 WDF_CAPTURE_RESULT_ADMISSION_REJECTED,
+             "callback invalidation admitted an issued command") &&
+      Expect(wdf_capture_issue_command_admission(
+                 handle,
+                 WDF_CAPTURE_COMMAND_START,
+                 generation,
+                 allow_v1.target_epoch,
+                 &rejected_admission) ==
+                 WDF_CAPTURE_RESULT_ADMISSION_REJECTED,
+             "callback invalidation issued a new command") &&
+      Expect(wdf_capture_invalidate_runtime_authorization(
+                 handle, &second_epoch) == WDF_CAPTURE_RESULT_OK &&
+                 second_epoch > first_epoch && (second_epoch & 1U) == 0,
+             "repeated callback invalidation did not advance the epoch") &&
+      Expect(wdf_capture_update_runtime_authorization(
+                 handle, &allow_v2, &generation) ==
+                 WDF_CAPTURE_RESULT_AUTHORIZATION_SUPERSEDED &&
+                 generation == 2,
+             "Allow entered native before the callback barrier") &&
+      Expect(wdf_capture_update_runtime_authorization(
+                 handle, &block_v2, &generation) == WDF_CAPTURE_RESULT_OK &&
+                 generation == 3,
+             "blocked callback barrier was rejected") &&
+      Expect(wdf_capture_update_runtime_authorization(
+                 handle, &allow_v3, &generation) == WDF_CAPTURE_RESULT_OK &&
+                 generation == 4,
+             "resolved Allow did not follow the callback barrier");
+
+  const wdf_capture_handle raw_handle = handle;
+  const bool destroyed =
+      Expect(wdf_capture_destroy(&handle) == WDF_CAPTURE_RESULT_OK && handle == 0,
+             "callback invalidation handle could not be destroyed") &&
+      Expect(wdf_capture_invalidate_runtime_authorization(
+                 raw_handle, &authorization_epoch) ==
+                     WDF_CAPTURE_RESULT_INVALID_ARGUMENT &&
+                 authorization_epoch == 0,
+             "callback invalidation accepted a destroyed handle");
+  return contract && destroyed;
+}
+
 bool TestCommandAdmissionAuthenticityAndOwnership() {
   wdf_capture_config_v1 config = ValidConfig();
   wdf_capture_handle first = 0;
@@ -1104,6 +1199,51 @@ bool TestCommandAdmissionDestroyRace() {
   return true;
 }
 
+bool TestCallbackInvalidationDestroyRace() {
+  wdf_capture_config_v1 config = ValidConfig();
+  for (int iteration = 0; iteration < 32; ++iteration) {
+    wdf_capture_handle handle = 0;
+    if (wdf_capture_create(&config, &handle) != WDF_CAPTURE_RESULT_OK) {
+      return Expect(false,
+                    "destroy-race invalidation handle could not be created");
+    }
+
+    const wdf_capture_handle raw_handle = handle;
+    std::atomic<bool> ready{false};
+    std::atomic<wdf_capture_result> invalidation_result{
+        WDF_CAPTURE_RESULT_INTERNAL_ERROR};
+    std::atomic<uint64_t> authorization_epoch{0};
+    std::thread invalidator([&] {
+      ready.store(true, std::memory_order_release);
+      ready.notify_one();
+      uint64_t observed_epoch = 0;
+      invalidation_result.store(
+          wdf_capture_invalidate_runtime_authorization(
+              raw_handle, &observed_epoch),
+          std::memory_order_release);
+      authorization_epoch.store(observed_epoch, std::memory_order_release);
+    });
+    ready.wait(false, std::memory_order_acquire);
+    const wdf_capture_result destroy_result = wdf_capture_destroy(&handle);
+    invalidator.join();
+
+    const wdf_capture_result observed =
+        invalidation_result.load(std::memory_order_acquire);
+    const uint64_t observed_epoch =
+        authorization_epoch.load(std::memory_order_acquire);
+    if (!Expect(destroy_result == WDF_CAPTURE_RESULT_OK && handle == 0,
+                "destroy failed during callback invalidation race") ||
+        !Expect((observed == WDF_CAPTURE_RESULT_OK && observed_epoch != 0 &&
+                 (observed_epoch & 1U) == 0) ||
+                    (observed == WDF_CAPTURE_RESULT_INVALID_ARGUMENT &&
+                     observed_epoch == 0),
+                "callback invalidation returned an invalid destroy-race result")) {
+      return false;
+    }
+  }
+  return true;
+}
+
 bool TestLegacyAndRuntimeRevisionNamespacesCannotMix() {
   wdf_capture_config_v1 config = ValidConfig();
   wdf_capture_handle legacy_first = 0;
@@ -1281,9 +1421,11 @@ int main() {
       !TestPrivacyRevisionNeverRegresses() ||
       !TestRuntimeAuthorizationDisplayStructureContract() ||
       !TestRuntimeAuthorizationBarrierContract() ||
+      !TestCallbackTimeAuthorizationInvalidationContract() ||
       !TestCommandAdmissionAuthenticityAndOwnership() ||
       !TestCommandAdmissionInvalidationAndConcurrency() ||
       !TestCommandAdmissionDestroyRace() ||
+      !TestCallbackInvalidationDestroyRace() ||
       !TestLegacyAndRuntimeRevisionNamespacesCannotMix() ||
       !TestStaleHandleCannotTargetRecreatedInstance() ||
       !TestConcurrentPollAndDestroyAreSafe() ||

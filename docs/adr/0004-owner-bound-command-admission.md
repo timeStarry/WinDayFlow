@@ -150,6 +150,15 @@ linearizes first; otherwise consumption observes the closed or changed epoch
 and fails. The runtime owner rechecks its epoch when Start or Resume actually
 uses the move-only grant, covering owner changes after issuance.
 
+The bit-11 callback-time invalidation export now closes native admission before
+a Windows event callback returns. An Allow superseded before commit returns the
+stable superseded result without consuming a runtime revision. An Allow that
+commits just before invalidation is reported as applied-then-superseded, and the
+coordinator follows it with a restrictive revision. A completed Block update
+acknowledges the callback invalidation before another Allow can reopen command
+admission; a callback that supersedes the Block's update ticket requires a new
+Block acknowledgement.
+
 ### Capability and Activation Gates
 
 The native runtime-owner mask is:
@@ -157,7 +166,8 @@ The native runtime-owner mask is:
 ```text
 PrivacyGuard | EventQueue | TargetScopedAuthorization |
 PersistenceGenerationBarrier | DeterministicStop |
-DisplayScopedAuthorization | DisplayBoundCommandAdmission
+DisplayScopedAuthorization | CallbackTimeAuthorizationInvalidation |
+DisplayBoundCommandAdmission
 ```
 
 An older three-capability safety DLL can remain ABI-compatible for probing, but
@@ -165,18 +175,19 @@ it cannot construct the managed runtime owner. The complete live recording mask
 also requires `ScreenCapture` and `H264Chunks`; `EvidenceExtraction` remains
 independent.
 
-The current DLL advertises the runtime-owner mask only. It leaves
-`ScreenCapture`, `H264Chunks`, and `EvidenceExtraction` clear. A valid authorized
-Start or Resume is consumed and then returns `NOT_IMPLEMENTED` with no worker or
-evidence writer. The App composition root continues to register
-`DenyCaptureRuntimeAuthorization` and `UnavailableCaptureBackend`.
+The current DLL advertises only this eight-capability runtime-owner foundation
+mask. It leaves `ScreenCapture`, `H264Chunks`, and `EvidenceExtraction` clear. A
+valid authorized Start or Resume is consumed and then returns `NOT_IMPLEMENTED`
+with no worker or evidence writer. The App composition root continues to
+register `DenyCaptureRuntimeAuthorization` and `UnavailableCaptureBackend`.
 
-Live activation still requires a real Windows target verifier, event-driven
-privacy monitor, evidence-Pause versus sticky-session-Stop policy, real
-DXGI/WIC/Media Foundation worker and persistence path, atomic artifact tests,
-and packaged composition-root capability negotiation. The real worker must
-carry the move-only command grant and persistence snapshot through its actual
-write boundaries before `ScreenCapture` can be enabled.
+Live activation still requires image-bound signer verification, unique hosted-
+application attribution, presentation and periodic-storage signals, an
+evidence-Pause versus sticky-session-Stop policy, a real DXGI/WIC/Media
+Foundation worker and persistence path, atomic artifact tests, and packaged
+composition-root capability negotiation. The real worker must carry the
+move-only command grant, callback generation, and persistence snapshot through
+its actual write boundaries before `ScreenCapture` can be enabled.
 
 ## Required Verification
 
@@ -186,7 +197,8 @@ capability tests cover legacy rejection and dependency masks. Native safety and
 C API tests cover zero/failed random output, tampering, wrong action, foreign
 and recreated handles, issue overwrite, matching-nonce single consumption,
 replay, both Allow A-to-B orderings, Stop/revoke/destroy invalidation, runtime
-owner epoch changes, and idempotent close/reopen behavior.
+owner epoch changes, callback invalidation on both sides of native commit,
+Block acknowledgement, and idempotent close/reopen behavior.
 
 Managed tests cover persistent and runtime checks, invalidation generation,
 foreign and forged stamps, wrong operation, replay, cancellation before native

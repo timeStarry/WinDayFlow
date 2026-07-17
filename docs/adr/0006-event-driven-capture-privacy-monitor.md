@@ -29,16 +29,18 @@ commands, or imply that a real writer is active.
 ## Decision
 
 WinDayFlow implements an inactive event-driven privacy monitor with a dedicated
-WinEvent source, an independent privacy-observation generation, a generation-
-bound native barrier, and one asynchronous sampling worker.
+WinEvent and system-lifecycle source, an independent privacy-observation
+generation, a generation-bound native barrier, and one asynchronous sampling
+worker.
 
 ### Synchronous Callback Boundary
 
 Every accepted event executes this order before returning from the callback:
 
 1. `InvalidatePrivacyObservation()` replaces the coordinator's current signals
-   with FailClosed, closes the managed authorization latch, and advances the
-   independent privacy-observation generation.
+   with FailClosed, closes the managed authorization latch and the lock-free
+   native admission gate, and advances the independent privacy-observation
+   generation.
 2. `WindowsCaptureTargetVerifier.InvalidateObservation()` clears the shared
    target fingerprint so the next stable observation must obtain a fresh target
    epoch.
@@ -84,16 +86,19 @@ observation, so overlapping updates cannot revive an older value. An already
 admitted command may finish while the managed latch is closed, but no new
 managed admission can be issued.
 
-If an older native Allow completes after its observation was invalidated, the
-coordinator applies a compensating forced FailClosed update before releasing
-the gate. The same compensation rule applies to settings reconciliation and
-post-Stop reconciliation. Quiescence is monotonic: an authorizing settings
-commit cannot clear its forced block or republish Allow after quiescence begins.
+If an older native Allow is invalidated before commit, native code reports it as
+superseded without consuming a revision. If it commits immediately before the
+callback wins, native code reports applied-then-superseded and the coordinator
+applies a compensating forced FailClosed update. The completed Block
+acknowledges the callback invalidation before another Allow may publish. The
+same compensation rule applies to settings reconciliation and post-Stop
+reconciliation. Quiescence is monotonic: an authorizing settings commit cannot
+clear its forced block or republish Allow after quiescence begins.
 
-The synchronous managed latch cannot by itself revoke a native persistence
-permit already held by a future writer. Live activation therefore still
-requires a native lock-free gate or equivalent writer pre/post generation
-checks at acquisition and every publication boundary.
+The lock-free native gate closes new admission before callback return, but it
+does not by itself prove that a future writer discarded a persistence permit it
+already held. Live activation therefore still requires writer pre/post callback
+generation and permit checks at acquisition and every publication boundary.
 
 ### Sampling and Coalescing
 
@@ -114,10 +119,20 @@ cannot update the monitor's last observation or reopen authorization. The
 monitor carries the identity snapshot to the coordinator but does not read or
 cache settings itself.
 
-### WinEvent Ownership and Teardown
+### System-Event Ownership and Teardown
 
-`WindowsCaptureWinEventSource` owns a dedicated background thread and a Windows
-message queue. It installs narrow `WINEVENT_OUTOFCONTEXT` hooks for foreground,
+`WindowsCaptureWinEventSource` owns a dedicated background thread, a Windows
+message queue, and an invisible top-level `WS_POPUP` window with
+`WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE` and no parent. It is deliberately not a
+message-only window, so it receives broadcast `WM_DISPLAYCHANGE` notifications.
+On the same owner thread it registers
+`WTSRegisterSessionNotification` with `NOTIFY_FOR_THIS_SESSION` and user32
+`RegisterSuspendResumeNotification` with `DEVICE_NOTIFY_WINDOW_HANDLE`. WTS
+availability transitions and suspend/resume map to value-free change kinds;
+session-unavailable and power-suspended holds keep publication FailClosed until
+their matching recovery event is reverified through a new barrier and sample.
+
+The source also installs narrow `WINEVENT_OUTOFCONTEXT` hooks for foreground,
 desktop switch, window-object create/destroy, and one exact
 `0x800B..0x800C` range for object location/name change. Object events are
 accepted only when HWND is nonzero and the callback reports `OBJID_WINDOW` with
@@ -125,10 +140,12 @@ accepted only when HWND is nonzero and the callback reports `OBJID_WINDOW` with
 foreground. In particular, a qualifying `LOCATIONCHANGE` is a conservative
 invalidation signal, not target-identity evidence.
 
-The callback delegate is rooted for the complete hook lifetime. The owner
-thread unregisters hooks in reverse order, drains queued work, and releases the
-root only after clean teardown. Start and stop waits are bounded. If clean
-unhook cannot be established, the source disconnects application callbacks and
+The callback delegates are rooted for the complete hook and HWND lifetime. The
+owner thread unhooks WinEvent registrations in reverse order, drains queued
+messages, unregisters suspend/resume and WTS notifications, destroys the hidden
+window, unregisters its class, and releases the root only after clean teardown.
+Start and stop waits are bounded. If clean unhook or window-callback teardown
+cannot be established, the source disconnects application callbacks and
 conservatively retains the minimum callback bridge. A callback failure requests
 owner-thread shutdown instead of leaving the message pump alive. Startup,
 runtime, and teardown faults expose stable enum values only.
@@ -148,12 +165,11 @@ activates capture. At minimum, live integration still requires:
 
 1. publisher identity bound to the opened running image and unique hosted-app
    child attribution;
-2. display-topology invalidation plus WTS session, power/resume, presentation,
-   and periodic storage signals;
+2. presentation notifications and periodic storage signals;
 3. writer-side use of the ADR 0008 HMONITOR/device-key resolver and
    target/display revalidation before and after acquisition;
-4. a native generation/permit gate that revokes or rejects already-held stale
-   writer authority through publication;
+4. real-writer checks that reject already-held stale permits and callback
+   generations through publication;
 5. an explicit evidence-Pause versus sticky-session-Stop policy; and
 6. the real DXGI/WIC/Media Foundation acquisition, encoding, temporary output,
    atomic publication, cleanup, and recovery path.
@@ -171,22 +187,21 @@ during sampling, stale equal-signal rejection, forced barrier ordering,
 recoverable FailClosed publication, source start/runtime/teardown faults, late
 callbacks, idempotent disposal, terminal generation barriers, and value-redacted
 diagnostics. Coordinator tests cover barrier-before-publish enforcement,
-single publication, stale Allow compensation, settings/invalidation races, and
-quiescence monotonicity.
+single publication, callback-time native closure, pre-commit supersession,
+post-commit compensation, current Block acknowledgement,
+settings/invalidation races, and quiescence monotonicity.
 
-WinEvent tests cover hook ranges and filters, message ownership, owner-thread
-callback and disposal, reverse unhook, queued late callbacks, callback-root
-lifetime, callback-failure shutdown, partial registration, bounded start/stop,
-conservative retention when unhook cannot be proven, the exact
-`0x800B..0x800C` range, and rejection of location callbacks without a nonzero
-HWND, `OBJID_WINDOW`, and `CHILDID_SELF`. Monitor tests cover location-event
-storms and a location invalidation racing target/title sampling without stale
-publication.
+System-event tests cover hook ranges and filters, the hidden top-level HWND,
+display/WTS/power message mapping, all-or-nothing registration, same-owner-thread
+cleanup, reverse teardown, queued late callbacks, callback-root lifetime,
+callback-failure shutdown, bounded start/stop, the exact `0x800B..0x800C` range,
+and rejection of location callbacks without a nonzero HWND, `OBJID_WINDOW`, and
+`CHILDID_SELF`. Monitor tests cover topology and location races, independent
+session/power holds, resume/reconnect barriers, and stale-publication rejection.
 
-Future activation tests must add real Windows display-topology, WTS,
-power/resume, presentation, and storage-signal coverage; signer and hosted-app
-replacement; writer use and revalidation of native DXGI mapping;
-generation/permit checks; and atomic artifact recovery.
+Future activation tests must add presentation and periodic storage-signal
+coverage; signer and hosted-app replacement; writer use and revalidation of
+native DXGI mapping; held-permit checks; and atomic artifact recovery.
 
 ## Provenance
 
@@ -202,8 +217,9 @@ worker while every callback still invalidates stale authority. The additional
 thread, generation phase, forced native update, and teardown state machine add
 complexity, but make the callback-to-publication races testable.
 
-The implementation remains intentionally disconnected. Its current event set
-includes conservative location invalidation but is not complete Windows
-lifecycle coverage, and an asynchronous barrier cannot replace writer-side
-native generation enforcement. This ADR must not be used as evidence that
-WinDayFlow records frames or that Phase 1 has exited.
+The implementation remains intentionally disconnected from App composition.
+Its event set now includes conservative location and topology invalidation,
+current-session WTS, and suspend/resume with callback-time native closure, but
+presentation and periodic storage notifications remain open and the foundation
+cannot replace real-writer held-permit checks. This ADR must not be used as
+evidence that WinDayFlow records frames or that Phase 1 has exited.

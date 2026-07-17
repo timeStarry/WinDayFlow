@@ -21,6 +21,7 @@ internal enum NativeCaptureResult
     GenerationExhausted = -11,
     AdmissionRequired = -12,
     AdmissionRejected = -13,
+    AuthorizationSuperseded = -14,
     InternalError = -255,
 }
 
@@ -245,6 +246,14 @@ internal interface INativeCaptureApi
         return NativeCaptureResult.NotImplemented;
     }
 
+    NativeCaptureResult InvalidateRuntimeAuthorization(
+        SafeCaptureHandle handle,
+        out ulong authorizationEpoch)
+    {
+        authorizationEpoch = 0;
+        return NativeCaptureResult.NotImplemented;
+    }
+
     NativeCaptureResult RevokeRuntimeAuthorization(
         SafeCaptureHandle handle,
         out ulong persistenceGeneration)
@@ -320,6 +329,13 @@ internal sealed class PInvokeNativeCaptureApi : INativeCaptureApi
             handle,
             ref authorization,
             out persistenceGeneration);
+
+    public NativeCaptureResult InvalidateRuntimeAuthorization(
+        SafeCaptureHandle handle,
+        out ulong authorizationEpoch) =>
+        NativeCaptureMethods.wdf_capture_invalidate_runtime_authorization(
+            handle,
+            out authorizationEpoch);
 
     public NativeCaptureResult RevokeRuntimeAuthorization(
         SafeCaptureHandle handle,
@@ -457,6 +473,11 @@ internal static class NativeCaptureMethods
         SafeCaptureHandle handle,
         ref NativeCaptureRuntimeAuthorizationV1 authorization,
         out ulong persistenceGeneration);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern NativeCaptureResult wdf_capture_invalidate_runtime_authorization(
+        SafeCaptureHandle handle,
+        out ulong authorizationEpoch);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
     internal static extern NativeCaptureResult wdf_capture_revoke_runtime_authorization(

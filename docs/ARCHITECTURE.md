@@ -274,7 +274,7 @@ Infrastructure -> Application, Domain
 Capture.Interop -> Application
 
 Current: Capture.Interop <-> Capture.Native is built and integration-tested
-Runtime: App remains unavailable until verifier, event-monitor, and writer activation gates close
+Runtime: App remains unavailable until monitor/owner wiring and writer activation gates close
 ```
 
 `ICaptureService` and `ICaptureBackend` are owned by Application. The
@@ -288,19 +288,23 @@ writes and lifecycle calls. Capture.Interop supplies both
 `UnavailableCaptureBackend` and `NativeCaptureBackend`. The latter negotiates
 the complete safety-capability mask, owns the opaque handle through `SafeHandle`,
 updates versioned privacy context and target-scoped runtime authorization, and
-polls bounded native events without callbacks. An explicit asynchronous owner
-quiesces by applying Block, stopping, joining, and destroying in order;
+polls bounded native events without frame callbacks. A separate synchronous
+callback path closes native authorization admission before system-event
+callbacks return. An explicit asynchronous owner quiesces by applying Block,
+stopping, joining, and destroying in order;
 `SafeHandle` remains a final fallback rather than the normal shutdown proof.
 The native backend remains unregistered. A synchronous Windows foreground
 target-verifier foundation now exists, but it is not connected to the native
 owner or live writer. An event-driven monitor foundation now synchronously
-invalidates managed admission and target continuity, applies a generation-bound
-native barrier, and asynchronously re-observes through a dedicated WinEvent
-thread, but it is also not connected to the App or native owner.
-Image-bound publisher-signer verification, unique hosted-app child attribution,
-display-topology/WTS/power/resume/presentation/storage signals, callback-time
-native topology invalidation, writer-side display revalidation and
-generation/permit enforcement, and the real writer remain activation gates.
+invalidates managed admission and target continuity, closes native admission,
+applies a generation-bound native barrier, and asynchronously re-observes
+through one Windows event owner thread. Its hidden top-level HWND receives
+display-topology, current-session WTS, and suspend/resume notifications, but the
+monitor is also not connected to the App or native owner. Image-bound
+publisher-signer verification, unique hosted-app child attribution,
+presentation notifications, periodic storage refresh, writer-side display
+revalidation and generation/permit enforcement, and the real writer remain
+activation gates.
 The bounded title-read, conservative window-location invalidation,
 display-scoped authorization, and strict DXGI resolver gates are closed, but
 they do not prove foreground identity or a real writer's pre/post-acquisition
@@ -451,6 +455,13 @@ capture.
 dependencies, and strict unique-output resolver. It closes the display contract
 and resolver foundations without claiming that a real writer uses them.
 
+[ADR 0009](adr/0009-windows-lifecycle-invalidation-and-callback-time-authorization-closure.md),
+"Windows Lifecycle Invalidation and Callback-Time Authorization Closure," fixes
+the hidden top-level notification window, owner-thread WTS and suspend/resume
+registrations, independent session/power holds, native callback gate, and
+pre/post-commit supersede contract. It closes new admission immediately but
+does not interrupt an already-held persistence permit or activate a writer.
+
 `CaptureStatus` is a stable machine-readable contract, not just display text.
 It carries an unsigned 64-bit `Sequence`, `CaptureReasonCode`, and
 `CaptureErrorCode` in addition to state, timestamp, and optional localized
@@ -512,6 +523,25 @@ revokes target authority and permanently prevents further target-scoped
 authorization on that native handle; switching back requires handle
 recreation, so the two revision namespaces cannot revive one another.
 
+Each accepted Windows event callback first replaces managed signals with
+FailClosed, closes managed admission, and advances the observation generation.
+It then calls the callback-safe native invalidation export, invalidates verifier
+target continuity, and wakes the worker. The native close is atomic and does not
+wait for the unique safety gate or an already-held shared persistence permit.
+The subsequent generation-bound Block update is the acknowledgement that drains
+the current permit boundary; a later Allow is rejected until a Block has
+confirmed the latest callback epoch.
+
+An Allow superseded before native commit returns
+`SupersededBeforeCommit` and consumes neither runtime revision nor persistence
+generation. If Allow committed but callback closure defeats its final reopen,
+managed code records `AppliedThenSuperseded`, consumes that committed revision
+and generation, clears the local generation-bound persistence boundary, and
+uses the next revision for a compensating Block. Ordinary Stop/Revoke retains
+its existing invalid-state semantics. Callback, admission, and observation
+generations never wrap; exhaustion is sticky, fail closed, and requires handle
+recreation, while managed exhaustion still attempts the native close.
+
 Start/Resume command admission now closes the Boolean-to-backend TOCTOU
 boundary. Under the coordinator's update gate, the current native instance
 issues a single-use admission bound to the Start or Resume operation, native
@@ -553,11 +583,13 @@ identities fail closed when a rule requires them, while Absent is a conclusive
 non-match.
 The verifier does not compose a policy decision and is not yet wired into the
 runtime owner. Image-bound publisher-signer verification, unique hosted-app
-child attribution, complete Windows lifecycle coverage, real-writer permit
+child attribution, presentation notifications, periodic storage refresh,
+dynamic evidence-Pause versus sticky-Stop classification, real-writer permit
 integration, and App registration remain pending. The inactive event monitor
-supplies foreground, desktop, and conservative window-object invalidation,
-including qualified location changes. Those object events are not foreground or
-top-level identity proof. Phase 1 activates the implemented native backend
+supplies foreground, desktop, conservative window-object, display-topology,
+current-session, and power invalidation. Object events are not foreground or
+top-level identity proof, and recovery notifications only request a fresh
+barrier and sample. Phase 1 activates the implemented native backend
 only after those platform inputs and the complete screen-capture capability
 mask are present, then adds evidence-extraction
 interfaces under Capture.Interop. Capture options come from validated
@@ -586,6 +618,9 @@ v1 foundation under `WinDayFlow.Capture.Native`. Its implemented boundary has:
 - a native-issued permit token that adds native-instance and persistence
   generations, plus shared/unique admission linearization that prevents legacy
   privacy Allow updates from minting persistence authority;
+- callback-time authorization invalidation through capability bit 11 and a
+  dedicated C ABI export, with `AUTHORIZATION_SUPERSEDED` distinguishing an old
+  update rejected before commit from ordinary Stop/Revoke invalidation;
 - validated capture-policy inputs and a bounded, polled event queue with
   monotonic sequence numbers and `dropped_before` gap reporting, without native
   callbacks into managed or UI code; and
@@ -597,15 +632,19 @@ This is a contract and synthetic safety foundation, not a usable recorder. The
 native and managed tests prove target/PID/display reuse rejection, target and
 instance epochs, persistence-generation invalidation, permit linearization,
 quiescence, timeout/failure quarantine, ABI layout, capability dependencies,
-and strict no-fallback DXGI output selection. They do not prove a real capture
-write path.
+strict no-fallback DXGI output selection, callback pre/post-commit races, and
+Block-before-Allow acknowledgement. They do not prove a real capture write
+path.
 
 The complete live mask requires privacy guard, event queue, target-scoped and
 display-scoped authorization, persistence-generation barrier, deterministic
-stop, display-bound command admission, screen capture, and H.264 chunk
-capabilities. Evidence
-extraction is independent. The foundation currently advertises the first seven
-foundation capabilities; `ScreenCapture`, `H264Chunks`, and
+stop, display-bound command admission, callback-time authorization
+invalidation, screen capture, and H.264 chunk capabilities. Evidence extraction
+is independent. The foundation currently advertises eight runtime-owner
+foundation capabilities: privacy guard, event queue, target-scoped
+authorization, persistence-generation barrier, deterministic stop,
+display-scoped authorization, display-bound command admission, and callback-time
+authorization invalidation. `ScreenCapture`, `H264Chunks`, and
 `EvidenceExtraction` remain deliberately
 disabled, so the live mask is incomplete. Authorized Start/Resume validate and
 consume a command stamp but return `NotImplemented` without creating a worker.
@@ -620,11 +659,14 @@ The remaining activation gates are integration work beyond command admission,
 synchronous target observation, the bounded title worker, and conservative
 window-location invalidation. Publisher identity must be bound to the running
 image, and hosted windows must be attributed to one real child application.
-Display-topology, WTS session, power/resume, presentation, and periodic storage
-signals remain missing. The selected HMONITOR/device key now has a strict native
-DXGI output resolver, but the writer must re-resolve and revalidate that binding
-before and after acquisition, and a writer-side generation/permit gate must
-reject stale authority through acquisition and publication. The real
+Display-topology, current-session WTS, and suspend/resume invalidation now exist;
+presentation notifications and periodic storage refresh remain missing. The
+selected HMONITOR/device key has a strict native DXGI output resolver, but the
+writer must re-resolve and revalidate that binding before and after acquisition,
+and a writer-side generation/permit gate must reject stale authority through
+acquisition and publication. Callback closure prevents new permits, but a permit
+already held may finish its protected phase, so every real writer phase must
+revalidate before progressing. The real
 DXGI/WIC/Media Foundation pixel and metadata writer must revalidate target and
 display before and after acquisition while carrying the consumed command grant
 and native persistence permit through worker admission, encode, temporary
@@ -747,9 +789,9 @@ following are implemented and tested together:
 - primary publisher-signer verification bound to the running image;
 - unique child-application attribution for hosted Windows surfaces;
 - integration of the implemented WinEvent generation and location-invalidation
-  foundation with display-topology, WTS session, power/resume, presentation,
-  and periodic storage signals, followed by explicit evidence-Pause versus
-  sticky-session-Stop classification;
+  plus display-topology, current-session, and power source with the runtime
+  owner, presentation notifications, and periodic storage refresh, followed by
+  explicit evidence-Pause versus sticky-session-Stop classification;
 - writer-side use of the native HMONITOR/device-key resolver plus target/display
   and generation/permit revalidation before and after acquisition; and
 - real acquisition, encoding, temporary output, atomic publication, metadata,
@@ -758,10 +800,13 @@ following are implemented and tested together:
 ### 9.3 Event-Driven Privacy Monitor Foundation
 
 The inactive `WindowsCapturePrivacyMonitor` closes the polling-only race around
-the ADR 0005 verifier. Its dedicated `WINEVENT_OUTOFCONTEXT` source observes
+the ADR 0005 verifier. One owner thread registers a never-shown, non-activating
+top-level HWND rather than a message-only window because it must receive system
+broadcasts. The same message pump owns current-session WTS registration,
+user32 suspend/resume registration, and `WINEVENT_OUTOFCONTEXT` hooks for
 foreground and desktop switches, window-object create/destroy, and the exact
-`0x800B..0x800C` window-object location/name range on an owner thread with a
-Windows message pump. Object callbacks are accepted only when the HWND is
+`0x800B..0x800C` window-object location/name range. Object callbacks are
+accepted only when the HWND is
 nonzero and the event reports `OBJID_WINDOW` with `CHILDID_SELF`. These
 predicates do not prove that the HWND is top-level or foreground. The callback
 carries only a stable change kind; it does not read HWND titles, process
@@ -769,9 +814,11 @@ identity, settings, exclusion policy, or capture lifecycle state.
 
 Before each accepted callback returns, the monitor replaces the coordinator's
 signals with FailClosed, closes managed admission, advances a
-privacy-observation generation, invalidates target-epoch continuity, and offers
-one wake token. Every event advances the generation even when a burst coalesces
-to one worker sample. A qualified `LOCATIONCHANGE` is therefore only a
+privacy-observation generation, synchronously closes native authorization
+admission, invalidates target-epoch continuity, and offers one wake token.
+Every event advances both managed observation and native callback generations
+even when a burst coalesces to one worker sample. A qualified `LOCATIONCHANGE`
+is therefore only a
 conservative invalidation signal: the next verifier sample must establish any
 foreground, owner, and display facts. This observation generation is
 independent from the runtime invalidation generation used by Application
@@ -780,7 +827,7 @@ command admission.
 The coordinator enforces the per-generation sequence:
 
 ```text
-synchronous invalidation
+synchronous managed and native admission invalidation
 -> forced FailClosed native persistence barrier
 -> at most one generation-bound resolved publication
 ```
@@ -789,10 +836,25 @@ The worker owns no settings snapshot. After the barrier it double-samples the
 base Windows privacy probe around one atomic target/identity/display verification
 and publishes through the coordinator, which recomposes against the latest
 committed settings. A changed generation rejects an old sample even when its
-values equal the new sample. An older native Allow that completes after
-invalidation receives a compensating FailClosed update under the same apply
-gate. Quiescence cannot be reversed by an overlapping authorizing settings
-commit.
+values equal the new sample. An older native Allow rejected before commit does
+not consume its revision. An Allow committed before callback closure consumes
+its revision and persistence generation but cannot reopen the native gate; it
+receives a compensating FailClosed update under the same apply gate using the
+next revision. Quiescence cannot be reversed by an overlapping authorizing
+settings commit.
+
+`WM_DISPLAYCHANGE` invalidates target continuity and requires a fresh sample but
+does not create a lasting hold. WTS lock, disconnect, logoff, and terminate enter
+an independent session-unavailable hold; corresponding connect, logon, unlock,
+create, and desktop-ready events clear it, while remote-control changes only
+request revalidation. Suspend enters an independent power hold and the supported
+resume notifications clear it. Unknown WTS events fail closed as unavailable.
+While either hold remains, the worker completes the current native Block barrier
+and publishes FailClosed without sampling. Clearing a hold never restores old
+authority: the new generation still requires a Block acknowledgement and a fresh
+sample. All registrations and reverse-order cleanup run on the owner thread;
+partial startup or uncertain cleanup remains fail closed and conservatively
+retains callback roots when detachment cannot be proven.
 
 The single-slot wake channel is a work-coalescing mechanism, not an invalidation
 coalescer. Start, runtime, callback, generation, and teardown failures close the
@@ -801,14 +863,16 @@ inner exceptions. Hook teardown occurs on the owner thread in reverse order;
 the callback bridge is released after clean unhook and conservatively retained
 only while native callback completion cannot be proven.
 
-This foundation still cannot revoke a native persistence permit already held by
-a future writer. Live activation requires a native generation gate or writer
-pre/post checks through acquisition and atomic publication. The present hooks
-now cover conservative window-location invalidation, but not display topology,
-WTS session, sleep/resume, presentation, or periodic storage changes. The
-monitor does not choose evidence Pause versus sticky session Stop and is not
-registered in App dependency injection. See ADRs 0006 and 0007 for the complete
-contract.
+Callback closure prevents new command admission and new native persistence
+permits, but it cannot revoke a permit already held by a future writer. The
+following Block barrier drains existing holders before acknowledging the
+generation; the writer must additionally recheck authority at acquisition,
+encode, metadata, rename, and committed-event boundaries. The present source
+covers conservative window-location, display-topology, current-session, and
+sleep/resume invalidation, but not presentation notifications or periodic
+storage refresh. The monitor does not choose evidence Pause versus sticky
+session Stop and is not registered in App dependency injection. See ADRs 0006,
+0007, and 0009 for the complete contract.
 
 Capture invariants:
 
@@ -1036,9 +1100,10 @@ application-level database encryption.
   default plus user-selectable retention, sensitive-application exclusion,
   remote-session pause, screen-sharing pause choices, and typed ordered
   application/window rule lists. Full first-run onboarding remains Phase 1
-  work. The event-driven application/window identity monitor foundation is
-  implemented but inactive; complete Windows lifecycle coverage and live
-  activation also remain Phase 1 work.
+  work. The event-driven application/window identity monitor plus
+  display/session/power invalidation foundation is implemented but inactive;
+  presentation and periodic-storage integration, Pause/Stop classification, and
+  live activation remain Phase 1 work.
 - The current `pause_during_screen_sharing` storage name is retained for schema
   compatibility, but the Windows UI describes only Windows Presentation Mode.
   Windows has no public, universal signal for arbitrary third-party screen
@@ -1258,14 +1323,16 @@ the user explicitly enables a future telemetry feature.
 - Deterministic monitor tests cover callback-time invalidation, generation
   advancement under event bursts, forced barrier ordering, stale observation
   rejection during sampling and publication, recoverable FailClosed sampling,
-  WinEvent owner-thread startup/shutdown, late callbacks, terminal faults,
-  exact `0x800B..0x800C` registration, qualified location invalidation,
-  generation phase enforcement, quiescence races, and redacted diagnostics.
+  owner-thread hidden-window/WTS/power/WinEvent registration and reverse cleanup,
+  a real Windows registration smoke path, late callbacks, terminal faults,
+  exact `0x800B..0x800C` registration, qualified location and topology
+  invalidation, independent session/power holds, generation phase enforcement,
+  callback pre/post-commit supersede, quiescence races, and redacted diagnostics.
 - Live-activation tests must later cover hosted-app attribution, image-bound
-  signer replacement, display-topology/WTS/power/resume/presentation/storage
-  signals, writer-side native display resolution and pre/post mapping checks,
-  generation/permit enforcement, and stale-work rejection at every native
-  persistence boundary.
+  signer replacement, presentation and periodic storage integration, explicit
+  Pause/Stop behavior, writer-side native display resolution and pre/post
+  mapping checks, held-permit phase revalidation, and stale-work rejection at
+  every native persistence boundary.
 
 ### Domain and Application
 
@@ -1306,7 +1373,7 @@ Phases are release gates, not a claim of strict implementation order. As of
 2026-07-17, the no-capture manual-timeline portions of Phases 2 and 3 plus
 schema v4, consent policy v2, persistent retention/exclusion/session choices,
 and user-authored typed exclusion rules are implemented. Phase 1 also has
-Accepted ADRs 0001 through 0008, verified QiDayflow source provenance, the x64
+  Accepted ADRs 0001 through 0009, verified QiDayflow source provenance, the x64
 C++20 C ABI v1 foundation, seven native tests, the display-scoped safety core,
 managed asynchronous owner/quiescence contract, owner-bound single-use
 Start/Resume admission, the inactive runtime privacy coordinator, the pure
@@ -1317,11 +1384,14 @@ core covers synthetic target reuse, generation, acquire-to-persist permit,
 command-admission, and stop/join/destroy races; the verifier covers stable
 HWND/TID/PID/process/display observation and process-wide monotonic target
 epochs. The process-wide 100 ms title worker and conservative filtered
-window-location invalidation close those two activation gates. Image-bound
-publisher-signer verification, unique child attribution,
-display-topology/WTS/power/resume/presentation/storage signals, callback-time
-native topology invalidation, writer-side DXGI revalidation and
-generation/permit enforcement, the
+  window-location invalidation close those two activation gates. A hidden
+  top-level notification window now adds display-topology, current-session WTS,
+  and suspend/resume invalidation with independent session/power holds, while a
+  callback-safe native gate prevents old Allow updates from reopening admission
+  before the matching Block acknowledgement. Image-bound publisher-signer
+  verification, unique child attribution, presentation notifications, periodic
+  storage refresh, writer-side DXGI revalidation and held-permit phase
+  enforcement, the
 real DXGI/WIC/Media Foundation acquisition and persistence path, atomic artifact
 publication, and the evidence-Pause versus sticky-Stop dynamic policy remain
 open activation gates. `ScreenCapture`, `H264Chunks`, `EvidenceExtraction`, and

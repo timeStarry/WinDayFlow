@@ -16,6 +16,7 @@ namespace {
 
 std::atomic<uint64_t> g_next_instance_epoch{1};
 constexpr size_t kMaximumDisplayDeviceKeyCharacters = 31;
+static_assert(std::atomic<uint64_t>::is_always_lock_free);
 
 uint64_t AllocateInstanceEpoch() {
   uint64_t current = g_next_instance_epoch.load(std::memory_order_relaxed);
@@ -127,18 +128,24 @@ bool IsFullyAllowed(const PrivacyContext& context) {
 }
 
 CaptureSafetyCore::CaptureSafetyCore()
-    : CaptureSafetyCore(AllocateInstanceEpoch(), 1, {}) {}
+    : CaptureSafetyCore(AllocateInstanceEpoch(), 1, {}, 2, {}) {}
 
 CaptureSafetyCore::CaptureSafetyCore(
     uint64_t instance_epoch,
     uint64_t initial_persistence_generation,
-    CommandAdmissionNonceGenerator nonce_generator)
+    CommandAdmissionNonceGenerator nonce_generator,
+    uint64_t initial_admission_stamp,
+    AuthorizationCommitHook authorization_commit_hook)
     : instance_epoch_(instance_epoch),
       persistence_generation_(initial_persistence_generation),
       generation_exhausted_(instance_epoch == 0 ||
-                            initial_persistence_generation == 0),
+                             initial_persistence_generation == 0 ||
+                             initial_admission_stamp == 0 ||
+                             (initial_admission_stamp & 1U) != 0),
+      admission_stamp_(initial_admission_stamp & ~uint64_t{1}),
       nonce_generator_(nonce_generator ? std::move(nonce_generator)
-                                       : GenerateCommandAdmissionNonce),
+                                        : GenerateCommandAdmissionNonce),
+      authorization_commit_hook_(std::move(authorization_commit_hook)),
       observable_{initial_persistence_generation, 0} {}
 
 CaptureSafetyUpdateResult CaptureSafetyCore::UpdateRuntimeAuthorization(
@@ -186,6 +193,12 @@ CaptureSafetyUpdateResult CaptureSafetyCore::CompleteLegacyPrivacyContext(
 CaptureSafetyUpdateTicket CaptureSafetyCore::BeginAuthorizationUpdate()
     noexcept {
   return CloseAdmission();
+}
+
+uint64_t CaptureSafetyCore::InvalidateAuthorizationAdmission() noexcept {
+  const uint64_t invalidation_epoch = AdvanceCallbackInvalidationEpoch();
+  const uint64_t admission_epoch = CloseAdmission().admission_stamp;
+  return invalidation_epoch == 0 ? 0 : admission_epoch;
 }
 
 void CaptureSafetyCore::BeginRevoke() noexcept {
@@ -449,6 +462,11 @@ CaptureSafetyUpdateResult CaptureSafetyCore::UpdateUnderLock(
     RevokeStateUnderLock();
     return CaptureSafetyUpdateResult::kGenerationExhausted;
   }
+  if (callback_invalidation_exhausted_.load(std::memory_order_acquire)) {
+    generation_exhausted_ = true;
+    RevokeStateUnderLock();
+    return CaptureSafetyUpdateResult::kGenerationExhausted;
+  }
   if (generation_exhausted_) {
     return CaptureSafetyUpdateResult::kGenerationExhausted;
   }
@@ -465,6 +483,18 @@ CaptureSafetyUpdateResult CaptureSafetyCore::UpdateUnderLock(
   const bool legacy_update = allow_missing_target;
   if (!legacy_update && legacy_tainted_) {
     return CaptureSafetyUpdateResult::kRevokedDuringUpdate;
+  }
+  const auto admission_mismatch_result = [this, &ticket]() noexcept {
+    return callback_invalidation_epoch_.load(std::memory_order_acquire) !=
+                   ticket.callback_invalidation_epoch
+               ? CaptureSafetyUpdateResult::kAuthorizationSuperseded
+               : CaptureSafetyUpdateResult::kRevokedDuringUpdate;
+  };
+  const bool fully_allowed = IsFullyAllowed(authorization.privacy);
+  if (!legacy_update && fully_allowed &&
+      callback_invalidation_epoch_.load(std::memory_order_acquire) !=
+          confirmed_callback_invalidation_epoch_) {
+    return CaptureSafetyUpdateResult::kAuthorizationSuperseded;
   }
   const uint64_t revision = authorization.privacy.policy_revision;
   const uint64_t current_revision =
@@ -486,19 +516,23 @@ CaptureSafetyUpdateResult CaptureSafetyCore::UpdateUnderLock(
       if (same_snapshot) {
         if (admission_stamp_.load(std::memory_order_acquire) !=
             ticket.admission_stamp) {
-          return CaptureSafetyUpdateResult::kRevokedDuringUpdate;
+          return admission_mismatch_result();
         }
         if (!legacy_update && ticket.admission_was_open &&
             authorization.target.has_value() &&
-            IsFullyAllowed(authorization.privacy)) {
+            fully_allowed) {
           uint64_t expected = ticket.admission_stamp;
           if (!admission_stamp_.compare_exchange_strong(
                   expected,
                   ticket.admission_stamp | 1U,
                   std::memory_order_acq_rel,
                   std::memory_order_acquire)) {
-            return CaptureSafetyUpdateResult::kRevokedDuringUpdate;
+            return admission_mismatch_result();
           }
+        }
+        if (!legacy_update && !fully_allowed) {
+          ConfirmCallbackInvalidationUnderLock(
+              ticket.callback_invalidation_epoch);
         }
         return CaptureSafetyUpdateResult::kOk;
       }
@@ -523,7 +557,7 @@ CaptureSafetyUpdateResult CaptureSafetyCore::UpdateUnderLock(
 
   if (admission_stamp_.load(std::memory_order_acquire) !=
       ticket.admission_stamp) {
-    return CaptureSafetyUpdateResult::kRevokedDuringUpdate;
+    return admission_mismatch_result();
   }
 
   if (!AdvanceGenerationUnderLock()) {
@@ -540,22 +574,27 @@ CaptureSafetyUpdateResult CaptureSafetyCore::UpdateUnderLock(
     runtime_policy_revision_ = revision;
   }
   revoked_ = !authorization.target.has_value() ||
-             !IsFullyAllowed(authorization.privacy);
+             !fully_allowed;
   if (authorization.target.has_value()) {
     last_target_ = authorization.target;
     maximum_target_epoch_ = authorization.target->target_epoch;
   }
   PublishObservableUnderLock();
   *persistence_generation = persistence_generation_;
+  if (!legacy_update && revoked_) {
+    ConfirmCallbackInvalidationUnderLock(
+        ticket.callback_invalidation_epoch);
+  }
   if (!revoked_) {
-    uint64_t expected = ticket.admission_stamp;
-    if (!admission_stamp_.compare_exchange_strong(
-            expected,
-            ticket.admission_stamp | 1U,
-            std::memory_order_acq_rel,
-            std::memory_order_acquire)) {
-      return CaptureSafetyUpdateResult::kRevokedDuringUpdate;
+    if (authorization_commit_hook_) {
+      authorization_commit_hook_();
     }
+    uint64_t expected = ticket.admission_stamp;
+    static_cast<void>(admission_stamp_.compare_exchange_strong(
+        expected,
+        ticket.admission_stamp | 1U,
+        std::memory_order_acq_rel,
+        std::memory_order_acquire));
   }
   return CaptureSafetyUpdateResult::kOk;
 }
@@ -571,14 +610,44 @@ CaptureSafetyUpdateTicket CaptureSafetyCore::CloseAdmission() noexcept {
             next,
             std::memory_order_acq_rel,
             std::memory_order_relaxed)) {
-      return CaptureSafetyUpdateTicket{next, admission_was_open};
+      return CaptureSafetyUpdateTicket{
+          next,
+          admission_was_open,
+          callback_invalidation_epoch_.load(std::memory_order_acquire)};
     }
   }
   const bool admission_was_open = (current & 1U) != 0;
   if (admission_was_open) {
     admission_stamp_.store(current & ~uint64_t{1}, std::memory_order_release);
   }
-  return CaptureSafetyUpdateTicket{0, admission_was_open};
+  return CaptureSafetyUpdateTicket{
+      0,
+      admission_was_open,
+      callback_invalidation_epoch_.load(std::memory_order_acquire)};
+}
+
+uint64_t CaptureSafetyCore::AdvanceCallbackInvalidationEpoch() noexcept {
+  uint64_t current =
+      callback_invalidation_epoch_.load(std::memory_order_relaxed);
+  while (current != std::numeric_limits<uint64_t>::max()) {
+    const uint64_t next = current + 1U;
+    if (callback_invalidation_epoch_.compare_exchange_weak(
+            current,
+            next,
+            std::memory_order_acq_rel,
+            std::memory_order_relaxed)) {
+      return next;
+    }
+  }
+  callback_invalidation_exhausted_.store(true, std::memory_order_release);
+  return 0;
+}
+
+void CaptureSafetyCore::ConfirmCallbackInvalidationUnderLock(
+    uint64_t invalidation_epoch) {
+  if (invalidation_epoch > confirmed_callback_invalidation_epoch_) {
+    confirmed_callback_invalidation_epoch_ = invalidation_epoch;
+  }
 }
 
 bool CaptureSafetyCore::AdvanceGenerationUnderLock() {

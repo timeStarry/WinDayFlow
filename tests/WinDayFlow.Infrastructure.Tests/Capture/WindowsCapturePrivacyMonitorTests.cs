@@ -187,6 +187,187 @@ public sealed class WindowsCapturePrivacyMonitorTests
     }
 
     [Fact]
+    public async Task DisplayTopologyChangeInvalidatesTargetContinuityAndPublishesOnlyTheNewGeneration()
+    {
+        var sink = new FakePrivacySignalSink();
+        var sampler = new FakePrivacySampler(
+            static (call, _) => Task.FromResult(CreateObservation(
+                checked((ulong)call),
+                displayKey: $@"\\.\DISPLAY{call}")));
+        var source = new FakeEventSource();
+        var monitor = new WindowsCapturePrivacyMonitor(sink, sampler, source);
+
+        await monitor.StartAsync();
+        _ = await sink.ReadUpdateAsync().WaitAsync(Timeout);
+
+        source.EmitChange(WindowsCaptureWinEventChange.DisplayTopologyChanged);
+
+        var update = await sink.ReadUpdateAsync().WaitAsync(Timeout);
+        Assert.Equal(2, update.Generation);
+        Assert.Equal<ulong>(2, update.Signals.Target.TargetEpoch);
+        Assert.Equal(2, sampler.InvalidationCount);
+        Assert.Equal(2, sampler.SampleCount);
+        Assert.True(monitor.ObservedInvalidationReasons.HasFlag(
+            WindowsCapturePrivacyInvalidationReason.DisplayTopologyChanged));
+        await monitor.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task SessionUnavailableHoldBlocksSamplingUntilAnAvailableEventIsReverified()
+    {
+        var sink = new FakePrivacySignalSink();
+        var sampler = new FakePrivacySampler(
+            static (call, _) => Task.FromResult(CreateObservation(
+                checked((ulong)call))));
+        var source = new FakeEventSource();
+        var monitor = new WindowsCapturePrivacyMonitor(sink, sampler, source);
+
+        await monitor.StartAsync();
+        _ = await sink.ReadUpdateAsync().WaitAsync(Timeout);
+        source.EmitChange(WindowsCaptureWinEventChange.SessionUnavailable);
+
+        var unavailable = await sink.ReadUpdateAsync().WaitAsync(Timeout);
+        Assert.Equal(2, unavailable.Generation);
+        Assert.Same(NativeCapturePrivacySignals.FailClosed, unavailable.Signals);
+        Assert.Equal(1, sampler.SampleCount);
+        Assert.True(monitor.ActiveHolds.HasFlag(
+            WindowsCapturePrivacyHold.SessionUnavailable));
+
+        source.EmitChange(WindowsCaptureWinEventChange.SessionChanged);
+        var changedWhileUnavailable = await sink.ReadUpdateAsync().WaitAsync(Timeout);
+        Assert.Equal(3, changedWhileUnavailable.Generation);
+        Assert.Same(
+            NativeCapturePrivacySignals.FailClosed,
+            changedWhileUnavailable.Signals);
+        Assert.Equal(1, sampler.SampleCount);
+
+        source.EmitChange(WindowsCaptureWinEventChange.SessionAvailable);
+        var recovered = await sink.ReadUpdateAsync().WaitAsync(Timeout);
+        Assert.Equal(4, recovered.Generation);
+        Assert.Equal<ulong>(2, recovered.Signals.Target.TargetEpoch);
+        Assert.Equal(2, sampler.SampleCount);
+        Assert.Equal(WindowsCapturePrivacyHold.None, monitor.ActiveHolds);
+        Assert.True(monitor.ObservedInvalidationReasons.HasFlag(
+            WindowsCapturePrivacyInvalidationReason.SessionUnavailable));
+        Assert.True(monitor.ObservedInvalidationReasons.HasFlag(
+            WindowsCapturePrivacyInvalidationReason.SessionAvailable));
+        await monitor.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task PowerSuspendHoldSurvivesOtherEventsAndResumeRequiresANewBarrier()
+    {
+        var sink = new FakePrivacySignalSink();
+        var sampler = new FakePrivacySampler(
+            static (call, _) => Task.FromResult(CreateObservation(
+                checked((ulong)call))));
+        var source = new FakeEventSource();
+        var monitor = new WindowsCapturePrivacyMonitor(sink, sampler, source);
+
+        await monitor.StartAsync();
+        _ = await sink.ReadUpdateAsync().WaitAsync(Timeout);
+        source.EmitChange(WindowsCaptureWinEventChange.PowerSuspending);
+
+        var suspended = await sink.ReadUpdateAsync().WaitAsync(Timeout);
+        Assert.Equal(2, suspended.Generation);
+        Assert.Same(NativeCapturePrivacySignals.FailClosed, suspended.Signals);
+        Assert.Equal(1, sampler.SampleCount);
+        Assert.True(monitor.ActiveHolds.HasFlag(
+            WindowsCapturePrivacyHold.PowerSuspended));
+
+        source.EmitChange(WindowsCaptureWinEventChange.DisplayTopologyChanged);
+        var topologyWhileSuspended = await sink.ReadUpdateAsync().WaitAsync(Timeout);
+        Assert.Equal(3, topologyWhileSuspended.Generation);
+        Assert.Same(
+            NativeCapturePrivacySignals.FailClosed,
+            topologyWhileSuspended.Signals);
+        Assert.Equal(1, sampler.SampleCount);
+
+        source.EmitChange(WindowsCaptureWinEventChange.PowerResumed);
+        var resumed = await sink.ReadUpdateAsync().WaitAsync(Timeout);
+        Assert.Equal(4, resumed.Generation);
+        Assert.Equal<ulong>(2, resumed.Signals.Target.TargetEpoch);
+        Assert.Equal(2, sampler.SampleCount);
+        Assert.Equal(WindowsCapturePrivacyHold.None, monitor.ActiveHolds);
+        Assert.Contains(2L, sink.BarrierGenerations);
+        Assert.Contains(4L, sink.BarrierGenerations);
+        await monitor.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task SuspendDuringSamplingMakesTheOldAllowStaleBeforePublishingFailClosed()
+    {
+        var sampleStarted = CreateCompletionSource();
+        var releaseSample = CreateCompletionSource();
+        var sink = new FakePrivacySignalSink();
+        var sampler = new FakePrivacySampler(async (call, cancellationToken) =>
+        {
+            if (call == 1)
+            {
+                sampleStarted.TrySetResult();
+                await releaseSample.Task.WaitAsync(cancellationToken);
+            }
+
+            return CreateObservation(checked((ulong)call));
+        });
+        var source = new FakeEventSource();
+        var monitor = new WindowsCapturePrivacyMonitor(sink, sampler, source);
+
+        await monitor.StartAsync();
+        await sampleStarted.Task.WaitAsync(Timeout);
+        source.EmitChange(WindowsCaptureWinEventChange.PowerSuspending);
+        releaseSample.TrySetResult();
+
+        var suspended = await sink.ReadUpdateAsync().WaitAsync(Timeout);
+        Assert.Equal(2, suspended.Generation);
+        Assert.Same(NativeCapturePrivacySignals.FailClosed, suspended.Signals);
+        Assert.Equal([2L], sink.UpdateAttemptGenerations);
+        Assert.Equal(1, sampler.SampleCount);
+
+        source.EmitChange(WindowsCaptureWinEventChange.PowerResumed);
+        var resumed = await sink.ReadUpdateAsync().WaitAsync(Timeout);
+        Assert.Equal(3, resumed.Generation);
+        Assert.Equal<ulong>(2, resumed.Signals.Target.TargetEpoch);
+        Assert.Equal(2, sampler.SampleCount);
+        await monitor.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task SessionAndPowerHoldsRecoverIndependently()
+    {
+        var sink = new FakePrivacySignalSink();
+        var sampler = new FakePrivacySampler(
+            static (call, _) => Task.FromResult(CreateObservation(
+                checked((ulong)call))));
+        var source = new FakeEventSource();
+        var monitor = new WindowsCapturePrivacyMonitor(sink, sampler, source);
+
+        await monitor.StartAsync();
+        _ = await sink.ReadUpdateAsync().WaitAsync(Timeout);
+        source.EmitChange(WindowsCaptureWinEventChange.SessionUnavailable);
+        _ = await sink.ReadUpdateAsync().WaitAsync(Timeout);
+        source.EmitChange(WindowsCaptureWinEventChange.PowerSuspending);
+        _ = await sink.ReadUpdateAsync().WaitAsync(Timeout);
+
+        source.EmitChange(WindowsCaptureWinEventChange.SessionAvailable);
+        var sessionOnlyRecovery = await sink.ReadUpdateAsync().WaitAsync(Timeout);
+        Assert.Same(
+            NativeCapturePrivacySignals.FailClosed,
+            sessionOnlyRecovery.Signals);
+        Assert.Equal(
+            WindowsCapturePrivacyHold.PowerSuspended,
+            monitor.ActiveHolds);
+        Assert.Equal(1, sampler.SampleCount);
+
+        source.EmitChange(WindowsCaptureWinEventChange.PowerResumed);
+        var fullyRecovered = await sink.ReadUpdateAsync().WaitAsync(Timeout);
+        Assert.Equal<ulong>(2, fullyRecovered.Signals.Target.TargetEpoch);
+        Assert.Equal(WindowsCapturePrivacyHold.None, monitor.ActiveHolds);
+        Assert.Equal(2, sampler.SampleCount);
+        await monitor.DisposeAsync();
+    }
+
+    [Fact]
     public async Task EventDuringSampleDropsTheOldAtomicObservation()
     {
         var firstSampleStarted = CreateCompletionSource();

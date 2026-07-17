@@ -59,6 +59,7 @@ struct CaptureCommandAdmission {
 
 using CommandAdmissionNonceGenerator =
     std::function<bool(uint64_t* nonce_low, uint64_t* nonce_high)>;
+using AuthorizationCommitHook = std::function<void()>;
 
 enum class CaptureCommandAdmissionResult {
   kOk,
@@ -72,6 +73,7 @@ enum class CaptureCommandAdmissionResult {
 struct CaptureSafetyUpdateTicket {
   uint64_t admission_stamp = 0;
   bool admission_was_open = false;
+  uint64_t callback_invalidation_epoch = 0;
 };
 
 struct CaptureSafetyObservableSnapshot {
@@ -88,6 +90,7 @@ enum class CaptureSafetyUpdateResult {
   kPolicyRevisionGap,
   kGenerationExhausted,
   kRevokedDuringUpdate,
+  kAuthorizationSuperseded,
 };
 
 class PersistencePermit {
@@ -149,7 +152,9 @@ class CaptureSafetyCore {
   CaptureSafetyCore();
   CaptureSafetyCore(uint64_t instance_epoch,
                      uint64_t initial_persistence_generation,
-                     CommandAdmissionNonceGenerator nonce_generator = {});
+                     CommandAdmissionNonceGenerator nonce_generator = {},
+                     uint64_t initial_admission_stamp = 2,
+                     AuthorizationCommitHook authorization_commit_hook = {});
 
   CaptureSafetyUpdateResult UpdateRuntimeAuthorization(
       const RuntimeAuthorization& authorization,
@@ -158,6 +163,7 @@ class CaptureSafetyCore {
       const PrivacyContext& context,
       uint64_t* persistence_generation);
   CaptureSafetyUpdateTicket BeginAuthorizationUpdate() noexcept;
+  uint64_t InvalidateAuthorizationAdmission() noexcept;
   CaptureSafetyUpdateResult CompleteRuntimeAuthorization(
       const CaptureSafetyUpdateTicket& ticket,
       const RuntimeAuthorization& authorization,
@@ -206,6 +212,8 @@ class CaptureSafetyCore {
       const CaptureSafetyUpdateTicket& ticket,
       uint64_t* persistence_generation);
   CaptureSafetyUpdateTicket CloseAdmission() noexcept;
+  uint64_t AdvanceCallbackInvalidationEpoch() noexcept;
+  void ConfirmCallbackInvalidationUnderLock(uint64_t invalidation_epoch);
   void PublishObservableUnderLock();
   bool AdvanceGenerationUnderLock();
   void RevokeStateUnderLock();
@@ -232,11 +240,15 @@ class CaptureSafetyCore {
   bool revoked_ = true;
   bool legacy_tainted_ = false;
   bool generation_exhausted_ = false;
-  std::atomic<uint64_t> admission_stamp_{2};
+  std::atomic<uint64_t> admission_stamp_;
+  std::atomic<uint64_t> callback_invalidation_epoch_{0};
+  std::atomic<bool> callback_invalidation_exhausted_{false};
+  uint64_t confirmed_callback_invalidation_epoch_ = 0;
   // Command records are always locked before the shared safety gate.
   mutable std::mutex command_mutex_;
   mutable std::optional<IssuedCommandAdmission> issued_command_admission_;
   CommandAdmissionNonceGenerator nonce_generator_;
+  AuthorizationCommitHook authorization_commit_hook_;
   mutable std::mutex observable_mutex_;
   CaptureSafetyObservableSnapshot observable_{1, 0};
 };

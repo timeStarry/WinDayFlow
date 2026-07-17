@@ -18,6 +18,7 @@ public enum NativeCaptureCapabilities : ulong
     CommandAdmission = 1UL << 8,
     DisplayScopedAuthorization = 1UL << 9,
     DisplayBoundCommandAdmission = 1UL << 10,
+    CallbackTimeAuthorizationInvalidation = 1UL << 11,
 }
 
 public enum NativeCapturePolicyDecision
@@ -314,9 +315,16 @@ public static class NativeCaptureAbiContract
         | NativeCaptureCapabilities.PersistenceGenerationBarrier
         | NativeCaptureCapabilities.DeterministicStop;
 
-    public const NativeCaptureCapabilities RuntimeOwnerCapabilities =
+    public const NativeCaptureCapabilities DisplayScopedAuthorizationCapabilities =
         RuntimeSafetyCapabilities
-        | NativeCaptureCapabilities.DisplayScopedAuthorization
+        | NativeCaptureCapabilities.DisplayScopedAuthorization;
+
+    public const NativeCaptureCapabilities CallbackSafeAuthorizationCapabilities =
+        DisplayScopedAuthorizationCapabilities
+        | NativeCaptureCapabilities.CallbackTimeAuthorizationInvalidation;
+
+    public const NativeCaptureCapabilities RuntimeOwnerCapabilities =
+        CallbackSafeAuthorizationCapabilities
         | NativeCaptureCapabilities.DisplayBoundCommandAdmission;
 
     public const NativeCaptureCapabilities SafeScreenCaptureCapabilities =

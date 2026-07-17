@@ -23,6 +23,8 @@ internal sealed class NativeCaptureBackend
     private readonly object _pumpStopSync = new();
     private readonly object _shutdownSync = new();
     private readonly object _persistenceBoundarySync = new();
+    private readonly object _callbackOperationSync = new();
+    private readonly object _callbackNativeCallSync = new();
     private readonly object _disposeOperationSync = new();
     private readonly object _destroyOperationSync = new();
     private readonly INativeCaptureApi _nativeApi;
@@ -43,7 +45,12 @@ internal sealed class NativeCaptureBackend
     private EventHandler<NativeCaptureChunkCommittedEventArgs>? _chunkCommitted;
     private Task? _pumpStopTask;
     private Task? _requestStopTask;
-    private NativePersistenceBoundary _persistenceBoundary = new(0, 0, null);
+    private NativePersistenceBoundary _persistenceBoundary = new(0, 0, null, 0);
+    private long _callbackInvalidationGeneration;
+    private ulong _lastNativeAuthorizationEpoch;
+    private TaskCompletionSource? _callbackOperationsDrained;
+    private int _callbackOperationsInFlight;
+    private bool _callbackOperationsClosed;
     private int _shutdownStarted;
     private TaskCompletionSource? _disposeCompletion;
     private TaskCompletionSource<NativeCaptureResult>? _destroyCompletion;
@@ -105,7 +112,8 @@ internal sealed class NativeCaptureBackend
                 _ = UpdateRuntimeAuthorizationCore(
                     new NativeCaptureRuntimeAuthorization(
                         initialPrivacyContext,
-                        NativeCaptureTargetIdentity.Unknown));
+                        NativeCaptureTargetIdentity.Unknown),
+                    expectedCallbackInvalidationGeneration: 0);
             }
             else
             {
@@ -130,13 +138,9 @@ internal sealed class NativeCaptureBackend
         == NativeCaptureAbiContract.SafeScreenCaptureCapabilities;
 
     public bool SupportsRuntimeAuthorization =>
-        (Capabilities & (
-            NativeCaptureCapabilities.TargetScopedAuthorization
-            | NativeCaptureCapabilities.PersistenceGenerationBarrier
-            | NativeCaptureCapabilities.DisplayScopedAuthorization))
-        == (NativeCaptureCapabilities.TargetScopedAuthorization
-            | NativeCaptureCapabilities.PersistenceGenerationBarrier
-            | NativeCaptureCapabilities.DisplayScopedAuthorization);
+        (Capabilities
+            & NativeCaptureAbiContract.CallbackSafeAuthorizationCapabilities)
+        == NativeCaptureAbiContract.CallbackSafeAuthorizationCapabilities;
 
     public bool SupportsCommandAdmission =>
         (Capabilities & NativeCaptureAbiContract.RuntimeOwnerCapabilities)
@@ -144,6 +148,9 @@ internal sealed class NativeCaptureBackend
 
     internal bool IsShutdownStarted =>
         Volatile.Read(ref _shutdownStarted) != 0;
+
+    internal long CallbackInvalidationGeneration =>
+        Volatile.Read(ref _callbackInvalidationGeneration);
 
     public CaptureStatus CurrentStatus
     {
@@ -381,18 +388,84 @@ internal sealed class NativeCaptureBackend
         }
     }
 
+    public long InvalidateRuntimeAuthorization()
+    {
+        EnsureRuntimeAuthorizationCapability();
+        EnterCallbackOperation();
+        try
+        {
+            var generation = Interlocked.Increment(
+                ref _callbackInvalidationGeneration);
+            InvalidatePersistenceBoundary();
+
+            lock (_callbackNativeCallSync)
+            {
+                NativeCaptureResult result;
+                ulong authorizationEpoch;
+                try
+                {
+                    result = _nativeApi.InvalidateRuntimeAuthorization(
+                        _handle,
+                        out authorizationEpoch);
+                }
+                finally
+                {
+                    InvalidatePersistenceBoundary();
+                }
+
+                ThrowForResult(result, "invalidate_runtime_authorization");
+                if (generation <= 0)
+                {
+                    throw new InvalidOperationException(
+                        "The managed callback invalidation generation has been exhausted; the native handle must be recreated.");
+                }
+
+                ValidateAndPublishNativeAuthorizationEpoch(authorizationEpoch);
+            }
+
+            return generation;
+        }
+        finally
+        {
+            ExitCallbackOperation();
+        }
+    }
+
     public async Task<ulong> UpdateRuntimeAuthorizationAsync(
         NativeCaptureRuntimeAuthorization authorization,
         CancellationToken cancellationToken = default)
     {
+        var update = await UpdateRuntimeAuthorizationAsync(
+                authorization,
+                CallbackInvalidationGeneration,
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (update.WasSuperseded)
+        {
+            throw new CaptureRuntimeAdmissionRejectedException();
+        }
+
+        return update.PersistenceGeneration;
+    }
+
+    public async Task<NativeCaptureAuthorizationUpdateResult>
+        UpdateRuntimeAuthorizationAsync(
+        NativeCaptureRuntimeAuthorization authorization,
+        long expectedCallbackInvalidationGeneration,
+        CancellationToken cancellationToken = default)
+    {
         ArgumentNullException.ThrowIfNull(authorization);
+        ArgumentOutOfRangeException.ThrowIfNegative(
+            expectedCallbackInvalidationGeneration);
         EnsureRuntimeAuthorizationCapability();
         await EnterLifecycleAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             ThrowIfDisposed();
             ThrowIfShuttingDown();
-            return UpdateRuntimeAuthorizationCore(authorization);
+            return UpdateRuntimeAuthorizationCore(
+                authorization,
+                expectedCallbackInvalidationGeneration);
         }
         finally
         {
@@ -455,6 +528,7 @@ internal sealed class NativeCaptureBackend
         }
 
         Interlocked.Exchange(ref _shutdownStarted, 1);
+        CloseCallbackOperationsAsync().GetAwaiter().GetResult();
 
         if (SupportsRuntimeAuthorization)
         {
@@ -584,7 +658,11 @@ internal sealed class NativeCaptureBackend
 
                 Volatile.Write(
                     ref _persistenceBoundary,
-                    new NativePersistenceBoundary(persistenceGeneration, 0, null));
+                    new NativePersistenceBoundary(
+                        persistenceGeneration,
+                        0,
+                        null,
+                        CallbackInvalidationGeneration));
                 return persistenceGeneration;
             }
         }
@@ -611,6 +689,9 @@ internal sealed class NativeCaptureBackend
 
     private NativeCaptureResult DestroyForShutdownCore()
     {
+        Interlocked.Exchange(ref _shutdownStarted, 1);
+        CloseCallbackOperationsAsync().GetAwaiter().GetResult();
+
         TaskCompletionSource<NativeCaptureResult>? ownedCompletion = null;
         Task<NativeCaptureResult> completionTask;
         lock (_destroyOperationSync)
@@ -835,14 +916,28 @@ internal sealed class NativeCaptureBackend
             {
                 Volatile.Write(
                     ref _persistenceBoundary,
-                    new NativePersistenceBoundary(0, 0, null));
+                    new NativePersistenceBoundary(
+                        0,
+                        0,
+                        null,
+                        CallbackInvalidationGeneration));
             }
         }
     }
 
-    private unsafe ulong UpdateRuntimeAuthorizationCore(
-        NativeCaptureRuntimeAuthorization authorization)
+    private unsafe NativeCaptureAuthorizationUpdateResult
+        UpdateRuntimeAuthorizationCore(
+        NativeCaptureRuntimeAuthorization authorization,
+        long expectedCallbackInvalidationGeneration)
     {
+        if (expectedCallbackInvalidationGeneration
+            != CallbackInvalidationGeneration)
+        {
+            return new NativeCaptureAuthorizationUpdateResult(
+                Volatile.Read(ref _persistenceBoundary).PersistenceGeneration,
+                NativeCaptureAuthorizationUpdateOutcome.SupersededBeforeCommit);
+        }
+
         var context = authorization.PrivacyContext;
         var target = authorization.Target;
         var targetPresent = target.State == NativeCaptureTargetIdentityState.Present;
@@ -901,12 +996,36 @@ internal sealed class NativeCaptureBackend
 
             lock (_persistenceBoundarySync)
             {
-                ThrowForResult(
-                    _nativeApi.UpdateRuntimeAuthorization(
-                        _handle,
-                        ref nativeAuthorization,
-                        out var persistenceGeneration),
-                    "update_runtime_authorization");
+                if (expectedCallbackInvalidationGeneration
+                    != CallbackInvalidationGeneration)
+                {
+                    return new NativeCaptureAuthorizationUpdateResult(
+                        Volatile.Read(ref _persistenceBoundary)
+                            .PersistenceGeneration,
+                        NativeCaptureAuthorizationUpdateOutcome
+                            .SupersededBeforeCommit);
+                }
+
+                var result = _nativeApi.UpdateRuntimeAuthorization(
+                    _handle,
+                    ref nativeAuthorization,
+                    out var persistenceGeneration);
+                var callbackInvalidated = expectedCallbackInvalidationGeneration
+                    != CallbackInvalidationGeneration;
+                if (result == NativeCaptureResult.AuthorizationSuperseded)
+                {
+                    if (!callbackInvalidated)
+                    {
+                        ThrowForResult(result, "update_runtime_authorization");
+                    }
+
+                    return new NativeCaptureAuthorizationUpdateResult(
+                        persistenceGeneration,
+                        NativeCaptureAuthorizationUpdateOutcome
+                            .SupersededBeforeCommit);
+                }
+
+                ThrowForResult(result, "update_runtime_authorization");
                 if (persistenceGeneration == 0)
                 {
                     throw new InvalidDataException(
@@ -916,10 +1035,26 @@ internal sealed class NativeCaptureBackend
                 var currentBoundary = Volatile.Read(ref _persistenceBoundary);
                 if (persistenceGeneration < currentBoundary.PersistenceGeneration
                     || (persistenceGeneration == currentBoundary.PersistenceGeneration
+                        && !callbackInvalidated
                         && !Equals(currentBoundary.Authorization, authorization)))
                 {
                     throw new InvalidDataException(
                         "The native runtime authorization update returned a regressed or conflicting persistence generation.");
+                }
+
+                if (callbackInvalidated)
+                {
+                    Volatile.Write(
+                        ref _persistenceBoundary,
+                        new NativePersistenceBoundary(
+                            persistenceGeneration,
+                            0,
+                            null,
+                            CallbackInvalidationGeneration));
+                    return new NativeCaptureAuthorizationUpdateResult(
+                        persistenceGeneration,
+                        NativeCaptureAuthorizationUpdateOutcome
+                            .AppliedThenSuperseded);
                 }
 
                 Volatile.Write(
@@ -927,8 +1062,21 @@ internal sealed class NativeCaptureBackend
                     new NativePersistenceBoundary(
                         persistenceGeneration,
                         targetPresent ? target.TargetEpoch : 0,
-                        authorization));
-                return persistenceGeneration;
+                        authorization,
+                        expectedCallbackInvalidationGeneration));
+                if (expectedCallbackInvalidationGeneration
+                    != CallbackInvalidationGeneration)
+                {
+                    InvalidatePersistenceBoundary();
+                    return new NativeCaptureAuthorizationUpdateResult(
+                        persistenceGeneration,
+                        NativeCaptureAuthorizationUpdateOutcome
+                            .AppliedThenSuperseded);
+                }
+
+                return new NativeCaptureAuthorizationUpdateResult(
+                    persistenceGeneration,
+                    NativeCaptureAuthorizationUpdateOutcome.Applied);
             }
         }
         finally
@@ -949,6 +1097,7 @@ internal sealed class NativeCaptureBackend
     private async Task RequestStopForShutdownCoreAsync()
     {
         Interlocked.Exchange(ref _shutdownStarted, 1);
+        await CloseCallbackOperationsAsync().ConfigureAwait(false);
         await EnterLifecycleForShutdownAsync().ConfigureAwait(false);
         try
         {
@@ -1077,7 +1226,9 @@ internal sealed class NativeCaptureBackend
                     || captureEvent.PersistenceGeneration
                         != persistenceBoundary.PersistenceGeneration
                     || captureEvent.TargetEpoch
-                        != persistenceBoundary.TargetEpoch)
+                        != persistenceBoundary.TargetEpoch
+                    || persistenceBoundary.CallbackInvalidationGeneration
+                        != CallbackInvalidationGeneration)
                 {
                     throw new InvalidDataException(
                         "The native committed chunk was not bound to the current persistence generation and capture target.");
@@ -1411,9 +1562,21 @@ internal sealed class NativeCaptureBackend
         }
 
         if (capabilities.HasFlag(
+                NativeCaptureCapabilities.CallbackTimeAuthorizationInvalidation)
+            && (capabilities
+                & NativeCaptureAbiContract.DisplayScopedAuthorizationCapabilities)
+                != NativeCaptureAbiContract.DisplayScopedAuthorizationCapabilities)
+        {
+            return "Native callback-time authorization invalidation requires the complete display-scoped runtime safety set.";
+        }
+
+        if (capabilities.HasFlag(
                 NativeCaptureCapabilities.DisplayBoundCommandAdmission)
-            && (capabilities & NativeCaptureAbiContract.RuntimeOwnerCapabilities)
-                != NativeCaptureAbiContract.RuntimeOwnerCapabilities)
+            && (capabilities
+                & (NativeCaptureAbiContract.DisplayScopedAuthorizationCapabilities
+                    | NativeCaptureCapabilities.DisplayBoundCommandAdmission))
+                != (NativeCaptureAbiContract.DisplayScopedAuthorizationCapabilities
+                    | NativeCaptureCapabilities.DisplayBoundCommandAdmission))
         {
             return "Native display-bound command admission requires the complete display-scoped runtime-owner safety set.";
         }
@@ -1461,7 +1624,7 @@ internal sealed class NativeCaptureBackend
         if (!SupportsRuntimeAuthorization)
         {
             throw new NotSupportedException(
-                "The native capture binary does not provide display-scoped runtime authorization and a persistence generation barrier.");
+                "The native capture binary does not provide display-scoped runtime authorization, callback-time invalidation, and a persistence generation barrier.");
         }
     }
 
@@ -1523,6 +1686,116 @@ internal sealed class NativeCaptureBackend
         throw new NativeCaptureException(result, operation);
     }
 
+    private void InvalidatePersistenceBoundary()
+    {
+        while (true)
+        {
+            var current = Volatile.Read(ref _persistenceBoundary);
+            if (current.TargetEpoch == 0 && current.Authorization is null)
+            {
+                return;
+            }
+
+            var invalidated = new NativePersistenceBoundary(
+                current.PersistenceGeneration,
+                0,
+                null,
+                CallbackInvalidationGeneration);
+            if (ReferenceEquals(
+                    Interlocked.CompareExchange(
+                        ref _persistenceBoundary,
+                        invalidated,
+                        current),
+                    current))
+            {
+                return;
+            }
+        }
+    }
+
+    private void EnterCallbackOperation()
+    {
+        lock (_callbackOperationSync)
+        {
+            ThrowIfDisposed();
+            if (_callbackOperationsClosed
+                || Volatile.Read(ref _shutdownStarted) != 0)
+            {
+                throw new InvalidOperationException(
+                    "The native capture backend is shutting down.");
+            }
+
+            if (_callbackOperationsInFlight == int.MaxValue)
+            {
+                throw new InvalidOperationException(
+                    "The native callback operation count has been exhausted.");
+            }
+
+            ++_callbackOperationsInFlight;
+        }
+    }
+
+    private void ExitCallbackOperation()
+    {
+        TaskCompletionSource? drained = null;
+        lock (_callbackOperationSync)
+        {
+            Debug.Assert(_callbackOperationsInFlight > 0);
+            --_callbackOperationsInFlight;
+            if (_callbackOperationsInFlight == 0)
+            {
+                drained = _callbackOperationsDrained;
+                _callbackOperationsDrained = null;
+            }
+        }
+
+        drained?.TrySetResult();
+    }
+
+    private Task CloseCallbackOperationsAsync()
+    {
+        lock (_callbackOperationSync)
+        {
+            _callbackOperationsClosed = true;
+            if (_callbackOperationsInFlight == 0)
+            {
+                return Task.CompletedTask;
+            }
+
+            _callbackOperationsDrained ??= new TaskCompletionSource(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            return _callbackOperationsDrained.Task;
+        }
+    }
+
+    private void ValidateAndPublishNativeAuthorizationEpoch(ulong authorizationEpoch)
+    {
+        if (authorizationEpoch == 0 || (authorizationEpoch & 1UL) != 0)
+        {
+            throw new InvalidDataException(
+                "The native callback invalidation returned an invalid authorization epoch.");
+        }
+
+        while (true)
+        {
+            var current = Volatile.Read(ref _lastNativeAuthorizationEpoch);
+            if (authorizationEpoch <= current)
+            {
+                throw new InvalidDataException(
+                    "The native callback invalidation authorization epoch did not advance.");
+            }
+
+            var observed = Interlocked.CompareExchange(
+                ref _lastNativeAuthorizationEpoch,
+                authorizationEpoch,
+                current);
+            if (observed == current)
+            {
+                return;
+            }
+        }
+    }
+
     private void ThrowIfDisposed()
     {
         lock (_statusSync)
@@ -1560,5 +1833,6 @@ internal sealed class NativeCaptureBackend
     private sealed record NativePersistenceBoundary(
         ulong PersistenceGeneration,
         ulong TargetEpoch,
-        NativeCaptureRuntimeAuthorization? Authorization);
+        NativeCaptureRuntimeAuthorization? Authorization,
+        long CallbackInvalidationGeneration);
 }

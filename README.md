@@ -62,12 +62,15 @@ contains:
   tested shared/unique write permits; a native-issued 64-byte, single-use,
   display-bound command admission additionally binds Start/Resume to the current
   native instance, runtime revision, persistence generation, target epoch, and
-  runtime owner epoch;
+  runtime owner epoch; capability bit 11 and a dedicated C ABI export now let a
+  Windows callback close native command and persistence admission immediately,
+  without waiting for an already-held persistence permit;
 - a managed P/Invoke adapter with x64 ABI layout checks, safe-handle ownership,
   bounded event polling, privacy-revision updates, complete display-scoped
   safety-capability negotiation, issuer-bound opaque admission stamps,
-  explicit asynchronous
-  owner/quiesce behavior, and real-DLL integration tests;
+  strict callback-epoch advancement, a generation-bound local persistence
+  boundary, explicit pre-commit versus post-commit supersede outcomes,
+  asynchronous owner/quiesce behavior, and real-DLL integration tests;
 - a synchronous, fail-closed Windows foreground-target verifier foundation that
   double-checks the foreground HWND, owner TID/PID, process creation time and
   liveness, window title, and monitor selection; production title reads share
@@ -80,15 +83,18 @@ contains:
   obtains target epochs from a process-wide monotonic source across
   target/display changes, Unknown gaps, and verifier recreation, and redacts
   observed values from diagnostic text;
-- an inactive event-driven Windows privacy-monitor foundation with a dedicated
-  WinEvent message thread, narrow foreground/desktop/window hooks, and an exact
-  `0x800B..0x800C` location/name range; a qualifying nonzero-HWND
+- an inactive event-driven Windows privacy-monitor foundation with one owner
+  thread and message pump, a never-shown top-level HWND, narrow
+  foreground/desktop/window hooks, `WM_DISPLAYCHANGE`, current-session WTS,
+  suspend/resume notifications, and an exact `0x800B..0x800C` location/name
+  range; a qualifying nonzero-HWND
   `OBJID_WINDOW`/`CHILDID_SELF` location event conservatively invalidates the
   managed latch, observation generation, and target continuity, but does not
   prove that the window is top-level or foreground; the monitor also provides a
   forced native FailClosed barrier, latest-generation worker coalescing,
-  generation-bound publication, stale-Allow compensation, bounded teardown,
-  and value-only sanitized fault contracts;
+  generation-bound publication, independent session-unavailable and
+  power-suspended holds, stale-Allow compensation, bounded teardown, and
+  value-only sanitized fault contracts;
 - a tested settings commit barrier, process-local capture latch with monotonic
   invalidation generations, sticky automatic-stop handling, a pure Windows
   privacy-policy composer, and a native coordinator whose runtime generations
@@ -112,16 +118,18 @@ queue and providers, generated Daily and Weekly views, journal editing, and
 timeline-grounded chat are **not integrated yet**. The foreground verifier and
 event monitor are inactive foundations, not a live activation claim:
 image-bound publisher-signer verification, unique hosted-app attribution,
-display-topology/WTS/power/resume/presentation/storage signals, callback-time
-native topology invalidation, writer-side DXGI binding revalidation and
-generation/permit enforcement, and the real DXGI/WIC/Media Foundation writer
-remain open gates. The bounded title-read, conservative window-location
-invalidation, display-scoped authorization, and strict no-fallback DXGI output
-resolver gates are closed; they do not prove foreground/top-level identity or
-that a real writer revalidates the resolved output before and after acquisition.
-The safety core proves the synthetic authorization,
-persistence-permit, and stop/join/destroy boundary; it does not prove that a
-real frame or metadata writer uses that boundary.
+presentation notifications, periodic storage refresh, writer-side DXGI binding
+and generation/permit revalidation, and the real DXGI/WIC/Media Foundation
+writer remain open gates. The bounded title-read, conservative window-location
+invalidation, display-topology/current-session/power event source,
+display-scoped authorization, callback-time native admission closure, and
+strict no-fallback DXGI output resolver gates are closed; they do not prove
+foreground/top-level identity or that a real writer revalidates the resolved
+output before and after acquisition. Callback closure denies new native permits
+and command admission, but it cannot interrupt a permit already held by a
+writer. The following generation-bound Block acknowledgement drains that
+boundary; a real writer must still revalidate at every acquisition, encode,
+metadata, rename, and committed-event phase.
 Owner-bound Start/Resume admission is implemented:
 the Application service obtains a single-use opaque stamp, rechecks persisted
 and runtime authorization, and the native owner atomically consumes the stamp
@@ -159,6 +167,10 @@ gates closed by that implementation.
 The [display-scoped authorization and DXGI output-resolution ADR](docs/adr/0008-display-scoped-authorization-and-dxgi-output-resolution.md)
 records the compatible 224-byte ABI tail, display-bound safety identity,
 capability dependencies, and strict unique-output resolver contract.
+The [Windows lifecycle invalidation and callback-time authorization ADR](docs/adr/0009-windows-lifecycle-invalidation-and-callback-time-authorization-closure.md)
+records the hidden-window system notification source, session and power holds,
+native callback gate, supersede outcomes, and Block-before-Allow recovery
+contract.
 
 ## Platform Support
 

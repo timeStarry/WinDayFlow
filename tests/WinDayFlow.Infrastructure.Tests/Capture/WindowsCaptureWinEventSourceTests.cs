@@ -24,14 +24,45 @@ public sealed class WindowsCaptureWinEventSourceTests
         Assert.Equal(0, WindowsCaptureWinEventSource.ObjectIdWindow);
         Assert.Equal(0, WindowsCaptureWinEventSource.ChildIdSelf);
         Assert.Equal<uint>(0, WindowsCaptureWinEventSource.WinEventOutOfContext);
+        Assert.Equal<uint>(0x007E, WindowsCaptureWinEventSource.WindowMessageDisplayChange);
+        Assert.Equal<uint>(0x0218, WindowsCaptureWinEventSource.WindowMessagePowerBroadcast);
+        Assert.Equal<uint>(0x02B1, WindowsCaptureWinEventSource.WindowMessageWtsSessionChange);
+        Assert.Equal<uint>(0, PInvokeWindowsCaptureWinEventNativeApi.WtsNotifyForThisSession);
+        Assert.Equal<uint>(0, PInvokeWindowsCaptureWinEventNativeApi.PowerDeviceNotifyWindowHandle);
+        Assert.Equal<uint>(0x80000000, PInvokeWindowsCaptureWinEventNativeApi.HiddenWindowStyle);
+        Assert.Equal<uint>(
+            0x08000080,
+            PInvokeWindowsCaptureWinEventNativeApi.HiddenWindowExtendedStyle);
+        Assert.Equal<nint>(0, PInvokeWindowsCaptureWinEventNativeApi.HiddenWindowParent);
 
         var callbackConvention = typeof(WindowsCaptureWinEventProc)
             .GetCustomAttribute<UnmanagedFunctionPointerAttribute>();
         Assert.NotNull(callbackConvention);
         Assert.Equal(CallingConvention.Winapi, callbackConvention.CallingConvention);
+        var windowProcedureConvention = typeof(WindowsCaptureWindowProc)
+            .GetCustomAttribute<UnmanagedFunctionPointerAttribute>();
+        Assert.NotNull(windowProcedureConvention);
+        Assert.Equal(
+            CallingConvention.Winapi,
+            windowProcedureConvention.CallingConvention);
+        Assert.Equal(
+            "user32.dll",
+            GetDllImportLibrary(nameof(
+                WindowsCaptureWinEventMethods.RegisterSuspendResumeNotification)));
+        Assert.Equal(
+            "user32.dll",
+            GetDllImportLibrary(nameof(
+                WindowsCaptureWinEventMethods.UnregisterSuspendResumeNotification)));
 
         if (IntPtr.Size == 8)
         {
+            Assert.Equal(80, Marshal.SizeOf<WindowsCaptureWindowClass>());
+            Assert.Equal(8, Marshal.OffsetOf<WindowsCaptureWindowClass>(
+                nameof(WindowsCaptureWindowClass.WindowProcedure)).ToInt32());
+            Assert.Equal(24, Marshal.OffsetOf<WindowsCaptureWindowClass>(
+                nameof(WindowsCaptureWindowClass.Instance)).ToInt32());
+            Assert.Equal(64, Marshal.OffsetOf<WindowsCaptureWindowClass>(
+                nameof(WindowsCaptureWindowClass.ClassName)).ToInt32());
             Assert.Equal(48, Marshal.SizeOf<WindowsCaptureThreadMessage>());
             Assert.Equal(8, OffsetOf(nameof(WindowsCaptureThreadMessage.Message)));
             Assert.Equal(16, OffsetOf(nameof(WindowsCaptureThreadMessage.WParam)));
@@ -42,6 +73,7 @@ public sealed class WindowsCaptureWinEventSourceTests
         }
         else
         {
+            Assert.Equal(48, Marshal.SizeOf<WindowsCaptureWindowClass>());
             Assert.Equal(32, Marshal.SizeOf<WindowsCaptureThreadMessage>());
             Assert.Equal(4, OffsetOf(nameof(WindowsCaptureThreadMessage.Message)));
             Assert.Equal(8, OffsetOf(nameof(WindowsCaptureThreadMessage.WParam)));
@@ -53,7 +85,7 @@ public sealed class WindowsCaptureWinEventSourceTests
     }
 
     [Fact]
-    public void StartRegistersFourNarrowOutOfContextHooksOnTheOwnerThread()
+    public void StartRegistersHooksAndSystemNotificationsOnTheOwnerThread()
     {
         var api = new FakeWindowsCaptureWinEventNativeApi();
         using var source = new WindowsCaptureWinEventSource(api);
@@ -61,6 +93,23 @@ public sealed class WindowsCaptureWinEventSourceTests
         source.Start(_ => { }, _ => { });
 
         Assert.True(api.MessageQueueEnsured);
+        Assert.Equal(
+            [
+                "register-window-class",
+                "create-hidden-window",
+                "register-session",
+                "register-power",
+                "register-hook:1",
+                "register-hook:2",
+                "register-hook:3",
+                "register-hook:4",
+            ],
+            api.RegistrationOperations);
+        Assert.NotNull(api.WindowProcedure);
+        Assert.Equal(4, api.WindowRegistrationThreadIds.Count);
+        Assert.All(
+            api.WindowRegistrationThreadIds,
+            threadId => Assert.Equal(api.HookOwnerThreadId, threadId));
         Assert.Collection(
             api.Registrations,
             registration => AssertRegistration(
@@ -85,6 +134,99 @@ public sealed class WindowsCaptureWinEventSourceTests
         Assert.Equal(new nint[] { 4, 3, 2, 1 }, api.UnhookedHandles);
         Assert.All(
             api.UnhookThreadIds,
+            threadId => Assert.Equal(api.HookOwnerThreadId, threadId));
+        Assert.Equal(
+            [
+                "unhook:4",
+                "unhook:3",
+                "unhook:2",
+                "unhook:1",
+                "unregister-power",
+                "unregister-session",
+                "destroy-window",
+                "unregister-window-class",
+            ],
+            api.CleanupOperations);
+        Assert.All(
+            api.CleanupThreadIds,
+            threadId => Assert.Equal(api.HookOwnerThreadId, threadId));
+    }
+
+    [Fact]
+    public void WindowMessagesMapToValueFreeSystemChangeKinds()
+    {
+        var api = new FakeWindowsCaptureWinEventNativeApi();
+        using var source = new WindowsCaptureWinEventSource(api);
+        var changes = new List<WindowsCaptureWinEventChange>();
+        source.Start(changes.Add, _ => { });
+
+        api.RaiseWindowMessageOnOwnerThread(0x007E, 0, 0);
+        api.RaiseWindowMessageOnOwnerThread(0x02B1, 0x0007, 0);
+        api.RaiseWindowMessageOnOwnerThread(0x02B1, 0x0008, 0);
+        api.RaiseWindowMessageOnOwnerThread(0x02B1, 0x0009, 0);
+        api.RaiseWindowMessageOnOwnerThread(0x0218, 0x0004, 0);
+        api.RaiseWindowMessageOnOwnerThread(0x0218, 0x0012, 0);
+
+        Assert.Equal(
+            [
+                WindowsCaptureWinEventChange.DisplayTopologyChanged,
+                WindowsCaptureWinEventChange.SessionUnavailable,
+                WindowsCaptureWinEventChange.SessionAvailable,
+                WindowsCaptureWinEventChange.SessionChanged,
+                WindowsCaptureWinEventChange.PowerSuspending,
+                WindowsCaptureWinEventChange.PowerResumed,
+            ],
+            changes);
+    }
+
+    [Fact]
+    public void UnknownWindowMessageUsesDefWindowProcWithoutPublishingAChange()
+    {
+        var api = new FakeWindowsCaptureWinEventNativeApi();
+        using var source = new WindowsCaptureWinEventSource(api);
+        var changes = new List<WindowsCaptureWinEventChange>();
+        source.Start(changes.Add, _ => { });
+
+        api.RaiseWindowMessageOnOwnerThread(0x05FF, 123, 456);
+
+        Assert.Empty(changes);
+        var call = Assert.Single(api.DefWindowProcCalls);
+        Assert.Equal(FakeWindowsCaptureWinEventNativeApi.HiddenWindowHandle, call.WindowHandle);
+        Assert.Equal<uint>(0x05FF, call.Message);
+        Assert.Equal<nuint>(123, call.WParam);
+        Assert.Equal<nint>(456, call.LParam);
+    }
+
+    [Theory]
+    [InlineData(SystemRegistrationFailure.WindowClass)]
+    [InlineData(SystemRegistrationFailure.WindowCreation)]
+    [InlineData(SystemRegistrationFailure.Session)]
+    [InlineData(SystemRegistrationFailure.Power)]
+    public void PartialSystemRegistrationFailureRollsBackInReverseOrder(
+        SystemRegistrationFailure failureStage)
+    {
+        var api = new FakeWindowsCaptureWinEventNativeApi
+        {
+            FailWindowClassRegistration =
+                failureStage == SystemRegistrationFailure.WindowClass,
+            FailWindowCreation =
+                failureStage == SystemRegistrationFailure.WindowCreation,
+            FailSessionRegistration =
+                failureStage == SystemRegistrationFailure.Session,
+            FailPowerRegistration =
+                failureStage == SystemRegistrationFailure.Power,
+        };
+        using var source = new WindowsCaptureWinEventSource(api);
+        var faults = new List<WindowsCaptureWinEventSourceFault>();
+
+        Assert.Throws<InvalidOperationException>(() =>
+            source.Start(_ => { }, faults.Add));
+
+        Assert.Contains(ExpectedFault(failureStage), faults);
+        Assert.Equal(ExpectedCleanup(failureStage), api.CleanupOperations);
+        Assert.Empty(api.Registrations);
+        Assert.All(
+            api.CleanupThreadIds,
             threadId => Assert.Equal(api.HookOwnerThreadId, threadId));
     }
 
@@ -237,7 +379,7 @@ public sealed class WindowsCaptureWinEventSourceTests
             source.Start(_ => { }, faults.Enqueue));
 
         Assert.Equal(
-            "The Windows capture WinEvent source could not register its hooks.",
+            "The Windows capture event source could not register every required system notification.",
             failure.Message);
         Assert.Contains(
             WindowsCaptureWinEventSourceFault.HookRegistrationFailed,
@@ -246,6 +388,16 @@ public sealed class WindowsCaptureWinEventSourceTests
         Assert.All(
             api.UnhookThreadIds,
             threadId => Assert.Equal(api.HookOwnerThreadId, threadId));
+        Assert.Equal(
+            [
+                "unhook:2",
+                "unhook:1",
+                "unregister-power",
+                "unregister-session",
+                "destroy-window",
+                "unregister-window-class",
+            ],
+            api.CleanupOperations);
         Assert.False(source.HasRetainedCallbackBridge);
     }
 
@@ -347,6 +499,52 @@ public sealed class WindowsCaptureWinEventSourceTests
     }
 
     [Fact]
+    public void NotificationCleanupFailuresAreReportedAfterTheWindowCallbackIsDetached()
+    {
+        var api = new FakeWindowsCaptureWinEventNativeApi
+        {
+            FailPowerUnregistration = true,
+            FailSessionUnregistration = true,
+        };
+        using var source = new WindowsCaptureWinEventSource(api);
+        var faults = new ConcurrentQueue<WindowsCaptureWinEventSourceFault>();
+        source.Start(_ => { }, faults.Enqueue);
+
+        source.Dispose();
+
+        Assert.Contains(
+            WindowsCaptureWinEventSourceFault.PowerUnregistrationFailed,
+            faults);
+        Assert.Contains(
+            WindowsCaptureWinEventSourceFault.SessionUnregistrationFailed,
+            faults);
+        Assert.False(source.HasRetainedCallbackBridge);
+    }
+
+    [Theory]
+    [InlineData(true, false, (int)WindowsCaptureWinEventSourceFault.WindowDestructionFailed)]
+    [InlineData(false, true, (int)WindowsCaptureWinEventSourceFault.WindowClassUnregistrationFailed)]
+    public void UncertainWindowCallbackCleanupRetainsTheDetachedBridge(
+        bool failWindowDestruction,
+        bool failWindowClassUnregistration,
+        int rawExpectedFault)
+    {
+        var api = new FakeWindowsCaptureWinEventNativeApi
+        {
+            FailWindowDestruction = failWindowDestruction,
+            FailWindowClassUnregistration = failWindowClassUnregistration,
+        };
+        using var source = new WindowsCaptureWinEventSource(api);
+        var faults = new ConcurrentQueue<WindowsCaptureWinEventSourceFault>();
+        source.Start(_ => { }, faults.Enqueue);
+
+        source.Dispose();
+
+        Assert.Contains((WindowsCaptureWinEventSourceFault)rawExpectedFault, faults);
+        Assert.True(source.HasRetainedCallbackBridge);
+    }
+
+    [Fact]
     public void DisposeIsIdempotent()
     {
         var api = new FakeWindowsCaptureWinEventNativeApi();
@@ -407,11 +605,82 @@ public sealed class WindowsCaptureWinEventSourceTests
             Assert.Single(faults));
         Assert.False(api.MessageQueueEnsured);
         Assert.Empty(api.Registrations);
+        Assert.Empty(api.RegistrationOperations);
+    }
+
+    [Fact]
+    public void RealWindowsSystemEventSourceRegistersAndCleansUpWithoutFaults()
+    {
+        if (!OperatingSystem.IsWindowsVersionAtLeast(10, 0, 17763))
+        {
+            return;
+        }
+
+        var faults = new ConcurrentQueue<WindowsCaptureWinEventSourceFault>();
+        using var source = new WindowsCaptureWinEventSource();
+
+        var failure = Record.Exception(() =>
+            source.Start(_ => { }, faults.Enqueue));
+        Assert.True(
+            failure is null,
+            $"System event source startup failed with: {string.Join(", ", faults)}");
+        source.Dispose();
+
+        Assert.Empty(faults);
+        Assert.False(source.HasRetainedCallbackBridge);
+    }
+
+    private static WindowsCaptureWinEventSourceFault ExpectedFault(
+        SystemRegistrationFailure failureStage)
+    {
+        return failureStage switch
+        {
+            SystemRegistrationFailure.WindowClass =>
+                WindowsCaptureWinEventSourceFault.WindowClassRegistrationFailed,
+            SystemRegistrationFailure.WindowCreation =>
+                WindowsCaptureWinEventSourceFault.WindowCreationFailed,
+            SystemRegistrationFailure.Session =>
+                WindowsCaptureWinEventSourceFault.SessionRegistrationFailed,
+            SystemRegistrationFailure.Power =>
+                WindowsCaptureWinEventSourceFault.PowerRegistrationFailed,
+            _ => throw new ArgumentOutOfRangeException(nameof(failureStage)),
+        };
+    }
+
+    private static string[] ExpectedCleanup(
+        SystemRegistrationFailure failureStage)
+    {
+        return failureStage switch
+        {
+            SystemRegistrationFailure.WindowClass => [],
+            SystemRegistrationFailure.WindowCreation =>
+                ["unregister-window-class"],
+            SystemRegistrationFailure.Session =>
+                ["destroy-window", "unregister-window-class"],
+            SystemRegistrationFailure.Power =>
+                [
+                    "unregister-session",
+                    "destroy-window",
+                    "unregister-window-class",
+                ],
+            _ => throw new ArgumentOutOfRangeException(nameof(failureStage)),
+        };
     }
 
     private static int OffsetOf(string fieldName)
     {
         return checked((int)Marshal.OffsetOf<WindowsCaptureThreadMessage>(fieldName));
+    }
+
+    private static string GetDllImportLibrary(string methodName)
+    {
+        var method = typeof(WindowsCaptureWinEventMethods).GetMethod(
+            methodName,
+            BindingFlags.NonPublic | BindingFlags.Static);
+        Assert.NotNull(method);
+        var import = method.GetCustomAttribute<DllImportAttribute>();
+        Assert.NotNull(import);
+        return import.Value;
     }
 
     private static void AssertRegistration(
@@ -441,10 +710,28 @@ public sealed class WindowsCaptureWinEventSourceTests
         uint Flags,
         uint OwnerThreadId);
 
+    private sealed record WindowMessageCall(
+        nint WindowHandle,
+        uint Message,
+        nuint WParam,
+        nint LParam);
+
+    public enum SystemRegistrationFailure
+    {
+        WindowClass,
+        WindowCreation,
+        Session,
+        Power,
+    }
+
     private sealed class FakeWindowsCaptureWinEventNativeApi
         : IWindowsCaptureWinEventNativeApi
     {
         private const uint DispatchCallbackMessage = 0x0401;
+
+        internal const nint HiddenWindowHandle = 0x1001;
+
+        private const nint SuspendResumeRegistrationHandle = 0x2001;
 
         private readonly Channel<QueuedMessage> _messages =
             Channel.CreateUnbounded<QueuedMessage>(new UnboundedChannelOptions
@@ -461,6 +748,22 @@ public sealed class WindowsCaptureWinEventSourceTests
 
         public int? FailHookRegistrationNumber { get; set; }
 
+        public bool FailWindowClassRegistration { get; set; }
+
+        public bool FailWindowCreation { get; set; }
+
+        public bool FailSessionRegistration { get; set; }
+
+        public bool FailPowerRegistration { get; set; }
+
+        public bool FailPowerUnregistration { get; set; }
+
+        public bool FailSessionUnregistration { get; set; }
+
+        public bool FailWindowDestruction { get; set; }
+
+        public bool FailWindowClassUnregistration { get; set; }
+
         public bool RaiseLateCallbackDuringUnhook { get; set; }
 
         public bool DelayPostedMessages { get; set; }
@@ -472,6 +775,18 @@ public sealed class WindowsCaptureWinEventSourceTests
         public List<nint> UnhookedHandles { get; } = [];
 
         public List<uint> UnhookThreadIds { get; } = [];
+
+        public List<string> RegistrationOperations { get; } = [];
+
+        public List<string> CleanupOperations { get; } = [];
+
+        public List<uint> WindowRegistrationThreadIds { get; } = [];
+
+        public List<uint> CleanupThreadIds { get; } = [];
+
+        public List<WindowMessageCall> DefWindowProcCalls { get; } = [];
+
+        public WindowsCaptureWindowProc? WindowProcedure { get; private set; }
 
         public uint HookOwnerThreadId { get; private set; }
 
@@ -494,6 +809,87 @@ public sealed class WindowsCaptureWinEventSourceTests
             MessageQueueEnsured = true;
         }
 
+        public bool RegisterWindowClass(WindowsCaptureWindowProc windowProcedure)
+        {
+            RegistrationOperations.Add("register-window-class");
+            WindowRegistrationThreadIds.Add(CurrentThreadId);
+            WindowProcedure = windowProcedure;
+            return !FailWindowClassRegistration;
+        }
+
+        public nint CreateHiddenWindow()
+        {
+            RegistrationOperations.Add("create-hidden-window");
+            WindowRegistrationThreadIds.Add(CurrentThreadId);
+            return FailWindowCreation ? 0 : HiddenWindowHandle;
+        }
+
+        public bool DestroyWindow(nint windowHandle)
+        {
+            Assert.Equal(HiddenWindowHandle, windowHandle);
+            CleanupOperations.Add("destroy-window");
+            CleanupThreadIds.Add(CurrentThreadId);
+            return !FailWindowDestruction;
+        }
+
+        public bool UnregisterWindowClass()
+        {
+            CleanupOperations.Add("unregister-window-class");
+            CleanupThreadIds.Add(CurrentThreadId);
+            if (!FailWindowClassUnregistration)
+            {
+                WindowProcedure = null;
+            }
+
+            return !FailWindowClassUnregistration;
+        }
+
+        public bool RegisterSessionNotifications(nint windowHandle)
+        {
+            Assert.Equal(HiddenWindowHandle, windowHandle);
+            RegistrationOperations.Add("register-session");
+            WindowRegistrationThreadIds.Add(CurrentThreadId);
+            return !FailSessionRegistration;
+        }
+
+        public bool UnregisterSessionNotifications(nint windowHandle)
+        {
+            Assert.Equal(HiddenWindowHandle, windowHandle);
+            CleanupOperations.Add("unregister-session");
+            CleanupThreadIds.Add(CurrentThreadId);
+            return !FailSessionUnregistration;
+        }
+
+        public nint RegisterSuspendResumeNotifications(nint windowHandle)
+        {
+            Assert.Equal(HiddenWindowHandle, windowHandle);
+            RegistrationOperations.Add("register-power");
+            WindowRegistrationThreadIds.Add(CurrentThreadId);
+            return FailPowerRegistration ? 0 : SuspendResumeRegistrationHandle;
+        }
+
+        public bool UnregisterSuspendResumeNotifications(nint registrationHandle)
+        {
+            Assert.Equal(SuspendResumeRegistrationHandle, registrationHandle);
+            CleanupOperations.Add("unregister-power");
+            CleanupThreadIds.Add(CurrentThreadId);
+            return !FailPowerUnregistration;
+        }
+
+        public nint DefWindowProc(
+            nint windowHandle,
+            uint message,
+            nuint wParam,
+            nint lParam)
+        {
+            DefWindowProcCalls.Add(new WindowMessageCall(
+                windowHandle,
+                message,
+                wParam,
+                lParam));
+            return 0;
+        }
+
         public nint SetWinEventHook(
             uint eventMinimum,
             uint eventMaximum,
@@ -511,6 +907,7 @@ public sealed class WindowsCaptureWinEventSourceTests
             }
 
             var handle = (nint)registrationNumber;
+            RegistrationOperations.Add($"register-hook:{registrationNumber}");
             Registrations.Add(new HookRegistration(
                 handle,
                 eventMinimum,
@@ -528,6 +925,8 @@ public sealed class WindowsCaptureWinEventSourceTests
         {
             UnhookedHandles.Add(hook);
             UnhookThreadIds.Add(CurrentThreadId);
+            CleanupOperations.Add($"unhook:{hook}");
+            CleanupThreadIds.Add(CurrentThreadId);
             if (UnhookedHandles.Count == Registrations.Count)
             {
                 AllHooksUnhooked.Set();
@@ -646,6 +1045,33 @@ public sealed class WindowsCaptureWinEventSourceTests
             Assert.True(_messages.Writer.TryWrite(new QueuedMessage(
                 Result: 1,
                 new WindowsCaptureThreadMessage(DispatchCallbackMessage))));
+        }
+
+        public void RaiseWindowMessageOnOwnerThread(
+            uint message,
+            nuint wParam,
+            nint lParam)
+        {
+            using var dispatched = new ManualResetEventSlim();
+            _dispatchCallbacks.Enqueue(() =>
+            {
+                try
+                {
+                    _ = WindowProcedure?.Invoke(
+                        HiddenWindowHandle,
+                        message,
+                        wParam,
+                        lParam);
+                }
+                finally
+                {
+                    dispatched.Set();
+                }
+            });
+            Assert.True(_messages.Writer.TryWrite(new QueuedMessage(
+                Result: 1,
+                new WindowsCaptureThreadMessage(DispatchCallbackMessage))));
+            Assert.True(dispatched.Wait(TimeSpan.FromSeconds(2)));
         }
 
         private static uint CurrentThreadId =>

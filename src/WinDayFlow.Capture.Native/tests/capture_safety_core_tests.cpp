@@ -508,8 +508,8 @@ bool TestPermitLinearizationAndPersistenceStages() {
   if (!Expect(update_result.load(std::memory_order_relaxed) ==
                   CaptureSafetyUpdateResult::kRevokedDuringUpdate &&
                   generation == 2 && persisted.load(std::memory_order_relaxed) ==
-                                         1,
-              "stop did not supersede the in-flight authorization update") ||
+                                          1,
+              "stop did not revoke the in-flight authorization update") ||
       !Expect(core.FinalizeRevoke(5'000, &generation) && generation == 3,
               "stop did not finalize after the persistence permit drained")) {
     return false;
@@ -549,8 +549,259 @@ bool TestPermitLinearizationAndPersistenceStages() {
   }
   held_permit = {};
   return Expect(stop_core.FinalizeRevoke(5'000, &stop_generation) &&
-                    stop_generation == 3 && stop_core.revoked(),
-                "revoke did not finalize after the permit drained");
+                     stop_generation == 3 && stop_core.revoked(),
+                 "revoke did not finalize after the permit drained");
+}
+
+bool TestCallbackTimeAuthorizationInvalidation() {
+  const CaptureTargetIdentity target_a = Target(100, 200, 300, 10);
+  const CaptureTargetIdentity target_b =
+      Target(101, 201, 301, 11, 401, L"\\\\.\\DISPLAY2");
+  CaptureSafetyCore core(
+      33,
+      1,
+      [](uint64_t* low, uint64_t* high) {
+        *low = 3'301;
+        *high = 3'302;
+        return true;
+      });
+  uint64_t generation = 0;
+  if (core.UpdateRuntimeAuthorization(
+          AllowedAuthorization(1, target_a), &generation) !=
+      CaptureSafetyUpdateResult::kOk) {
+    return Expect(false, "callback invalidation core could not be authorized");
+  }
+  const auto token = core.MintPersistenceToken(target_a);
+  CaptureCommandAdmission admission;
+  if (!token.has_value() ||
+      core.IssueCommandAdmission(CaptureCommand::kStart,
+                                 generation,
+                                 target_a.target_epoch,
+                                 7,
+                                 &admission) !=
+          CaptureCommandAdmissionResult::kOk) {
+    return Expect(false, "callback invalidation setup failed");
+  }
+
+  Gate permit_acquired;
+  Gate release_permit;
+  std::thread writer([&] {
+    auto permit = core.AcquirePersistencePermit(*token, target_a);
+    permit_acquired.Open();
+    release_permit.Wait();
+  });
+  permit_acquired.Wait();
+
+  const uint64_t closed_epoch = core.InvalidateAuthorizationAdmission();
+  CaptureCommandAdmissionPermit command_permit;
+  if (!Expect(closed_epoch != 0 && (closed_epoch & 1U) == 0,
+              "callback invalidation returned no closed epoch") ||
+      !Expect(!core.admission_open() && core.persistence_generation() == 2,
+              "callback invalidation advanced the persistence barrier") ||
+      !Expect(!core.MintPersistenceToken(target_a).has_value() &&
+                  !core.AcquirePersistencePermit(*token, target_a),
+              "callback invalidation admitted new persistence work") ||
+      !Expect(core.AcquireCommandAdmissionPermit(
+                  admission,
+                  CaptureCommand::kStart,
+                  7,
+                  &command_permit) ==
+                  CaptureCommandAdmissionResult::kAdmissionRejected,
+              "callback invalidation admitted a pending command")) {
+    release_permit.Open();
+    writer.join();
+    return false;
+  }
+
+  Gate barrier_started;
+  std::atomic<bool> barrier_finished{false};
+  std::atomic<CaptureSafetyUpdateResult> barrier_result{
+      CaptureSafetyUpdateResult::kInvalidArgument};
+  std::thread barrier([&] {
+    barrier_started.Open();
+    barrier_result.store(
+        core.UpdateRuntimeAuthorization(
+            RuntimeAuthorization{BlockedPrivacy(2), std::nullopt},
+            &generation),
+        std::memory_order_relaxed);
+    barrier_finished.store(true, std::memory_order_release);
+  });
+  barrier_started.Wait();
+  if (!Expect(!barrier_finished.load(std::memory_order_acquire),
+              "callback invalidation waited for or crossed a held permit")) {
+    release_permit.Open();
+    writer.join();
+    barrier.join();
+    return false;
+  }
+  release_permit.Open();
+  writer.join();
+  barrier.join();
+  if (!Expect(barrier_result.load(std::memory_order_relaxed) ==
+                  CaptureSafetyUpdateResult::kOk &&
+                  generation == 3 && core.revoked(),
+              "blocked barrier did not finalize callback invalidation")) {
+    return false;
+  }
+
+  CaptureSafetyCore pending(34, 1);
+  if (pending.UpdateRuntimeAuthorization(
+          AllowedAuthorization(1, target_a), &generation) !=
+      CaptureSafetyUpdateResult::kOk) {
+    return Expect(false, "pending invalidation core could not be authorized");
+  }
+  const uint64_t first_epoch = pending.InvalidateAuthorizationAdmission();
+  const uint64_t second_epoch = pending.InvalidateAuthorizationAdmission();
+  if (!Expect(first_epoch != 0 && second_epoch > first_epoch &&
+                  (second_epoch & 1U) == 0,
+              "repeated callbacks did not advance the closed epoch") ||
+      !Expect(pending.UpdateRuntimeAuthorization(
+                  AllowedAuthorization(2, target_b),
+                  &generation) ==
+                      CaptureSafetyUpdateResult::kAuthorizationSuperseded &&
+                  generation == 2 && !pending.admission_open(),
+              "an Allow entered native after callback return") ||
+      !Expect(pending.UpdateRuntimeAuthorization(
+                  RuntimeAuthorization{BlockedPrivacy(2), std::nullopt},
+                  &generation) == CaptureSafetyUpdateResult::kOk &&
+                  generation == 3,
+              "blocked runtime barrier did not confirm callback invalidation") ||
+      !Expect(pending.UpdateRuntimeAuthorization(
+                  AllowedAuthorization(3, target_b),
+                  &generation) == CaptureSafetyUpdateResult::kOk &&
+                  generation == 4 && pending.admission_open(),
+              "resolved Allow did not open after the blocked barrier")) {
+    return false;
+  }
+
+  CaptureSafetyCore precommit(35, 1);
+  if (precommit.UpdateRuntimeAuthorization(
+          AllowedAuthorization(1, target_a), &generation) !=
+      CaptureSafetyUpdateResult::kOk) {
+    return Expect(false, "precommit invalidation core could not be authorized");
+  }
+  const auto stale_ticket = precommit.BeginAuthorizationUpdate();
+  if (!Expect(precommit.InvalidateAuthorizationAdmission() != 0,
+              "precommit callback invalidation failed") ||
+      !Expect(precommit.CompleteRuntimeAuthorization(
+                  stale_ticket,
+                  AllowedAuthorization(2, target_b),
+                  &generation) ==
+                      CaptureSafetyUpdateResult::kAuthorizationSuperseded &&
+                  generation == 2 && !precommit.admission_open(),
+              "a precommit stale ticket was not superseded")) {
+    return false;
+  }
+
+  CaptureSafetyCore stale_barrier(350, 1);
+  if (stale_barrier.UpdateRuntimeAuthorization(
+          AllowedAuthorization(1, target_a), &generation) !=
+      CaptureSafetyUpdateResult::kOk) {
+    return Expect(false, "stale barrier core could not be authorized");
+  }
+  const uint64_t barrier_epoch =
+      stale_barrier.InvalidateAuthorizationAdmission();
+  const auto stale_block_ticket = stale_barrier.BeginAuthorizationUpdate();
+  const uint64_t newer_barrier_epoch =
+      stale_barrier.InvalidateAuthorizationAdmission();
+  if (!Expect(barrier_epoch != 0 && newer_barrier_epoch > barrier_epoch,
+              "a newer callback did not supersede the block barrier") ||
+      !Expect(stale_barrier.CompleteRuntimeAuthorization(
+                  stale_block_ticket,
+                  RuntimeAuthorization{BlockedPrivacy(2), std::nullopt},
+                  &generation) ==
+                      CaptureSafetyUpdateResult::kAuthorizationSuperseded &&
+                  generation == 2 && !stale_barrier.admission_open(),
+              "a stale block barrier confirmed a newer callback") ||
+      !Expect(stale_barrier.UpdateRuntimeAuthorization(
+                  AllowedAuthorization(2, target_b),
+                  &generation) ==
+                      CaptureSafetyUpdateResult::kAuthorizationSuperseded &&
+                  generation == 2,
+              "Allow reopened after a stale block barrier") ||
+      !Expect(stale_barrier.UpdateRuntimeAuthorization(
+                  RuntimeAuthorization{BlockedPrivacy(2), std::nullopt},
+                  &generation) == CaptureSafetyUpdateResult::kOk &&
+                  generation == 3,
+              "a fresh block barrier did not confirm the newer callback") ||
+      !Expect(stale_barrier.UpdateRuntimeAuthorization(
+                  AllowedAuthorization(3, target_b),
+                  &generation) == CaptureSafetyUpdateResult::kOk &&
+                  generation == 4 && stale_barrier.admission_open(),
+              "Allow did not reopen after the fresh block barrier")) {
+    return false;
+  }
+
+  Gate committed;
+  Gate release_commit;
+  std::atomic<bool> intercept_commit{false};
+  CaptureSafetyCore postcommit(
+      36,
+      1,
+      {},
+      2,
+      [&] {
+        if (intercept_commit.load(std::memory_order_acquire)) {
+          committed.Open();
+          release_commit.Wait();
+        }
+      });
+  if (postcommit.UpdateRuntimeAuthorization(
+          AllowedAuthorization(1, target_a), &generation) !=
+      CaptureSafetyUpdateResult::kOk) {
+    return Expect(false, "postcommit invalidation core could not be authorized");
+  }
+  intercept_commit.store(true, std::memory_order_release);
+  std::atomic<CaptureSafetyUpdateResult> postcommit_result{
+      CaptureSafetyUpdateResult::kInvalidArgument};
+  std::thread committed_update([&] {
+    postcommit_result.store(
+        postcommit.UpdateRuntimeAuthorization(
+            AllowedAuthorization(2, target_b), &generation),
+        std::memory_order_relaxed);
+  });
+  committed.Wait();
+  const uint64_t postcommit_epoch =
+      postcommit.InvalidateAuthorizationAdmission();
+  release_commit.Open();
+  committed_update.join();
+  intercept_commit.store(false, std::memory_order_release);
+  if (!Expect(postcommit_epoch != 0 &&
+                  postcommit_result.load(std::memory_order_relaxed) ==
+                      CaptureSafetyUpdateResult::kOk &&
+                  generation == 3 && !postcommit.admission_open() &&
+                  postcommit.target_epoch() == target_b.target_epoch &&
+                  postcommit.privacy_context().policy_revision == 2,
+              "a committed Allow reported failure after callback closure") ||
+      !Expect(postcommit.UpdateRuntimeAuthorization(
+                  AllowedAuthorization(3, target_b),
+                  &generation) ==
+                      CaptureSafetyUpdateResult::kAuthorizationSuperseded &&
+                  generation == 3,
+              "postcommit callback pending state reopened Allow") ||
+      !Expect(postcommit.UpdateRuntimeAuthorization(
+                  RuntimeAuthorization{BlockedPrivacy(3), std::nullopt},
+                  &generation) == CaptureSafetyUpdateResult::kOk &&
+                  generation == 4,
+              "postcommit callback barrier was rejected")) {
+    return false;
+  }
+
+  CaptureSafetyCore exhausted(37,
+                              1,
+                              {},
+                              std::numeric_limits<uint64_t>::max() - 3U);
+  const uint64_t final_epoch = exhausted.InvalidateAuthorizationAdmission();
+  return Expect(final_epoch == std::numeric_limits<uint64_t>::max() - 1U,
+                "the final callback authorization epoch was not issued") &&
+         Expect(exhausted.InvalidateAuthorizationAdmission() == 0 &&
+                    !exhausted.admission_open(),
+                "callback authorization epoch exhaustion did not fail closed") &&
+         Expect(exhausted.UpdateRuntimeAuthorization(
+                    RuntimeAuthorization{BlockedPrivacy(1), std::nullopt},
+                    &generation) ==
+                    CaptureSafetyUpdateResult::kGenerationExhausted,
+                "an exhausted callback epoch accepted a later update");
 }
 
 bool TestCommandAdmissionAuthenticityAndInvalidation() {
@@ -1151,6 +1402,7 @@ int main() {
   if (!TestTargetTupleAndInstanceEpoch() ||
       !TestRevisionAndGenerationRules() ||
       !TestPermitLinearizationAndPersistenceStages() ||
+      !TestCallbackTimeAuthorizationInvalidation() ||
       !TestCommandAdmissionAuthenticityAndInvalidation() ||
       !TestCommandAdmissionRetainsDisplayBinding() ||
       !TestCommandAdmissionLinearization() ||

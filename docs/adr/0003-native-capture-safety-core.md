@@ -26,11 +26,12 @@ ADR 0008 later extends this accepted 112-byte prefix to a 224-byte compatible
 structure and makes a display anchor part of every fully allowed target. The
 original offsets and `reserved[8]` contract below remain unchanged.
 
-WinDayFlow will keep C ABI major version 1 and add a native safety core before
+WinDayFlow keeps C ABI major version 1 and adds a native safety core before
 connecting a real DXGI writer. The safety core is independently testable with
-synthetic work and remains unavailable as a recorder until the real Windows
-target verifier, event monitor, capture writer, and atomic artifact publisher
-use the same boundary.
+synthetic work. The Windows target verifier, system-event monitor, and
+callback-time native invalidation gate now use this boundary in deterministic
+tests, but it remains unavailable as a recorder until the real capture writer,
+atomic artifact publisher, and App composition use the same boundary.
 
 ### Additive Runtime Authorization Contract
 
@@ -120,6 +121,16 @@ from an older generation or target can be persisted.
 This rule applies equally to pixels and context metadata. A later Allow never
 revives a permit or acquired item from an older generation.
 
+The bit-11 callback-time invalidation export closes native authorization
+admission with one lock-free atomic transition before a Windows callback
+returns. An Allow superseded before native commit does not consume a runtime
+revision. If the Allow commits immediately before the callback wins, the result
+is reported as applied-then-superseded and the coordinator submits the next
+restrictive revision. Only a completed Block update acknowledges that callback
+invalidation for later reauthorization. This gate closes new admission; a real
+writer must still revalidate any already-held permit at every acquisition and
+publication stage.
+
 ### Stop, Join, Destroy, and Managed Ownership
 
 `request_stop` is nonblocking. It closes permit admission, enters `STOPPING`,
@@ -154,11 +165,12 @@ authorization. A stamp from another owner or instance, or any mismatch, fails
 closed before capture work starts. Pause and Stop do not require an Allow stamp.
 
 Dynamic privacy transitions also need a product-level action contract. The
-future Windows monitor and owner distinguish an evidence Pause, which blocks
-new permits while retaining a quiescent session, from a sticky session Stop,
-which performs full teardown. Lock, application/window exclusion, and Unknown
-signals must each be classified and tested across recovery and target changes;
-the safety-core milestone intentionally implements neither mapping.
+Windows monitor now keeps independent fail-closed session-unavailable and
+power-suspended holds until matching availability/resume events are reverified.
+It still does not distinguish an evidence Pause, which blocks new permits while
+retaining a quiescent session, from a sticky session Stop, which performs full
+teardown. Lock, application/window exclusion, and Unknown signals must each be
+classified and tested across recovery and target changes.
 
 ### Capability Gate
 
@@ -169,7 +181,8 @@ complete live recording mask requires all of:
 ```text
 PrivacyGuard | EventQueue | TargetScopedAuthorization |
 PersistenceGenerationBarrier | DeterministicStop |
-DisplayScopedAuthorization | DisplayBoundCommandAdmission |
+DisplayScopedAuthorization | CallbackTimeAuthorizationInvalidation |
+DisplayBoundCommandAdmission |
 ScreenCapture | H264Chunks
 ```
 
@@ -177,25 +190,29 @@ Unknown additive bits are ignored. Known dependency violations are rejected;
 `ScreenCapture` alone is never sufficient. Evidence extraction remains a
 separate capability.
 
-The current safety-core milestone deliberately leaves `ScreenCapture` off.
-The App continues to register `UnavailableCaptureBackend`, and Start/Resume
-remain unavailable. A development or synthetic safety test must not set the
-bit or persist live user evidence.
+The current DLL advertises the eight runtime-owner foundation capabilities,
+including bit 11 `CallbackTimeAuthorizationInvalidation`, but deliberately
+leaves `ScreenCapture`, `H264Chunks`, and `EvidenceExtraction` off. The App
+continues to register `DenyCaptureRuntimeAuthorization` and
+`UnavailableCaptureBackend`, and Start/Resume remain unavailable. A development
+or synthetic safety test must not advertise writer capabilities or persist live
+user evidence.
 
 ### Activation Gates
 
 The safety core is necessary but not sufficient for live capture. Activation
-still requires all of the following to use the contract end to end:
+still requires all of the following to use the contract end to end. Display
+topology, current-session WTS, suspend/resume invalidation, session/power holds,
+and callback-time native admission closure are implemented foundations.
 
-1. A real Windows target verifier that obtains and revalidates HWND, PID,
-   process creation time, target epoch, and display selection without exposing
-   raw title or path data.
-2. An event-driven Windows privacy monitor for session, desktop, remote,
-   presentation, sleep/resume, storage, and application/window identity state,
-   with tested evidence-Pause versus sticky-session-Stop classification.
+1. Image-bound publisher-signer verification and unique hosted-application
+   attribution for Windows surfaces.
+2. Presentation notifications, periodic storage observation, and tested
+   evidence-Pause versus sticky-session-Stop classification.
 3. The real DXGI/WIC/Media Foundation writer and metadata path carrying the
    consumed command grant and acquisition snapshot through every persistence
-   boundary.
+   boundary, with held-permit and callback-generation revalidation at each
+   stage.
 4. Atomic temporary-file completion, rename, committed-event ordering, cleanup,
    interruption, disk-full, and recovery tests against real filesystem output.
 5. Managed composition-root activation only after the complete capability mask
@@ -203,9 +220,10 @@ still requires all of the following to use the contract end to end:
 
 ## Required Verification
 
-The sixth native CTest target, `capture_safety_core_tests`, must deterministically
-cover target/PID reuse, target and instance epochs, generation races,
-acquire-to-persist invalidation, Block/revoke linearization, stop/join/destroy,
+The sixth native CTest target, `capture_safety_core_tests`, deterministically
+covers target/PID reuse, target and instance epochs, generation races,
+acquire-to-persist invalidation, callback invalidation before and after Allow
+commit, Block acknowledgement, Block/revoke linearization, stop/join/destroy,
 timeouts, injected failures, concurrency, and idempotence. Tests use explicit
 barriers rather than timing sleeps.
 
@@ -218,13 +236,13 @@ negotiation, owner call order, one-shot stamps, quiescence, timeout/failure
 quarantine, and cancellation semantics. Debug and Release native and managed
 suites must pass.
 
-These tests prove only the synthetic safety boundary until the real writer and
-Windows verifier integration tests named above exist. The synthetic suite now
-races both orderings of an Allow A-to-B replacement against Start/Resume,
-rejects stale and foreign admission stamps, and validates the complete expected
-snapshot. Before `ScreenCapture` can be enabled, the same grant must be carried
-through a real worker and persistence path, and evidence Pause versus sticky
-Stop recovery must be exercised against live Windows transitions.
+These tests and the Windows verifier/system-event integration suites prove only
+the safety foundations, not a recorder. The synthetic suite races both
+orderings of an Allow A-to-B replacement against Start/Resume, rejects stale
+and foreign admission stamps, and validates the complete expected snapshot.
+Before `ScreenCapture` can be enabled, the same grant must be carried through a
+real worker and persistence path, and evidence Pause versus sticky Stop recovery
+must be exercised against live Windows transitions.
 
 ## Provenance
 
@@ -245,6 +263,8 @@ and test surface. In return, a live recorder cannot be enabled by a single
 optimistic capability bit, stale Windows identifiers cannot silently inherit
 authorization, and Block has a precise no-old-write-after-return guarantee.
 
-The safety core intentionally delays live activation. It does not implement or
-claim DXGI acquisition, Media Foundation output, Windows target observation, or
-event-driven privacy monitoring.
+The safety core intentionally delays live activation. Windows target
+observation, topology/WTS/power invalidation, session/power holds, and the
+callback-time native gate are foundations only; this decision does not claim
+DXGI acquisition, Media Foundation output, App integration, or a real writer's
+held-permit revalidation.

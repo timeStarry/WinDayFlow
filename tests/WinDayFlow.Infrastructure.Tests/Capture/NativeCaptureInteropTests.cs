@@ -40,6 +40,7 @@ public sealed class NativeCaptureInteropTests
         Assert.Equal(-11, (int)NativeCaptureResult.GenerationExhausted);
         Assert.Equal(-12, (int)NativeCaptureResult.AdmissionRequired);
         Assert.Equal(-13, (int)NativeCaptureResult.AdmissionRejected);
+        Assert.Equal(-14, (int)NativeCaptureResult.AuthorizationSuperseded);
         Assert.Equal(
             1UL << 5,
             (ulong)NativeCaptureCapabilities.TargetScopedAuthorization);
@@ -58,6 +59,10 @@ public sealed class NativeCaptureInteropTests
         Assert.Equal(
             1UL << 10,
             (ulong)NativeCaptureCapabilities.DisplayBoundCommandAdmission);
+        Assert.Equal(
+            1UL << 11,
+            (ulong)NativeCaptureCapabilities
+                .CallbackTimeAuthorizationInvalidation);
     }
 
     [Fact]
@@ -88,6 +93,12 @@ public sealed class NativeCaptureInteropTests
         | NativeCaptureCapabilities.PersistenceGenerationBarrier
         | NativeCaptureCapabilities.DeterministicStop
         | NativeCaptureCapabilities.DisplayBoundCommandAdmission))]
+    [InlineData((ulong)(NativeCaptureCapabilities.PrivacyGuard
+        | NativeCaptureCapabilities.EventQueue
+        | NativeCaptureCapabilities.TargetScopedAuthorization
+        | NativeCaptureCapabilities.PersistenceGenerationBarrier
+        | NativeCaptureCapabilities.DeterministicStop
+        | NativeCaptureCapabilities.CallbackTimeAuthorizationInvalidation))]
     [InlineData((ulong)(NativeCaptureCapabilities.PrivacyGuard
         | NativeCaptureCapabilities.EventQueue
         | NativeCaptureCapabilities.ScreenCapture
@@ -121,6 +132,33 @@ public sealed class NativeCaptureInteropTests
         using var nativeApi = new FakeNativeCaptureApi
         {
             Capabilities = legacyCapabilities,
+        };
+
+        var probe = NativeCaptureBackend.Probe(nativeApi);
+
+        Assert.True(probe.AbiCompatible);
+        Assert.Null(probe.Failure);
+        using var backend = new NativeCaptureBackend(
+            new NativeCaptureConfiguration(Path.GetTempPath()),
+            NativeCapturePrivacyContext.FailClosed(runtimePolicyRevision: 1),
+            nativeApi);
+        Assert.False(backend.SupportsRuntimeAuthorization);
+        Assert.False(backend.SupportsCommandAdmission);
+        Assert.Throws<NotSupportedException>(() =>
+            new NativeCaptureRuntimeOwner(
+                backend,
+                NativeCapturePrivacyContext.FailClosed(runtimePolicyRevision: 1)));
+    }
+
+    [Fact]
+    public void PreCallbackDisplayProfileRemainsProbeCompatibleButCannotCreateNewOwner()
+    {
+        var previousCapabilities =
+            NativeCaptureAbiContract.DisplayScopedAuthorizationCapabilities
+            | NativeCaptureCapabilities.DisplayBoundCommandAdmission;
+        using var nativeApi = new FakeNativeCaptureApi
+        {
+            Capabilities = previousCapabilities,
         };
 
         var probe = NativeCaptureBackend.Probe(nativeApi);
@@ -435,6 +473,208 @@ public sealed class NativeCaptureInteropTests
     }
 
     [Fact]
+    public async Task CallbackInvalidationSupersedesBlockedAllowBeforeFullBarrier()
+    {
+        using var directory = new TemporaryDirectory();
+        using var nativeApi = new FakeNativeCaptureApi();
+        using var backend = CreateBackend(directory.Path, nativeApi);
+        var allowed = CreateAllowedRuntimeAuthorization(runtimePolicyRevision: 2);
+        var currentGeneration = await backend.UpdateRuntimeAuthorizationAsync(allowed);
+        nativeApi.BlockNextRuntimeAuthorizationUpdate();
+
+        var staleAllow = Task.Run(() => backend.UpdateRuntimeAuthorizationAsync(
+            allowed.WithRuntimePolicyRevision(3)));
+        await nativeApi.RuntimeAuthorizationUpdateStarted
+            .WaitAsync(TimeSpan.FromSeconds(2));
+
+        var callbackGeneration = backend.InvalidateRuntimeAuthorization();
+
+        Assert.Equal(1, callbackGeneration);
+        Assert.Equal(1, nativeApi.InvalidateRuntimeAuthorizationCallCount);
+        nativeApi.ReleaseRuntimeAuthorizationUpdate();
+        await Assert.ThrowsAsync<CaptureRuntimeAdmissionRejectedException>(
+            () => staleAllow);
+        Assert.Null(await backend.TryIssueCommandAdmissionAsync(
+            CaptureAdmissionOperation.Start,
+            expectedRuntimePolicyRevision: 2,
+            expectedPersistenceGeneration: currentGeneration,
+            expectedTargetEpoch: allowed.Target.TargetEpoch));
+
+        var barrier = await backend.UpdateRuntimeAuthorizationAsync(
+            new NativeCaptureRuntimeAuthorization(
+                NativeCapturePrivacyContext.FailClosed(runtimePolicyRevision: 3),
+                NativeCaptureTargetIdentity.Unknown),
+            callbackGeneration);
+        Assert.Equal(
+            NativeCaptureAuthorizationUpdateOutcome.Applied,
+            barrier.Outcome);
+        var recovered = await backend.UpdateRuntimeAuthorizationAsync(
+            allowed.WithRuntimePolicyRevision(4),
+            callbackGeneration);
+        Assert.Equal(
+            NativeCaptureAuthorizationUpdateOutcome.Applied,
+            recovered.Outcome);
+        Assert.True(recovered.PersistenceGeneration > currentGeneration);
+    }
+
+    [Fact]
+    public async Task CallbackAfterNativeCommitReturnsAppliedThenSuperseded()
+    {
+        using var directory = new TemporaryDirectory();
+        using var nativeApi = new FakeNativeCaptureApi();
+        using var backend = CreateBackend(directory.Path, nativeApi);
+        var allowed = CreateAllowedRuntimeAuthorization(runtimePolicyRevision: 2);
+        var currentGeneration = await backend.UpdateRuntimeAuthorizationAsync(allowed);
+        nativeApi.AfterRuntimeAuthorizationCommit =
+            () => backend.InvalidateRuntimeAuthorization();
+
+        var update = await backend.UpdateRuntimeAuthorizationAsync(
+            allowed.WithRuntimePolicyRevision(3),
+            expectedCallbackInvalidationGeneration: 0);
+
+        Assert.Equal(
+            NativeCaptureAuthorizationUpdateOutcome.AppliedThenSuperseded,
+            update.Outcome);
+        Assert.True(update.PersistenceGeneration > currentGeneration);
+        Assert.Equal(1, backend.CallbackInvalidationGeneration);
+        Assert.Null(await backend.TryIssueCommandAdmissionAsync(
+            CaptureAdmissionOperation.Start,
+            expectedRuntimePolicyRevision: 3,
+            expectedPersistenceGeneration: update.PersistenceGeneration,
+            expectedTargetEpoch: allowed.Target.TargetEpoch));
+    }
+
+    [Fact]
+    public async Task StandaloneDisposeDrainsCallbackInvalidationBeforeDestroy()
+    {
+        using var directory = new TemporaryDirectory();
+        using var nativeApi = new FakeNativeCaptureApi();
+        var backend = CreateBackend(directory.Path, nativeApi);
+        nativeApi.BlockNextRuntimeAuthorizationInvalidation();
+
+        var invalidation = Task.Run(backend.InvalidateRuntimeAuthorization);
+        await nativeApi.RuntimeAuthorizationInvalidationStarted
+            .WaitAsync(TimeSpan.FromSeconds(2));
+
+        var dispose = Task.Run(backend.Dispose);
+        await WaitUntilAsync(
+            () => backend.IsShutdownStarted,
+            TimeSpan.FromSeconds(2));
+        await Task.Delay(50);
+
+        Assert.False(dispose.IsCompleted);
+        Assert.Equal(0, nativeApi.RevokeRuntimeAuthorizationCallCount);
+        Assert.Equal(0, nativeApi.DestroyCallCount);
+
+        nativeApi.ReleaseRuntimeAuthorizationInvalidation();
+
+        Assert.Equal(1, await invalidation.WaitAsync(TimeSpan.FromSeconds(2)));
+        await dispose.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.Equal(1, nativeApi.RevokeRuntimeAuthorizationCallCount);
+        Assert.Equal(1, nativeApi.DestroyCallCount);
+    }
+
+    [Fact]
+    public async Task ConcurrentCallbackInvalidationsSerializeNativeEpochCompletion()
+    {
+        using var directory = new TemporaryDirectory();
+        using var nativeApi = new FakeNativeCaptureApi();
+        using var backend = CreateBackend(directory.Path, nativeApi);
+        nativeApi.BlockNextRuntimeAuthorizationInvalidation();
+
+        var first = Task.Run(backend.InvalidateRuntimeAuthorization);
+        await nativeApi.RuntimeAuthorizationInvalidationStarted
+            .WaitAsync(TimeSpan.FromSeconds(2));
+        var second = Task.Run(backend.InvalidateRuntimeAuthorization);
+        await WaitUntilAsync(
+            () => backend.CallbackInvalidationGeneration == 2,
+            TimeSpan.FromSeconds(2));
+
+        Assert.Equal(1, nativeApi.InvalidateRuntimeAuthorizationCallCount);
+        Assert.False(second.IsCompleted);
+
+        nativeApi.ReleaseRuntimeAuthorizationInvalidation();
+        var generations = await Task.WhenAll(first, second)
+            .WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.Equal(new long[] { 1, 2 }, generations.Order());
+        Assert.Equal(2, nativeApi.InvalidateRuntimeAuthorizationCallCount);
+    }
+
+    [Fact]
+    public async Task ShutdownRejectsNewCallbackInvalidationBeforeNativeCall()
+    {
+        using var directory = new TemporaryDirectory();
+        using var nativeApi = new FakeNativeCaptureApi();
+        var backend = CreateBackend(directory.Path, nativeApi);
+        nativeApi.BlockNextRuntimeAuthorizationUpdate();
+        var update = Task.Run(() => backend.UpdateRuntimeAuthorizationAsync(
+            CreateAllowedRuntimeAuthorization(runtimePolicyRevision: 2)));
+        await nativeApi.RuntimeAuthorizationUpdateStarted
+            .WaitAsync(TimeSpan.FromSeconds(2));
+
+        var dispose = Task.Run(backend.Dispose);
+        await WaitUntilAsync(
+            () => backend.IsShutdownStarted,
+            TimeSpan.FromSeconds(2));
+
+        Assert.Throws<InvalidOperationException>(
+            () => backend.InvalidateRuntimeAuthorization());
+        Assert.Equal(0, nativeApi.InvalidateRuntimeAuthorizationCallCount);
+
+        nativeApi.ReleaseRuntimeAuthorizationUpdate();
+        await update.WaitAsync(TimeSpan.FromSeconds(2));
+        await dispose.WaitAsync(TimeSpan.FromSeconds(2));
+    }
+
+    [Fact]
+    public void CallbackInvalidationRejectsADuplicateNativeEpoch()
+    {
+        using var directory = new TemporaryDirectory();
+        using var nativeApi = new FakeNativeCaptureApi();
+        using var backend = CreateBackend(directory.Path, nativeApi);
+
+        Assert.Equal(1, backend.InvalidateRuntimeAuthorization());
+        nativeApi.NextInvalidationAuthorizationEpoch = 2;
+
+        Assert.Throws<InvalidDataException>(
+            () => backend.InvalidateRuntimeAuthorization());
+    }
+
+    [Fact]
+    public void CallbackInvalidationRejectsARegressedNativeEpoch()
+    {
+        using var directory = new TemporaryDirectory();
+        using var nativeApi = new FakeNativeCaptureApi
+        {
+            NextInvalidationAuthorizationEpoch = 4,
+        };
+        using var backend = CreateBackend(directory.Path, nativeApi);
+
+        Assert.Equal(1, backend.InvalidateRuntimeAuthorization());
+        nativeApi.NextInvalidationAuthorizationEpoch = 2;
+
+        Assert.Throws<InvalidDataException>(
+            () => backend.InvalidateRuntimeAuthorization());
+    }
+
+    [Theory]
+    [InlineData(0UL)]
+    [InlineData(3UL)]
+    public void CallbackInvalidationRejectsAnInvalidNativeEpoch(
+        ulong invalidAuthorizationEpoch)
+    {
+        using var directory = new TemporaryDirectory();
+        using var nativeApi = new FakeNativeCaptureApi
+        {
+            NextInvalidationAuthorizationEpoch = invalidAuthorizationEpoch,
+        };
+        using var backend = CreateBackend(directory.Path, nativeApi);
+
+        Assert.Throws<InvalidDataException>(
+            () => backend.InvalidateRuntimeAuthorization());
+    }
+
+    [Fact]
     public void InitialFailClosedAuthorizationClearsTheDisplayAbiTail()
     {
         using var directory = new TemporaryDirectory();
@@ -721,6 +961,39 @@ public sealed class NativeCaptureInteropTests
     }
 
     [Fact]
+    public async Task ChunkWithAStaleCallbackBoundaryIsFaultedBeforePublication()
+    {
+        using var directory = new TemporaryDirectory();
+        using var nativeApi = new FakeNativeCaptureApi();
+        using var backend = CreateBackend(directory.Path, nativeApi);
+        var persistenceGeneration = await backend.UpdateRuntimeAuthorizationAsync(
+            CreateAllowedRuntimeAuthorization(runtimePolicyRevision: 2));
+        var published = 0;
+        backend.ChunkCommitted += (_, _) => Interlocked.Increment(ref published);
+        var callbackGenerationField = typeof(NativeCaptureBackend).GetField(
+            "_callbackInvalidationGeneration",
+            System.Reflection.BindingFlags.Instance
+                | System.Reflection.BindingFlags.NonPublic);
+        Assert.NotNull(callbackGenerationField);
+
+        callbackGenerationField.SetValue(backend, 1L);
+        nativeApi.Enqueue(
+            sequence: 1,
+            NativeCaptureEventKind.ChunkCommitted,
+            CaptureState.Recording,
+            detail: "chunks/stale-callback.mp4",
+            persistenceGeneration: persistenceGeneration,
+            targetEpoch: 1);
+
+        await WaitUntilAsync(
+            () => backend.CurrentStatus.State == CaptureState.Faulted,
+            TimeSpan.FromSeconds(2));
+        await nativeApi.RequestStopCalled.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.Equal(0, Volatile.Read(ref published));
+        Assert.True(nativeApi.RequestStopCallCount > 0);
+    }
+
+    [Fact]
     public async Task FoundationOnlyBackendRejectsEveryCommittedChunkEvent()
     {
         using var directory = new TemporaryDirectory();
@@ -974,6 +1247,10 @@ public sealed class NativeCaptureInteropTests
             new(initialState: false);
         private readonly ManualResetEventSlim _releaseRuntimeAuthorizationUpdate =
             new(initialState: false);
+        private readonly ManualResetEventSlim _runtimeAuthorizationInvalidationStarted =
+            new(initialState: false);
+        private readonly ManualResetEventSlim _releaseRuntimeAuthorizationInvalidation =
+            new(initialState: false);
         private readonly TaskCompletionSource _requestStopCalled = new(
             TaskCreationOptions.RunContinuationsAsynchronously);
         private bool _closed;
@@ -981,10 +1258,12 @@ public sealed class NativeCaptureInteropTests
         private int _destroyCallCount;
         private int _requestStopCallCount;
         private int _revokeRuntimeAuthorizationCallCount;
+        private int _invalidateRuntimeAuthorizationCallCount;
         private int _updateRuntimeAuthorizationCallCount;
         private int _operationSequence;
         private int _signalNextPoll;
         private int _blockNextRuntimeAuthorizationUpdate;
+        private int _blockNextRuntimeAuthorizationInvalidation;
 
         public uint AbiVersion { get; init; } = NativeCaptureAbiContract.AbiVersion;
 
@@ -997,13 +1276,15 @@ public sealed class NativeCaptureInteropTests
             | NativeCaptureCapabilities.PersistenceGenerationBarrier
             | NativeCaptureCapabilities.DeterministicStop
             | NativeCaptureCapabilities.DisplayScopedAuthorization
-            | NativeCaptureCapabilities.DisplayBoundCommandAdmission;
+            | NativeCaptureCapabilities.DisplayBoundCommandAdmission
+            | NativeCaptureCapabilities.CallbackTimeAuthorizationInvalidation;
 
         private ulong _persistenceGeneration;
         private ulong _runtimePolicyRevision;
         private ulong _targetEpoch;
         private ulong _authorizationEpoch;
         private bool _runtimeAuthorizationRevoked;
+        private bool _callbackInvalidationPending;
 
         public int GetCapabilitiesCallCount => Volatile.Read(ref _getCapabilitiesCallCount);
 
@@ -1015,6 +1296,9 @@ public sealed class NativeCaptureInteropTests
 
         public int RevokeRuntimeAuthorizationCallCount =>
             Volatile.Read(ref _revokeRuntimeAuthorizationCallCount);
+
+        public int InvalidateRuntimeAuthorizationCallCount =>
+            Volatile.Read(ref _invalidateRuntimeAuthorizationCallCount);
 
         public int UpdateRuntimeAuthorizationCallCount =>
             Volatile.Read(ref _updateRuntimeAuthorizationCallCount);
@@ -1048,10 +1332,17 @@ public sealed class NativeCaptureInteropTests
 
         public bool EnqueueChunkDuringNextAuthorizationUpdate { get; set; }
 
+        public Action? AfterRuntimeAuthorizationCommit { get; set; }
+
         public Exception? DestroyException { get; init; }
 
         public Task RuntimeAuthorizationUpdateStarted => Task.Run(
             _runtimeAuthorizationUpdateStarted.Wait);
+
+        public Task RuntimeAuthorizationInvalidationStarted => Task.Run(
+            _runtimeAuthorizationInvalidationStarted.Wait);
+
+        public ulong? NextInvalidationAuthorizationEpoch { get; set; }
 
         public int RevokeSequence { get; private set; }
 
@@ -1102,6 +1393,13 @@ public sealed class NativeCaptureInteropTests
                 _releaseRuntimeAuthorizationUpdate.Wait();
             }
 
+            if (_callbackInvalidationPending
+                && authorization.TargetFlags != 0)
+            {
+                persistenceGeneration = _persistenceGeneration;
+                return NativeCaptureResult.AuthorizationSuperseded;
+            }
+
             LastAuthorizationStructSize = authorization.StructSize;
             LastAuthorizationRevision = authorization.RuntimePolicyRevision;
             LastAuthorizationTargetEpoch = authorization.TargetEpoch;
@@ -1131,6 +1429,15 @@ public sealed class NativeCaptureInteropTests
             _targetEpoch = authorization.TargetEpoch;
             _persistenceGeneration++;
             _runtimeAuthorizationRevoked = authorization.TargetFlags == 0;
+            if (_runtimeAuthorizationRevoked)
+            {
+                _callbackInvalidationPending = false;
+            }
+
+            var afterCommit = AfterRuntimeAuthorizationCommit;
+            AfterRuntimeAuthorizationCommit = null;
+            afterCommit?.Invoke();
+
             persistenceGeneration = NextUpdatePersistenceGeneration
                 ?? _persistenceGeneration;
             NextUpdatePersistenceGeneration = null;
@@ -1155,6 +1462,28 @@ public sealed class NativeCaptureInteropTests
             return NativeCaptureResult.Ok;
         }
 
+        public NativeCaptureResult InvalidateRuntimeAuthorization(
+            SafeCaptureHandle handle,
+            out ulong authorizationEpoch)
+        {
+            _ = handle;
+            Interlocked.Increment(ref _invalidateRuntimeAuthorizationCallCount);
+            if (Interlocked.Exchange(
+                    ref _blockNextRuntimeAuthorizationInvalidation,
+                    0) != 0)
+            {
+                _runtimeAuthorizationInvalidationStarted.Set();
+                _releaseRuntimeAuthorizationInvalidation.Wait();
+            }
+
+            _callbackInvalidationPending = true;
+            _authorizationEpoch = (_authorizationEpoch & ~1UL) + 2;
+            authorizationEpoch = NextInvalidationAuthorizationEpoch
+                ?? _authorizationEpoch;
+            NextInvalidationAuthorizationEpoch = null;
+            return NativeCaptureResult.Ok;
+        }
+
         public NativeCaptureResult IssueCommandAdmission(
             SafeCaptureHandle handle,
             NativeCaptureCommand command,
@@ -1165,6 +1494,7 @@ public sealed class NativeCaptureInteropTests
             _ = handle;
             _ = command;
             if (_runtimeAuthorizationRevoked
+                || _callbackInvalidationPending
                 || expectedPersistenceGeneration != _persistenceGeneration
                 || expectedTargetEpoch != _targetEpoch)
             {
@@ -1213,6 +1543,8 @@ public sealed class NativeCaptureInteropTests
                 _persistenceGeneration++;
                 _runtimeAuthorizationRevoked = true;
             }
+
+            _callbackInvalidationPending = false;
 
             persistenceGeneration = NextRevokePersistenceGeneration
                 ?? _persistenceGeneration;
@@ -1347,8 +1679,11 @@ public sealed class NativeCaptureInteropTests
         public void Dispose()
         {
             _releaseRuntimeAuthorizationUpdate.Set();
+            _releaseRuntimeAuthorizationInvalidation.Set();
             _runtimeAuthorizationUpdateStarted.Dispose();
             _releaseRuntimeAuthorizationUpdate.Dispose();
+            _runtimeAuthorizationInvalidationStarted.Dispose();
+            _releaseRuntimeAuthorizationInvalidation.Dispose();
             _eventPolled.Dispose();
             _eventAvailable.Dispose();
         }
@@ -1363,6 +1698,20 @@ public sealed class NativeCaptureInteropTests
         public void ReleaseRuntimeAuthorizationUpdate()
         {
             _releaseRuntimeAuthorizationUpdate.Set();
+        }
+
+        public void BlockNextRuntimeAuthorizationInvalidation()
+        {
+            _runtimeAuthorizationInvalidationStarted.Reset();
+            _releaseRuntimeAuthorizationInvalidation.Reset();
+            Interlocked.Exchange(
+                ref _blockNextRuntimeAuthorizationInvalidation,
+                1);
+        }
+
+        public void ReleaseRuntimeAuthorizationInvalidation()
+        {
+            _releaseRuntimeAuthorizationInvalidation.Set();
         }
 
         public void Enqueue(

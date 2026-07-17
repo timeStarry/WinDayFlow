@@ -7,12 +7,58 @@ namespace WinDayFlow.Capture.Interop;
 
 public interface INativeCaptureAuthorizationTarget
 {
-    Task<ulong> UpdateRuntimeAuthorizationAsync(
+    long InvalidateRuntimeAuthorization();
+
+    Task<NativeCaptureAuthorizationUpdateResult> UpdateRuntimeAuthorizationAsync(
         NativeCaptureRuntimeAuthorization authorization,
+        long expectedCallbackInvalidationGeneration,
         CancellationToken cancellationToken = default);
 
     Task<ulong> RevokeRuntimeAuthorizationAsync(
         CancellationToken cancellationToken = default);
+}
+
+public enum NativeCaptureAuthorizationUpdateOutcome
+{
+    Applied = 1,
+    SupersededBeforeCommit = 2,
+    AppliedThenSuperseded = 3,
+}
+
+public readonly record struct NativeCaptureAuthorizationUpdateResult
+{
+    public NativeCaptureAuthorizationUpdateResult(
+        ulong persistenceGeneration,
+        NativeCaptureAuthorizationUpdateOutcome outcome)
+    {
+        if (!Enum.IsDefined(outcome))
+        {
+            throw new ArgumentOutOfRangeException(nameof(outcome));
+        }
+
+        if (outcome != NativeCaptureAuthorizationUpdateOutcome
+                .SupersededBeforeCommit
+            && persistenceGeneration == 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(persistenceGeneration),
+                persistenceGeneration,
+                "A committed native authorization update requires a positive persistence generation.");
+        }
+
+        PersistenceGeneration = persistenceGeneration;
+        Outcome = outcome;
+    }
+
+    public ulong PersistenceGeneration { get; }
+
+    public NativeCaptureAuthorizationUpdateOutcome Outcome { get; }
+
+    public bool WasCommitted =>
+        Outcome != NativeCaptureAuthorizationUpdateOutcome.SupersededBeforeCommit;
+
+    public bool WasSuperseded =>
+        Outcome != NativeCaptureAuthorizationUpdateOutcome.Applied;
 }
 
 internal readonly record struct NativeCaptureAdmissionSnapshot(
@@ -22,7 +68,7 @@ internal readonly record struct NativeCaptureAdmissionSnapshot(
     ulong TargetEpoch);
 
 public sealed class NativeCapturePrivacyCoordinator
-    : IAppSettingsCommitBarrier, IDisposable
+    : IAppSettingsCommitBarrier, INativeCapturePrivacySignalSink, IDisposable
 {
     private readonly INativeCaptureAuthorizationTarget _target;
     private readonly object _disposeSync = new();
@@ -47,6 +93,7 @@ public sealed class NativeCapturePrivacyCoordinator
     private int _captureAuthorized;
     private long _invalidationGeneration;
     private long _privacyObservationGeneration;
+    private long _nativeCallbackInvalidationGeneration;
     private PrivacyObservationPhase _privacyObservationPhase =
         PrivacyObservationPhase.Legacy;
     private EventHandler<CaptureRuntimeAuthorizationChangedEventArgs>? _authorizationChanged;
@@ -210,25 +257,26 @@ public sealed class NativeCapturePrivacyCoordinator
 
             var forceNativeUpdate = true;
             PrivacyObservationSnapshot observation;
-            NativeCapturePrivacyContext applied;
+            NativeAuthorizationApplication application;
             do
             {
                 observation = CapturePrivacyObservation();
-                applied = await ApplyUnderGateAsync(
+                application = await ApplyUnderGateAsync(
                         Volatile.Read(ref _committedSettings),
-                        observation.Signals,
+                        observation,
                         forceBlock: Volatile.Read(ref _forcedBlock) != 0,
                         cancellationToken: CancellationToken.None,
                         forceNativeUpdate: forceNativeUpdate)
                     .ConfigureAwait(false);
-                forceNativeUpdate = false;
+                forceNativeUpdate = application.WasSuperseded;
             }
-            while (!IsPrivacyObservationCurrent(observation));
+            while (application.WasSuperseded
+                || !IsPrivacyObservationCurrent(observation));
 
-            var published = PublishAuthorization(applied, observation);
+            var published = PublishAuthorization(application.Context, observation);
             if (!published)
             {
-                await CompensateStaleAllowUnderGateAsync(applied)
+                await CompensateStaleAllowUnderGateAsync(application.Context)
                     .ConfigureAwait(false);
             }
         }
@@ -287,14 +335,22 @@ public sealed class NativeCapturePrivacyCoordinator
             ThrowIfUsable();
             Interlocked.Exchange(ref _forcedBlock, 1);
             SetCaptureAuthorized(authorized: false);
-            var observation = CapturePrivacyObservation();
-            var applied = await ApplyUnderGateAsync(
-                    proposed,
-                    observation.Signals,
-                    forceBlock: true,
-                    CancellationToken.None)
-                .ConfigureAwait(false);
-            PublishAuthorization(applied, observation);
+            PrivacyObservationSnapshot observation;
+            NativeAuthorizationApplication application;
+            do
+            {
+                observation = CapturePrivacyObservation();
+                application = await ApplyUnderGateAsync(
+                        proposed,
+                        observation,
+                        forceBlock: true,
+                        CancellationToken.None)
+                    .ConfigureAwait(false);
+            }
+            while (application.WasSuperseded
+                || !IsPrivacyObservationCurrent(observation));
+
+            PublishAuthorization(application.Context, observation);
         }
         finally
         {
@@ -325,28 +381,31 @@ public sealed class NativeCapturePrivacyCoordinator
                 var forceBlock = Volatile.Read(ref _forcedBlock) != 0
                     && !authorizingTransition;
                 PrivacyObservationSnapshot observation;
-                NativeCapturePrivacyContext applied;
+                NativeAuthorizationApplication application;
                 do
                 {
                     observation = CapturePrivacyObservation();
-                    applied = await ApplyUnderGateAsync(
+                    application = await ApplyUnderGateAsync(
                             current,
-                            observation.Signals,
+                            observation,
                             forceBlock,
                             CancellationToken.None)
                         .ConfigureAwait(false);
                 }
-                while (!IsPrivacyObservationCurrent(observation));
+                while (application.WasSuperseded
+                    || !IsPrivacyObservationCurrent(observation));
 
                 if (authorizingTransition)
                 {
                     ClearForcedBlockIfActive();
                 }
 
-                var published = PublishAuthorization(applied, observation);
+                var published = PublishAuthorization(
+                    application.Context,
+                    observation);
                 if (!published)
                 {
-                    await CompensateStaleAllowUnderGateAsync(applied)
+                    await CompensateStaleAllowUnderGateAsync(application.Context)
                         .ConfigureAwait(false);
                 }
             }
@@ -463,9 +522,40 @@ public sealed class NativeCapturePrivacyCoordinator
             _privacyObservationPhase = PrivacyObservationPhase.Invalidated;
 
             var notification = SetCaptureAuthorizedUnderLock(authorized: false);
+            exhausted ??= notification.GenerationFailure;
             RaiseAuthorizationChanged(
                 notification.Handler,
                 notification.EventArgs);
+
+            try
+            {
+                var nativeGeneration =
+                    _target.InvalidateRuntimeAuthorization();
+                if (nativeGeneration <= 0
+                    || nativeGeneration
+                        <= _nativeCallbackInvalidationGeneration)
+                {
+                    throw new InvalidOperationException(
+                        "The native callback invalidation generation did not advance.");
+                }
+
+                Volatile.Write(
+                    ref _nativeCallbackInvalidationGeneration,
+                    nativeGeneration);
+            }
+            catch (Exception exception)
+            {
+                exhausted = exhausted is null
+                    ? exception as InvalidOperationException
+                        ?? new InvalidOperationException(
+                            "The native callback authorization invalidation failed.",
+                            exception)
+                    : new InvalidOperationException(
+                        exhausted.Message,
+                        new AggregateException(exhausted, exception));
+                Volatile.Write(ref _fatalFailure, exhausted);
+                Interlocked.Exchange(ref _forcedBlock, 1);
+            }
         }
 
         if (exhausted is not null)
@@ -499,13 +589,27 @@ public sealed class NativeCapturePrivacyCoordinator
                 return;
             }
 
-            var applied = await ApplyUnderGateAsync(
+            var observation = CapturePrivacyObservation();
+            if (observation.Generation != privacyObservationGeneration)
+            {
+                return;
+            }
+
+            var application = await ApplyUnderGateAsync(
                     Volatile.Read(ref _committedSettings),
-                    NativeCapturePrivacySignals.FailClosed,
+                    observation with
+                    {
+                        Signals = NativeCapturePrivacySignals.FailClosed,
+                    },
                     forceBlock: true,
                     CancellationToken.None,
                     forceNativeUpdate: true)
                 .ConfigureAwait(false);
+            if (application.WasSuperseded)
+            {
+                return;
+            }
+
             if (!TryCompletePrivacyInvalidationBarrierUnderGate(
                     privacyObservationGeneration))
             {
@@ -513,10 +617,11 @@ public sealed class NativeCapturePrivacyCoordinator
             }
 
             PublishAuthorization(
-                applied,
-                new PrivacyObservationSnapshot(
-                    privacyObservationGeneration,
-                    NativeCapturePrivacySignals.FailClosed));
+                application.Context,
+                observation with
+                {
+                    Signals = NativeCapturePrivacySignals.FailClosed,
+                });
         }
         finally
         {
@@ -554,28 +659,46 @@ public sealed class NativeCapturePrivacyCoordinator
                 return false;
             }
 
-            var applied = await ApplyUnderGateAsync(
+            var observation = CapturePrivacyObservation();
+            if (observation.Generation != privacyObservationGeneration
+                || observation.Signals != signals)
+            {
+                return false;
+            }
+
+            var application = await ApplyUnderGateAsync(
                     Volatile.Read(ref _committedSettings),
-                    signals,
+                    observation,
                     forceBlock: Volatile.Read(ref _forcedBlock) != 0,
                     CancellationToken.None)
                 .ConfigureAwait(false);
+            if (application.WasSuperseded)
+            {
+                if (application.WasCommitted
+                    && IsFullyAllowed(application.Context))
+                {
+                    await CompensateStaleAllowUnderGateAsync(
+                            application.Context)
+                        .ConfigureAwait(false);
+                }
+
+                return false;
+            }
+
             if (!IsPrivacyObservationGenerationCurrent(
                     privacyObservationGeneration))
             {
-                await CompensateStaleAllowUnderGateAsync(applied)
+                await CompensateStaleAllowUnderGateAsync(application.Context)
                     .ConfigureAwait(false);
                 return false;
             }
 
             var published = PublishAuthorization(
-                applied,
-                new PrivacyObservationSnapshot(
-                    privacyObservationGeneration,
-                    signals));
+                application.Context,
+                observation);
             if (!published)
             {
-                await CompensateStaleAllowUnderGateAsync(applied)
+                await CompensateStaleAllowUnderGateAsync(application.Context)
                     .ConfigureAwait(false);
                 return false;
             }
@@ -713,13 +836,30 @@ public sealed class NativeCapturePrivacyCoordinator
         }
 
         SetCaptureAuthorized(authorized: false);
-        _ = await ApplyUnderGateAsync(
-                Volatile.Read(ref _committedSettings),
-                NativeCapturePrivacySignals.FailClosed,
-                forceBlock: true,
-                CancellationToken.None,
-                forceNativeUpdate: true)
-            .ConfigureAwait(false);
+        while (true)
+        {
+            var observation = CapturePrivacyObservation();
+            var compensation = await ApplyUnderGateAsync(
+                    Volatile.Read(ref _committedSettings),
+                    observation with
+                    {
+                        Signals = NativeCapturePrivacySignals.FailClosed,
+                    },
+                    forceBlock: true,
+                    CancellationToken.None,
+                    forceNativeUpdate: true)
+                .ConfigureAwait(false);
+            if (!compensation.WasSuperseded
+                && IsPrivacyObservationCurrent(observation))
+            {
+                return;
+            }
+
+            if (!IsPrivacyObservationGenerationCurrent(observation.Generation))
+            {
+                return;
+            }
+        }
     }
 
     public void Dispose()
@@ -744,21 +884,24 @@ public sealed class NativeCapturePrivacyCoordinator
         GC.SuppressFinalize(this);
     }
 
-    private async Task<NativeCapturePrivacyContext> ApplyUnderGateAsync(
+    private async Task<NativeAuthorizationApplication> ApplyUnderGateAsync(
         AppSettings settings,
-        NativeCapturePrivacySignals signals,
+        PrivacyObservationSnapshot observation,
         bool forceBlock,
         CancellationToken cancellationToken,
         bool forceNativeUpdate = false)
     {
         var preview = Compose(
             settings,
-            signals,
+            observation.Signals,
             forceBlock,
             _lastApplied.RuntimePolicyRevision);
         if (!forceNativeUpdate && HasSameDecisions(_lastApplied, preview))
         {
-            return _lastApplied.PrivacyContext;
+            return new NativeAuthorizationApplication(
+                _lastApplied.PrivacyContext,
+                WasCommitted: true,
+                WasSuperseded: false);
         }
 
         if (_lastApplied.RuntimePolicyRevision == ulong.MaxValue)
@@ -771,19 +914,18 @@ public sealed class NativeCapturePrivacyCoordinator
 
         var next = Compose(
             settings,
-            signals,
+            observation.Signals,
             forceBlock,
             _lastApplied.RuntimePolicyRevision + 1);
+        NativeCaptureAuthorizationUpdateResult update;
         try
         {
-            var persistenceGeneration = await _target
-                .UpdateRuntimeAuthorizationAsync(next, cancellationToken)
+            update = await _target
+                .UpdateRuntimeAuthorizationAsync(
+                    next,
+                    observation.NativeCallbackInvalidationGeneration,
+                    cancellationToken)
                 .ConfigureAwait(false);
-            ValidateAdvancedPersistenceGeneration(
-                persistenceGeneration,
-                "updating runtime authorization");
-
-            Volatile.Write(ref _lastPersistenceGeneration, persistenceGeneration);
         }
         catch (Exception exception)
         {
@@ -791,8 +933,47 @@ public sealed class NativeCapturePrivacyCoordinator
             throw;
         }
 
+        if (!update.WasCommitted)
+        {
+            ThrowIfSupersededObservationRemainedCurrent(
+                update,
+                observation);
+            return new NativeAuthorizationApplication(
+                _lastApplied.PrivacyContext,
+                WasCommitted: false,
+                WasSuperseded: true);
+        }
+
+        ValidateAdvancedPersistenceGeneration(
+            update.PersistenceGeneration,
+            "updating runtime authorization");
+        Volatile.Write(
+            ref _lastPersistenceGeneration,
+            update.PersistenceGeneration);
         Volatile.Write(ref _lastApplied, next);
-        return next.PrivacyContext;
+        ThrowIfSupersededObservationRemainedCurrent(
+            update,
+            observation);
+        return new NativeAuthorizationApplication(
+            next.PrivacyContext,
+            WasCommitted: true,
+            update.WasSuperseded);
+    }
+
+    private void ThrowIfSupersededObservationRemainedCurrent(
+        NativeCaptureAuthorizationUpdateResult update,
+        PrivacyObservationSnapshot observation)
+    {
+        if (!update.WasSuperseded
+            || !IsPrivacyObservationCurrent(observation))
+        {
+            return;
+        }
+
+        var failure = new InvalidOperationException(
+            "The native authorization was superseded without a matching privacy observation invalidation.");
+        MarkFatal(failure);
+        throw failure;
     }
 
     private NativeCaptureAdmissionSnapshot? TryCreateAdmissionSnapshot()
@@ -851,7 +1032,8 @@ public sealed class NativeCapturePrivacyCoordinator
         {
             return new PrivacyObservationSnapshot(
                 PrivacyObservationGeneration,
-                Volatile.Read(ref _signals));
+                Volatile.Read(ref _signals),
+                Volatile.Read(ref _nativeCallbackInvalidationGeneration));
         }
     }
 
@@ -861,7 +1043,10 @@ public sealed class NativeCapturePrivacyCoordinator
         lock (_disposeSync)
         {
             return observation.Generation == PrivacyObservationGeneration
-                && observation.Signals == Volatile.Read(ref _signals);
+                && observation.Signals == Volatile.Read(ref _signals)
+                && observation.NativeCallbackInvalidationGeneration
+                    == Volatile.Read(
+                        ref _nativeCallbackInvalidationGeneration);
         }
     }
 
@@ -971,7 +1156,10 @@ public sealed class NativeCapturePrivacyCoordinator
         {
             observationCurrent = !_disposed
                 && observation.Generation == PrivacyObservationGeneration
-                && observation.Signals == Volatile.Read(ref _signals);
+                && observation.Signals == Volatile.Read(ref _signals)
+                && observation.NativeCallbackInvalidationGeneration
+                    == Volatile.Read(
+                        ref _nativeCallbackInvalidationGeneration);
             var authorized = observationCurrent
                 && Volatile.Read(ref _forcedBlock) == 0
                 && Volatile.Read(ref _fatalFailure) is null
@@ -1017,7 +1205,8 @@ public sealed class NativeCapturePrivacyCoordinator
 
     private (
         EventHandler<CaptureRuntimeAuthorizationChangedEventArgs>? Handler,
-        CaptureRuntimeAuthorizationChangedEventArgs? EventArgs)
+        CaptureRuntimeAuthorizationChangedEventArgs? EventArgs,
+        InvalidOperationException? GenerationFailure)
         SetCaptureAuthorizedUnderLock(bool authorized)
     {
         authorized = authorized
@@ -1026,21 +1215,38 @@ public sealed class NativeCapturePrivacyCoordinator
         var previous = Volatile.Read(ref _captureAuthorized) != 0;
         if (previous == authorized)
         {
-            return (null, null);
+            return (null, null, null);
         }
 
         Volatile.Write(ref _captureAuthorized, authorized ? 1 : 0);
+        InvalidOperationException? generationFailure = null;
         if (!authorized)
         {
-            var generation = checked(InvalidationGeneration + 1);
-            Volatile.Write(ref _invalidationGeneration, generation);
+            var currentGeneration = InvalidationGeneration;
+            if (currentGeneration == long.MaxValue)
+            {
+                generationFailure = new InvalidOperationException(
+                    "The capture admission invalidation generation has been exhausted; the native handle must be recreated.");
+                _ = Interlocked.CompareExchange(
+                    ref _fatalFailure,
+                    generationFailure,
+                    null);
+                Interlocked.Exchange(ref _forcedBlock, 1);
+            }
+            else
+            {
+                Volatile.Write(
+                    ref _invalidationGeneration,
+                    currentGeneration + 1);
+            }
         }
 
         return (
             _authorizationChanged,
             new CaptureRuntimeAuthorizationChangedEventArgs(
                 authorized,
-                InvalidationGeneration));
+                InvalidationGeneration),
+            generationFailure);
     }
 
     private void RaiseAuthorizationChanged(
@@ -1180,14 +1386,23 @@ public sealed class NativeCapturePrivacyCoordinator
             {
                 try
                 {
-                    var updateGeneration = await _target
-                        .UpdateRuntimeAuthorizationAsync(revoked, CancellationToken.None)
+                    var observation = CapturePrivacyObservation();
+                    var update = await _target
+                        .UpdateRuntimeAuthorizationAsync(
+                            revoked,
+                            observation.NativeCallbackInvalidationGeneration,
+                            CancellationToken.None)
                         .ConfigureAwait(false);
-                    ValidateAdvancedPersistenceGeneration(
-                        updateGeneration,
-                        "quiescing");
-                    Volatile.Write(ref _lastPersistenceGeneration, updateGeneration);
-                    Volatile.Write(ref _lastApplied, revoked);
+                    if (update.WasCommitted)
+                    {
+                        ValidateAdvancedPersistenceGeneration(
+                            update.PersistenceGeneration,
+                            "quiescing");
+                        Volatile.Write(
+                            ref _lastPersistenceGeneration,
+                            update.PersistenceGeneration);
+                        Volatile.Write(ref _lastApplied, revoked);
+                    }
                 }
                 catch (Exception exception)
                 {
@@ -1245,9 +1460,15 @@ public sealed class NativeCapturePrivacyCoordinator
         EventHandler<CaptureRuntimeAuthorizationChangedEventArgs> Handler,
         CaptureRuntimeAuthorizationChangedEventArgs EventArgs);
 
+    private readonly record struct NativeAuthorizationApplication(
+        NativeCapturePrivacyContext Context,
+        bool WasCommitted,
+        bool WasSuperseded);
+
     private readonly record struct PrivacyObservationSnapshot(
         long Generation,
-        NativeCapturePrivacySignals Signals);
+        NativeCapturePrivacySignals Signals,
+        long NativeCallbackInvalidationGeneration);
 
     private enum PrivacyObservationPhase
     {

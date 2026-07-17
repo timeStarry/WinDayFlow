@@ -162,6 +162,20 @@ internal enum WindowsCapturePrivacyInvalidationReason : long
     MonitorFault = 1L << 7,
     Shutdown = 1L << 8,
     ObjectLocationChanged = 1L << 9,
+    DisplayTopologyChanged = 1L << 10,
+    SessionUnavailable = 1L << 11,
+    SessionAvailable = 1L << 12,
+    SessionChanged = 1L << 13,
+    PowerSuspending = 1L << 14,
+    PowerResumed = 1L << 15,
+}
+
+[Flags]
+internal enum WindowsCapturePrivacyHold
+{
+    None = 0,
+    SessionUnavailable = 1 << 0,
+    PowerSuspended = 1 << 1,
 }
 
 public enum WindowsCapturePrivacyMonitorFault
@@ -220,6 +234,8 @@ public sealed class WindowsCapturePrivacyMonitor : IAsyncDisposable
     private long _lastProcessedGeneration;
     private long _lastPublishedGeneration;
     private long _observedReasonBits;
+    private long _holdGeneration;
+    private WindowsCapturePrivacyHold _activeHolds;
     private int _terminalFault;
     private int _sourceCleanupFault;
     private int _startAttempted;
@@ -261,6 +277,17 @@ public sealed class WindowsCapturePrivacyMonitor : IAsyncDisposable
     internal WindowsCapturePrivacyInvalidationReason ObservedInvalidationReasons =>
         (WindowsCapturePrivacyInvalidationReason)Volatile.Read(
             ref _observedReasonBits);
+
+    internal WindowsCapturePrivacyHold ActiveHolds
+    {
+        get
+        {
+            lock (_invalidationSync)
+            {
+                return _activeHolds;
+            }
+        }
+    }
 
     public async Task StartAsync(CancellationToken cancellationToken = default)
     {
@@ -419,7 +446,9 @@ public sealed class WindowsCapturePrivacyMonitor : IAsyncDisposable
 
                 try
                 {
-                    InvalidateWithoutWake(MapReason(change));
+                    var reason = MapReason(change);
+                    ApplyHoldChangeUnderLock(change);
+                    InvalidateWithoutWake(reason);
                 }
                 catch
                 {
@@ -515,6 +544,7 @@ public sealed class WindowsCapturePrivacyMonitor : IAsyncDisposable
             }
 
             AdvanceGeneration(ref _latestGeneration, generation);
+            _holdGeneration = generation;
             _ = Interlocked.Or(ref _observedReasonBits, (long)reason);
         }
         catch (Exception exception)
@@ -617,33 +647,47 @@ public sealed class WindowsCapturePrivacyMonitor : IAsyncDisposable
                         return;
                     }
 
+                    var resolution = CaptureResolutionDirective(generation);
+                    if (resolution == ObservationResolutionDirective.Stale)
+                    {
+                        continue;
+                    }
+
                     WindowsCapturePrivacyObservation observation;
-                    try
+                    if (resolution
+                        == ObservationResolutionDirective.PublishFailClosed)
                     {
-                        observation = await _sampler
-                            .SampleAsync(_workerCancellation.Token)
-                            .ConfigureAwait(false);
+                        observation = WindowsCapturePrivacyObservation.FailClosed;
                     }
-                    catch (OperationCanceledException)
-                        when (_workerCancellation.IsCancellationRequested)
+                    else
                     {
-                        return;
-                    }
-                    catch (Exception exception)
-                        when (IsRecoverableSampleException(exception))
-                    {
-                        if (!await PublishRecoverableSampleFailureAsync(generation)
-                                .ConfigureAwait(false))
+                        try
+                        {
+                            observation = await _sampler
+                                .SampleAsync(_workerCancellation.Token)
+                                .ConfigureAwait(false);
+                        }
+                        catch (OperationCanceledException)
+                            when (_workerCancellation.IsCancellationRequested)
                         {
                             return;
                         }
-
-                        if (generation == Volatile.Read(ref _latestGeneration))
+                        catch (Exception exception)
+                            when (IsRecoverableSampleException(exception))
                         {
-                            break;
-                        }
+                            if (!await PublishRecoverableSampleFailureAsync(generation)
+                                    .ConfigureAwait(false))
+                            {
+                                return;
+                            }
 
-                        continue;
+                            if (generation == Volatile.Read(ref _latestGeneration))
+                            {
+                                break;
+                            }
+
+                            continue;
+                        }
                     }
 
                     if (IsTerminalTransitionPending())
@@ -1101,6 +1145,42 @@ public sealed class WindowsCapturePrivacyMonitor : IAsyncDisposable
         }
     }
 
+    private void ApplyHoldChangeUnderLock(WindowsCaptureWinEventChange change)
+    {
+        switch (change)
+        {
+            case WindowsCaptureWinEventChange.SessionUnavailable:
+                _activeHolds |= WindowsCapturePrivacyHold.SessionUnavailable;
+                break;
+            case WindowsCaptureWinEventChange.SessionAvailable:
+                _activeHolds &= ~WindowsCapturePrivacyHold.SessionUnavailable;
+                break;
+            case WindowsCaptureWinEventChange.PowerSuspending:
+                _activeHolds |= WindowsCapturePrivacyHold.PowerSuspended;
+                break;
+            case WindowsCaptureWinEventChange.PowerResumed:
+                _activeHolds &= ~WindowsCapturePrivacyHold.PowerSuspended;
+                break;
+        }
+    }
+
+    private ObservationResolutionDirective CaptureResolutionDirective(
+        long generation)
+    {
+        lock (_invalidationSync)
+        {
+            if (generation != Volatile.Read(ref _latestGeneration)
+                || generation != _holdGeneration)
+            {
+                return ObservationResolutionDirective.Stale;
+            }
+
+            return _activeHolds == WindowsCapturePrivacyHold.None
+                ? ObservationResolutionDirective.Sample
+                : ObservationResolutionDirective.PublishFailClosed;
+        }
+    }
+
     private static WindowsCapturePrivacyInvalidationReason MapReason(
         WindowsCaptureWinEventChange change)
     {
@@ -1118,8 +1198,27 @@ public sealed class WindowsCapturePrivacyMonitor : IAsyncDisposable
                 WindowsCapturePrivacyInvalidationReason.ObjectNameChanged,
             WindowsCaptureWinEventChange.ObjectLocationChanged =>
                 WindowsCapturePrivacyInvalidationReason.ObjectLocationChanged,
+            WindowsCaptureWinEventChange.DisplayTopologyChanged =>
+                WindowsCapturePrivacyInvalidationReason.DisplayTopologyChanged,
+            WindowsCaptureWinEventChange.SessionUnavailable =>
+                WindowsCapturePrivacyInvalidationReason.SessionUnavailable,
+            WindowsCaptureWinEventChange.SessionAvailable =>
+                WindowsCapturePrivacyInvalidationReason.SessionAvailable,
+            WindowsCaptureWinEventChange.SessionChanged =>
+                WindowsCapturePrivacyInvalidationReason.SessionChanged,
+            WindowsCaptureWinEventChange.PowerSuspending =>
+                WindowsCapturePrivacyInvalidationReason.PowerSuspending,
+            WindowsCaptureWinEventChange.PowerResumed =>
+                WindowsCapturePrivacyInvalidationReason.PowerResumed,
             _ => throw new ArgumentOutOfRangeException(nameof(change)),
         };
+    }
+
+    private enum ObservationResolutionDirective
+    {
+        Stale = 0,
+        Sample = 1,
+        PublishFailClosed = 2,
     }
 
     private static bool IsRecoverableSampleException(Exception exception)
