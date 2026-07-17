@@ -41,6 +41,8 @@ enum {
   WDF_CAPTURE_RESULT_TARGET_MISMATCH = -9,
   WDF_CAPTURE_RESULT_POLICY_REVISION_GAP = -10,
   WDF_CAPTURE_RESULT_GENERATION_EXHAUSTED = -11,
+  WDF_CAPTURE_RESULT_ADMISSION_REQUIRED = -12,
+  WDF_CAPTURE_RESULT_ADMISSION_REJECTED = -13,
   WDF_CAPTURE_RESULT_INTERNAL_ERROR = -255
 };
 
@@ -122,7 +124,14 @@ enum {
   WDF_CAPTURE_CAPABILITY_EVIDENCE_EXTRACTION = 1ULL << 4,
   WDF_CAPTURE_CAPABILITY_TARGET_SCOPED_AUTHORIZATION = 1ULL << 5,
   WDF_CAPTURE_CAPABILITY_PERSISTENCE_GENERATION_BARRIER = 1ULL << 6,
-  WDF_CAPTURE_CAPABILITY_DETERMINISTIC_STOP = 1ULL << 7
+  WDF_CAPTURE_CAPABILITY_DETERMINISTIC_STOP = 1ULL << 7,
+  WDF_CAPTURE_CAPABILITY_COMMAND_ADMISSION = 1ULL << 8
+};
+
+typedef int32_t wdf_capture_command;
+enum {
+  WDF_CAPTURE_COMMAND_START = 1,
+  WDF_CAPTURE_COMMAND_RESUME = 2
 };
 
 typedef uint32_t wdf_capture_target_flags;
@@ -183,6 +192,18 @@ typedef struct wdf_capture_runtime_authorization_v1 {
   uint32_t reserved[8];
 } wdf_capture_runtime_authorization_v1;
 
+typedef struct wdf_capture_command_admission_v1 {
+  uint32_t struct_size;
+  uint32_t abi_version;
+  uint64_t instance_epoch;
+  uint64_t runtime_policy_revision;
+  uint64_t persistence_generation;
+  uint64_t target_epoch;
+  uint64_t authorization_epoch;
+  uint64_t nonce_low;
+  uint64_t nonce_high;
+} wdf_capture_command_admission_v1;
+
 #if defined(_MSC_VER)
 #pragma warning(push)
 #pragma warning(disable : 4201)
@@ -239,6 +260,17 @@ static_assert(offsetof(wdf_capture_runtime_authorization_v1, target_flags) ==
 static_assert(offsetof(wdf_capture_runtime_authorization_v1,
                        consent_granted) == 48);
 static_assert(offsetof(wdf_capture_runtime_authorization_v1, reserved) == 80);
+static_assert(sizeof(wdf_capture_command_admission_v1) == 64);
+static_assert(offsetof(wdf_capture_command_admission_v1, instance_epoch) == 8);
+static_assert(offsetof(wdf_capture_command_admission_v1,
+                       runtime_policy_revision) == 16);
+static_assert(offsetof(wdf_capture_command_admission_v1,
+                       persistence_generation) == 24);
+static_assert(offsetof(wdf_capture_command_admission_v1, target_epoch) == 32);
+static_assert(offsetof(wdf_capture_command_admission_v1,
+                       authorization_epoch) == 40);
+static_assert(offsetof(wdf_capture_command_admission_v1, nonce_low) == 48);
+static_assert(offsetof(wdf_capture_command_admission_v1, nonce_high) == 56);
 static_assert(sizeof(wdf_capture_event_v1) == 80);
 static_assert(offsetof(wdf_capture_event_v1, sequence) == 8);
 static_assert(offsetof(wdf_capture_event_v1, persistence_generation) == 48);
@@ -277,6 +309,25 @@ _Static_assert(offsetof(wdf_capture_runtime_authorization_v1,
                "runtime authorization decisions offset changed");
 _Static_assert(offsetof(wdf_capture_runtime_authorization_v1, reserved) == 80,
                "runtime authorization reserved offset changed");
+_Static_assert(sizeof(wdf_capture_command_admission_v1) == 64,
+               "wdf_capture_command_admission_v1 ABI layout changed");
+_Static_assert(offsetof(wdf_capture_command_admission_v1, instance_epoch) == 8,
+               "command admission instance offset changed");
+_Static_assert(offsetof(wdf_capture_command_admission_v1,
+                        runtime_policy_revision) == 16,
+               "command admission revision offset changed");
+_Static_assert(offsetof(wdf_capture_command_admission_v1,
+                        persistence_generation) == 24,
+               "command admission generation offset changed");
+_Static_assert(offsetof(wdf_capture_command_admission_v1, target_epoch) == 32,
+               "command admission target offset changed");
+_Static_assert(offsetof(wdf_capture_command_admission_v1,
+                        authorization_epoch) == 40,
+               "command admission authorization offset changed");
+_Static_assert(offsetof(wdf_capture_command_admission_v1, nonce_low) == 48,
+               "command admission low nonce offset changed");
+_Static_assert(offsetof(wdf_capture_command_admission_v1, nonce_high) == 56,
+               "command admission high nonce offset changed");
 _Static_assert(sizeof(wdf_capture_event_v1) == 80,
                "wdf_capture_event_v1 ABI layout changed");
 _Static_assert(offsetof(wdf_capture_event_v1, sequence) == 8,
@@ -316,13 +367,31 @@ wdf_capture_revoke_runtime_authorization(
     uint64_t* persistence_generation) WDF_CAPTURE_NOEXCEPT;
 
 WDF_CAPTURE_API wdf_capture_result WDF_CAPTURE_CALL
+wdf_capture_issue_command_admission(
+    wdf_capture_handle handle,
+    wdf_capture_command command,
+    uint64_t expected_persistence_generation,
+    uint64_t expected_target_epoch,
+    wdf_capture_command_admission_v1* admission) WDF_CAPTURE_NOEXCEPT;
+
+WDF_CAPTURE_API wdf_capture_result WDF_CAPTURE_CALL
 wdf_capture_start(wdf_capture_handle handle) WDF_CAPTURE_NOEXCEPT;
+
+WDF_CAPTURE_API wdf_capture_result WDF_CAPTURE_CALL
+wdf_capture_start_authorized(
+    wdf_capture_handle handle,
+    const wdf_capture_command_admission_v1* admission) WDF_CAPTURE_NOEXCEPT;
 
 WDF_CAPTURE_API wdf_capture_result WDF_CAPTURE_CALL
 wdf_capture_pause(wdf_capture_handle handle) WDF_CAPTURE_NOEXCEPT;
 
 WDF_CAPTURE_API wdf_capture_result WDF_CAPTURE_CALL
 wdf_capture_resume(wdf_capture_handle handle) WDF_CAPTURE_NOEXCEPT;
+
+WDF_CAPTURE_API wdf_capture_result WDF_CAPTURE_CALL
+wdf_capture_resume_authorized(
+    wdf_capture_handle handle,
+    const wdf_capture_command_admission_v1* admission) WDF_CAPTURE_NOEXCEPT;
 
 WDF_CAPTURE_API wdf_capture_result WDF_CAPTURE_CALL
 wdf_capture_request_stop(wdf_capture_handle handle) WDF_CAPTURE_NOEXCEPT;

@@ -1,3 +1,4 @@
+using WinDayFlow.Application.Capture;
 using WinDayFlow.Application.Settings;
 using WinDayFlow.Capture.Interop;
 using Xunit;
@@ -8,6 +9,60 @@ public sealed class NativeCapturePrivacyCoordinatorTests
 {
     private static readonly DateTimeOffset ConsentTime =
         new(2026, 7, 16, 0, 0, 0, TimeSpan.Zero);
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    public async Task EveryAdmissionSnapshotFieldIsRevalidatedAtConsumption(
+        int field)
+    {
+        var target = new TestPrivacyTarget();
+        using var coordinator = new NativeCapturePrivacyCoordinator(
+            target,
+            NativeCapturePrivacyContext.FailClosed(runtimePolicyRevision: 1));
+        await coordinator.UpdateSignalsAsync(CreateAllowedSignals());
+        await CommitAsync(coordinator, AppSettings.Default, CreateEnabledSettings());
+
+        var issued = await coordinator.TryIssueAdmissionAsync(
+            static (_, _) => Task.FromResult(true),
+            CancellationToken.None);
+        Assert.NotNull(issued);
+        var stale = field switch
+        {
+            0 => issued.Value with
+            {
+                InvalidationGeneration = issued.Value.InvalidationGeneration + 1,
+            },
+            1 => issued.Value with
+            {
+                RuntimePolicyRevision = issued.Value.RuntimePolicyRevision + 1,
+            },
+            2 => issued.Value with
+            {
+                PersistenceGeneration = issued.Value.PersistenceGeneration + 1,
+            },
+            3 => issued.Value with
+            {
+                TargetEpoch = issued.Value.TargetEpoch + 1,
+            },
+            _ => throw new ArgumentOutOfRangeException(nameof(field)),
+        };
+        var executed = false;
+
+        await Assert.ThrowsAsync<CaptureRuntimeAdmissionRejectedException>(
+            () => coordinator.ExecuteAdmissionAsync(
+                stale,
+                () =>
+                {
+                    executed = true;
+                    return Task.CompletedTask;
+                },
+                CancellationToken.None));
+
+        Assert.False(executed);
+    }
 
     [Fact]
     public void InitialContextMustBeFailClosed()

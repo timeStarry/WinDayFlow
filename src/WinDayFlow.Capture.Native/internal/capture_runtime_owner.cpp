@@ -10,13 +10,16 @@ CaptureRuntimeOwner::~CaptureRuntimeOwner() {
   Shutdown();
 }
 
-bool CaptureRuntimeOwner::Start(Worker worker) {
-  if (!worker) {
+bool CaptureRuntimeOwner::Start(CaptureCommandAdmissionPermit permit,
+                                Worker worker) {
+  if (!permit || permit.command() != CaptureCommand::kStart || !worker) {
     return false;
   }
 
   std::lock_guard lock(mutex_);
-  if (!joined_ || worker_.joinable()) {
+  if (owner_epoch_exhausted_ ||
+      permit.runtime_owner_epoch() != owner_epoch_ || !joined_ ||
+      worker_.joinable() || !AdvanceOwnerEpochUnderLock()) {
     return false;
   }
 
@@ -39,12 +42,27 @@ bool CaptureRuntimeOwner::Start(Worker worker) {
   return true;
 }
 
+bool CaptureRuntimeOwner::Resume(CaptureCommandAdmissionPermit permit) {
+  if (!permit || permit.command() != CaptureCommand::kResume) {
+    return false;
+  }
+
+  std::lock_guard lock(mutex_);
+  if (owner_epoch_exhausted_ ||
+      permit.runtime_owner_epoch() != owner_epoch_ || joined_ ||
+      stop_requested_ || worker_exited_ || !worker_.joinable()) {
+    return false;
+  }
+  return AdvanceOwnerEpochUnderLock();
+}
+
 CaptureRuntimeStopResult CaptureRuntimeOwner::RequestStop() {
   CaptureRuntimeStopResult result = CaptureRuntimeStopResult::kAlreadyStopped;
   {
     std::lock_guard lock(mutex_);
     if (!joined_ && !stop_requested_) {
       stop_requested_ = true;
+      static_cast<void>(AdvanceOwnerEpochUnderLock());
       result = CaptureRuntimeStopResult::kStopRequested;
     }
   }
@@ -129,19 +147,36 @@ uint64_t CaptureRuntimeOwner::join_count() const {
   return join_count_;
 }
 
+uint64_t CaptureRuntimeOwner::owner_epoch() const {
+  std::lock_guard lock(mutex_);
+  return owner_epoch_exhausted_ ? 0 : owner_epoch_;
+}
+
 void CaptureRuntimeOwner::WorkerMain(Worker worker) noexcept {
+  bool failed = false;
   try {
     worker(*this);
   } catch (...) {
-    std::lock_guard lock(mutex_);
-    worker_failed_ = true;
+    failed = true;
   }
 
   {
     std::lock_guard lock(mutex_);
+    worker_failed_ = worker_failed_ || failed;
     worker_exited_ = true;
+    static_cast<void>(AdvanceOwnerEpochUnderLock());
   }
   state_changed_.notify_all();
+}
+
+bool CaptureRuntimeOwner::AdvanceOwnerEpochUnderLock() {
+  if (owner_epoch_exhausted_ ||
+      owner_epoch_ == std::numeric_limits<uint64_t>::max()) {
+    owner_epoch_exhausted_ = true;
+    return false;
+  }
+  ++owner_epoch_;
+  return true;
 }
 
 }  // namespace windayflow::capture

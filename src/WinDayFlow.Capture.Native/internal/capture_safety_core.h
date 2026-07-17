@@ -3,6 +3,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <shared_mutex>
@@ -34,6 +35,35 @@ struct PersistenceToken {
   CaptureTargetIdentity target;
 
   bool operator==(const PersistenceToken&) const = default;
+};
+
+enum class CaptureCommand {
+  kStart = WDF_CAPTURE_COMMAND_START,
+  kResume = WDF_CAPTURE_COMMAND_RESUME,
+};
+
+struct CaptureCommandAdmission {
+  uint64_t instance_epoch = 0;
+  uint64_t runtime_policy_revision = 0;
+  uint64_t persistence_generation = 0;
+  uint64_t target_epoch = 0;
+  uint64_t authorization_epoch = 0;
+  uint64_t nonce_low = 0;
+  uint64_t nonce_high = 0;
+
+  bool operator==(const CaptureCommandAdmission&) const = default;
+};
+
+using CommandAdmissionNonceGenerator =
+    std::function<bool(uint64_t* nonce_low, uint64_t* nonce_high)>;
+
+enum class CaptureCommandAdmissionResult {
+  kOk,
+  kInvalidArgument,
+  kPolicyBlocked,
+  kAdmissionRejected,
+  kGenerationExhausted,
+  kInternalError,
 };
 
 struct CaptureSafetyUpdateTicket {
@@ -75,11 +105,48 @@ class PersistencePermit {
   std::shared_lock<std::shared_timed_mutex> lock_;
 };
 
+class CaptureCommandAdmissionPermit {
+ public:
+  CaptureCommandAdmissionPermit() = default;
+  CaptureCommandAdmissionPermit(const CaptureCommandAdmissionPermit&) = delete;
+  CaptureCommandAdmissionPermit& operator=(
+      const CaptureCommandAdmissionPermit&) = delete;
+  CaptureCommandAdmissionPermit(CaptureCommandAdmissionPermit&&) noexcept =
+      default;
+  CaptureCommandAdmissionPermit& operator=(
+      CaptureCommandAdmissionPermit&&) noexcept = default;
+
+  explicit operator bool() const { return lock_.owns_lock(); }
+  CaptureCommand command() const { return command_; }
+  uint64_t runtime_owner_epoch() const { return runtime_owner_epoch_; }
+  const PersistenceToken& persistence_token() const {
+    return persistence_token_;
+  }
+
+ private:
+  friend class CaptureSafetyCore;
+  CaptureCommandAdmissionPermit(
+      std::shared_lock<std::shared_timed_mutex> lock,
+      CaptureCommand command,
+      uint64_t runtime_owner_epoch,
+      PersistenceToken persistence_token)
+      : lock_(std::move(lock)),
+        command_(command),
+        runtime_owner_epoch_(runtime_owner_epoch),
+        persistence_token_(std::move(persistence_token)) {}
+
+  std::shared_lock<std::shared_timed_mutex> lock_;
+  CaptureCommand command_ = CaptureCommand::kStart;
+  uint64_t runtime_owner_epoch_ = 0;
+  PersistenceToken persistence_token_;
+};
+
 class CaptureSafetyCore {
  public:
   CaptureSafetyCore();
   CaptureSafetyCore(uint64_t instance_epoch,
-                    uint64_t initial_persistence_generation);
+                     uint64_t initial_persistence_generation,
+                     CommandAdmissionNonceGenerator nonce_generator = {});
 
   CaptureSafetyUpdateResult UpdateRuntimeAuthorization(
       const RuntimeAuthorization& authorization,
@@ -101,6 +168,18 @@ class CaptureSafetyCore {
                       uint64_t* persistence_generation);
   CaptureSafetyUpdateResult Revoke(uint64_t* persistence_generation);
 
+  CaptureCommandAdmissionResult IssueCommandAdmission(
+      CaptureCommand command,
+      uint64_t expected_persistence_generation,
+      uint64_t expected_target_epoch,
+      uint64_t runtime_owner_epoch,
+      CaptureCommandAdmission* admission);
+  CaptureCommandAdmissionResult AcquireCommandAdmissionPermit(
+      const CaptureCommandAdmission& admission,
+      CaptureCommand expected_command,
+      uint64_t runtime_owner_epoch,
+      CaptureCommandAdmissionPermit* permit) const;
+
   std::optional<PersistenceToken> MintPersistenceToken(
       const CaptureTargetIdentity& observed_target) const;
   PersistencePermit AcquirePersistencePermit(
@@ -110,6 +189,7 @@ class CaptureSafetyCore {
   uint64_t instance_epoch() const;
   uint64_t persistence_generation() const;
   uint64_t target_epoch() const;
+  uint64_t authorization_epoch() const noexcept;
   CaptureSafetyObservableSnapshot observable_snapshot() const;
   bool admission_open() const noexcept;
   bool revoked() const;
@@ -130,6 +210,13 @@ class CaptureSafetyCore {
       const PersistenceToken& token,
       const CaptureTargetIdentity& observed_target) const;
 
+  struct IssuedCommandAdmission {
+    CaptureCommandAdmission admission;
+    CaptureCommand command = CaptureCommand::kStart;
+    CaptureTargetIdentity target;
+    uint64_t runtime_owner_epoch = 0;
+  };
+
   mutable std::shared_timed_mutex mutex_;
   RuntimeAuthorization current_;
   std::optional<CaptureTargetIdentity> last_target_;
@@ -143,6 +230,10 @@ class CaptureSafetyCore {
   bool legacy_tainted_ = false;
   bool generation_exhausted_ = false;
   std::atomic<uint64_t> admission_stamp_{2};
+  // Command records are always locked before the shared safety gate.
+  mutable std::mutex command_mutex_;
+  mutable std::optional<IssuedCommandAdmission> issued_command_admission_;
+  CommandAdmissionNonceGenerator nonce_generator_;
   mutable std::mutex observable_mutex_;
   CaptureSafetyObservableSnapshot observable_{1, 0};
 };

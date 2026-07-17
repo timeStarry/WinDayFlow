@@ -23,14 +23,24 @@ public sealed class UnavailableCaptureBackend : ICaptureBackend
         remove => _statusChanged -= value;
     }
 
-    public Task StartAsync(CancellationToken cancellationToken = default) =>
-        NotSupportedAsync(cancellationToken);
+    public Task StartAsync(
+        ICaptureRuntimeAdmissionStamp admissionStamp,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(admissionStamp);
+        return NotSupportedAsync(cancellationToken);
+    }
 
     public Task PauseAsync(CancellationToken cancellationToken = default) =>
         NotSupportedAsync(cancellationToken);
 
-    public Task ResumeAsync(CancellationToken cancellationToken = default) =>
-        NotSupportedAsync(cancellationToken);
+    public Task ResumeAsync(
+        ICaptureRuntimeAdmissionStamp admissionStamp,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(admissionStamp);
+        return NotSupportedAsync(cancellationToken);
+    }
 
     public Task StopAsync(CancellationToken cancellationToken = default) =>
         NotSupportedAsync(cancellationToken);

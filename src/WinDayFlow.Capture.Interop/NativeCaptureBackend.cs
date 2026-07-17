@@ -6,7 +6,7 @@ using WinDayFlow.Application.Capture;
 
 namespace WinDayFlow.Capture.Interop;
 
-public sealed class NativeCaptureBackend
+internal sealed class NativeCaptureBackend
     : INativeCaptureRuntimeBackend, IDisposable
 {
     private const string FoundationUnavailableDetail =
@@ -136,6 +136,10 @@ public sealed class NativeCaptureBackend
         == (NativeCaptureCapabilities.TargetScopedAuthorization
             | NativeCaptureCapabilities.PersistenceGenerationBarrier);
 
+    public bool SupportsCommandAdmission =>
+        (Capabilities & NativeCaptureAbiContract.RuntimeOwnerCapabilities)
+        == NativeCaptureAbiContract.RuntimeOwnerCapabilities;
+
     internal bool IsShutdownStarted =>
         Volatile.Read(ref _shutdownStarted) != 0;
 
@@ -260,10 +264,64 @@ public sealed class NativeCaptureBackend
         }
     }
 
-    public Task StartAsync(CancellationToken cancellationToken = default) =>
-        InvokeLifecycleAsync(
-            "start",
-            _nativeApi.Start,
+    public async Task<NativeCaptureCommandAdmissionV1?> TryIssueCommandAdmissionAsync(
+        CaptureAdmissionOperation operation,
+        ulong expectedRuntimePolicyRevision,
+        ulong expectedPersistenceGeneration,
+        ulong expectedTargetEpoch,
+        CancellationToken cancellationToken = default)
+    {
+        EnsureCommandAdmissionCapability();
+        ArgumentOutOfRangeException.ThrowIfZero(expectedRuntimePolicyRevision);
+        ArgumentOutOfRangeException.ThrowIfZero(expectedPersistenceGeneration);
+        ArgumentOutOfRangeException.ThrowIfZero(expectedTargetEpoch);
+        var command = operation switch
+        {
+            CaptureAdmissionOperation.Start => NativeCaptureCommand.Start,
+            CaptureAdmissionOperation.Resume => NativeCaptureCommand.Resume,
+            _ => throw new ArgumentOutOfRangeException(nameof(operation)),
+        };
+
+        await EnterLifecycleAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            ThrowIfDisposed();
+            ThrowIfShuttingDown();
+            var admission = NativeCaptureCommandAdmissionV1.Create();
+            var result = _nativeApi.IssueCommandAdmission(
+                _handle,
+                command,
+                expectedPersistenceGeneration,
+                expectedTargetEpoch,
+                ref admission);
+            if (result is NativeCaptureResult.AdmissionRejected
+                or NativeCaptureResult.PolicyBlocked
+                or NativeCaptureResult.InvalidState)
+            {
+                return null;
+            }
+
+            ThrowForResult(result, "issue_command_admission");
+            ValidateCommandAdmission(
+                admission,
+                expectedRuntimePolicyRevision,
+                expectedPersistenceGeneration,
+                expectedTargetEpoch);
+            return admission;
+        }
+        finally
+        {
+            _lifecycleGate.Release();
+        }
+    }
+
+    public Task StartAuthorizedAsync(
+        NativeCaptureCommandAdmissionV1 admission,
+        CancellationToken cancellationToken = default) =>
+        InvokeAuthorizedLifecycleAsync(
+            "start_authorized",
+            admission,
+            start: true,
             cancellationToken);
 
     public Task PauseAsync(CancellationToken cancellationToken = default) =>
@@ -272,10 +330,13 @@ public sealed class NativeCaptureBackend
             _nativeApi.Pause,
             cancellationToken);
 
-    public Task ResumeAsync(CancellationToken cancellationToken = default) =>
-        InvokeLifecycleAsync(
-            "resume",
-            _nativeApi.Resume,
+    public Task ResumeAuthorizedAsync(
+        NativeCaptureCommandAdmissionV1 admission,
+        CancellationToken cancellationToken = default) =>
+        InvokeAuthorizedLifecycleAsync(
+            "resume_authorized",
+            admission,
+            start: false,
             cancellationToken);
 
     public async Task StopAsync(CancellationToken cancellationToken = default)
@@ -690,6 +751,37 @@ public sealed class NativeCaptureBackend
             ThrowIfDisposed();
             ThrowIfShuttingDown();
             ThrowForResult(nativeOperation(_handle), operation);
+        }
+        finally
+        {
+            _lifecycleGate.Release();
+        }
+    }
+
+    private async Task InvokeAuthorizedLifecycleAsync(
+        string operation,
+        NativeCaptureCommandAdmissionV1 admission,
+        bool start,
+        CancellationToken cancellationToken)
+    {
+        EnsureCommandAdmissionCapability();
+        ValidateCommandAdmission(admission);
+        await EnterLifecycleAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            ThrowIfDisposed();
+            ThrowIfShuttingDown();
+            var result = start
+                ? _nativeApi.StartAuthorized(_handle, ref admission)
+                : _nativeApi.ResumeAuthorized(_handle, ref admission);
+            if (result is NativeCaptureResult.AdmissionRejected
+                or NativeCaptureResult.PolicyBlocked
+                or NativeCaptureResult.InvalidState)
+            {
+                throw new CaptureRuntimeAdmissionRejectedException();
+            }
+
+            ThrowForResult(result, operation);
         }
         finally
         {
@@ -1252,6 +1344,12 @@ public sealed class NativeCaptureBackend
             return "The native capture runtime safety capabilities require the privacy guard and event queue foundation.";
         }
 
+        if (capabilities.HasFlag(NativeCaptureCapabilities.CommandAdmission)
+            && advertisedSafety != safetyTrio)
+        {
+            return "The native command-admission capability requires the complete runtime safety set.";
+        }
+
         var screenCapture = capabilities.HasFlag(
             NativeCaptureCapabilities.ScreenCapture);
         var h264Chunks = capabilities.HasFlag(
@@ -1296,6 +1394,42 @@ public sealed class NativeCaptureBackend
         {
             throw new NotSupportedException(
                 "The native capture binary does not provide target-scoped runtime authorization and a persistence generation barrier.");
+        }
+    }
+
+    private void EnsureCommandAdmissionCapability()
+    {
+        ThrowIfDisposed();
+        if (!SupportsCommandAdmission)
+        {
+            throw new NotSupportedException(
+                "The native capture binary does not provide owner-bound command admission.");
+        }
+    }
+
+    private static void ValidateCommandAdmission(
+        NativeCaptureCommandAdmissionV1 admission,
+        ulong? expectedRuntimePolicyRevision = null,
+        ulong? expectedPersistenceGeneration = null,
+        ulong? expectedTargetEpoch = null)
+    {
+        if (admission.StructSize != NativeCaptureAbiContract.CommandAdmissionStructureSize
+            || admission.AbiVersion != NativeCaptureAbiContract.AbiVersion
+            || admission.InstanceEpoch == 0
+            || admission.RuntimePolicyRevision == 0
+            || admission.PersistenceGeneration == 0
+            || admission.TargetEpoch == 0
+            || admission.AuthorizationEpoch == 0
+            || (admission.NonceLow == 0 && admission.NonceHigh == 0)
+            || (expectedRuntimePolicyRevision is { } runtimePolicyRevision
+                && admission.RuntimePolicyRevision != runtimePolicyRevision)
+            || (expectedPersistenceGeneration is { } persistenceGeneration
+                && admission.PersistenceGeneration != persistenceGeneration)
+            || (expectedTargetEpoch is { } targetEpoch
+                && admission.TargetEpoch != targetEpoch))
+        {
+            throw new InvalidDataException(
+                "The native capture command admission stamp is malformed or does not match the requested authorization snapshot.");
         }
     }
 

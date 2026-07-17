@@ -4,7 +4,7 @@ Status: Architecture and product design baseline
 Project: WinDayFlow  
 Repository: https://github.com/timeStarry/WinDayFlow  
 Developer: timeStarry <timestarry@qq.com>  
-Last updated: 2026-07-16
+Last updated: 2026-07-17
 
 ## 1. Purpose
 
@@ -404,6 +404,13 @@ linearization, revoke and quiescence ordering, and the complete capability mask.
 It deliberately leaves `ScreenCapture` disabled until a real writer and Windows
 observers use those contracts end to end.
 
+[ADR 0004](adr/0004-owner-bound-command-admission.md), "Owner-Bound Capture
+Command Admission," closes the Boolean-to-backend Start/Resume TOCTOU boundary
+with a native-issued, owner-bound, single-use stamp. It fixes the additive
+64-byte C ABI layout, command capability, nonce authenticity, rejection and
+cancellation semantics, and managed/native linearization. It does not activate
+the backend or authorize a real writer.
+
 `CaptureStatus` is a stable machine-readable contract, not just display text.
 It carries an unsigned 64-bit `Sequence`, `CaptureReasonCode`, and
 `CaptureErrorCode` in addition to state, timestamp, and optional localized
@@ -431,8 +438,11 @@ cannot carry one. `Detail` is diagnostic and localizable; retry, policy, and
 state-machine decisions use the stable fields.
 
 The current Application layer also defines the matching `ICaptureBackend`
-lifecycle contract. `ConsentGatedCaptureService` projects backend state while
-giving unavailable and faulted technology states priority over consent state.
+lifecycle contract. Its Start/Resume methods require an opaque
+`ICaptureRuntimeAdmissionStamp`; Pause and Stop remain authorization-reducing
+commands and do not require one. `ConsentGatedCaptureService` projects backend
+state while giving unavailable and faulted technology states priority over
+consent state.
 `AppSettingsService` runs commit-barrier Prepare before persistence, then
 Committed after persistence and its in-memory snapshot update; Aborted never
 restores a restrictive runtime latch. Start/Resume check that latch inside the
@@ -456,17 +466,25 @@ revokes target authority and permanently prevents further target-scoped
 authorization on that native handle; switching back requires handle
 recreation, so the two revision namespaces cannot revive one another.
 
-This safety core does not yet close Start/Resume admission. The current
-Application service and runtime owner observe a Boolean authorization snapshot
-and then call a tokenless backend method. An Allow A-to-B update between those
-operations can admit work for a generation or target different from the one the
-caller checked. For live activation, the same native instance must issue an
-admission stamp bound to its owner; Start/Resume must carry the expected
-persistence generation and target epoch, and the native/owner boundary must
-atomically compare both with the current fully allowed authorization before a
-worker can enter capture. A stale or foreign stamp fails closed, and every
-effective Allow transition requires a new stamp. The Boolean remains useful for
-UI state and early rejection but is not authority.
+Start/Resume command admission now closes the Boolean-to-backend TOCTOU
+boundary. Under the coordinator's update gate, the current native instance
+issues a single-use admission bound to the Start or Resume operation, native
+instance, runtime revision, persistence generation, target epoch, authorization
+epoch, and runtime owner epoch. The managed owner wraps it in a private opaque
+stamp that also carries the process invalidation generation. Consumption
+rechecks the complete snapshot in the same gate used by authoritative settings
+and signal changes, then native atomically consumes the nonce under its current
+authorization before worker admission. Foreign-owner, wrong-operation, stale,
+forged, and replayed stamps fail closed. The Application service never refreshes
+or retries a rejected stamp. Its Boolean observation remains useful for UI state
+and early rejection but is not authority.
+
+Caller cancellation is honored before native consumption. Once native command
+consumption begins, the bounded call uses a non-cancelable token so managed code
+cannot report cancellation after native accepted the command. Expected policy,
+state, or stamp rejection is nonfatal; malformed native output and internal
+native failures quarantine the owner. A successful explicit Stop advances and
+reconciles runtime authorization before another stamp can be issued.
 
 The current sticky automatic Stop is likewise a conservative foundation, not
 the final dynamic-policy model. The event monitor and owner must explicitly
@@ -509,6 +527,9 @@ v1 foundation under `WinDayFlow.Capture.Native`. Its implemented boundary has:
 - the additive 112-byte flat runtime-authorization input defined by ADR 0003,
   containing the monotonic runtime policy revision, target epoch, numeric
   HWND/PID/process-creation-time tuple, target flags, and eight policy decisions;
+- the additive 64-byte command-admission output defined by ADR 0004, containing
+  native instance, runtime revision, persistence generation, target epoch,
+  authorization epoch, and a cryptographically random 128-bit nonce;
 - a native-issued permit token that adds native-instance and persistence
   generations, plus shared/unique admission linearization that prevents legacy
   privacy Allow updates from minting persistence authority;
@@ -526,24 +547,26 @@ timeout/failure quarantine, ABI layout, and capability dependencies. They do
 not prove a real capture write path.
 
 The complete live mask requires privacy guard, event queue, target-scoped
-authorization, persistence-generation barrier, deterministic stop, screen
-capture, and H.264 chunk capabilities. Evidence extraction is independent.
-`ScreenCapture` remains deliberately disabled, so the live mask is incomplete.
-Start/Resume remain unavailable, the App continues to use
+authorization, persistence-generation barrier, deterministic stop, command
+admission, screen capture, and H.264 chunk capabilities. Evidence extraction is
+independent. The foundation currently advertises the first six capabilities;
+`ScreenCapture`, `H264Chunks`, and `EvidenceExtraction` remain deliberately
+disabled, so the live mask is incomplete. Authorized Start/Resume validate and
+consume a command stamp but return `NotImplemented` without creating a worker.
+The App continues to use `DenyCaptureRuntimeAuthorization` and
 `UnavailableCaptureBackend`, and the shell recording control remains disabled.
 
-The remaining activation gates include one command-admission contract as well
-as integration work. Start/Resume must atomically validate an issuer-bound
-expected persistence generation and target epoch. A real Windows target
-verifier must supply and revalidate the target tuple and epoch; an event-driven
-monitor must publish every supported privacy transition and select evidence
-Pause versus sticky session Stop; and the real DXGI/WIC/Media Foundation pixel
-and metadata writer must carry the native permit through encode, temporary
-output, final rename, and committed-event publication. Atomic filesystem
-interruption, cleanup, disk-full, recovery, and Windows lifecycle tests must
-then prove that end-to-end path. Until those gates pass, no live frame or
-context metadata can be persisted and App DI must continue to register
-`UnavailableCaptureBackend`.
+The remaining activation gates are integration work beyond command admission.
+A real Windows target verifier must supply and revalidate the target tuple and
+epoch; an event-driven monitor must publish every supported privacy transition
+and select evidence Pause versus sticky session Stop; and the real
+DXGI/WIC/Media Foundation pixel and metadata writer must carry the consumed
+command grant and native persistence permit through worker admission, encode,
+temporary output, final rename, and committed-event publication. Atomic
+filesystem interruption, cleanup, disk-full, recovery, owner-epoch races, and
+Windows lifecycle tests must then prove that end-to-end path. Until those gates
+pass, no live frame or context metadata can be persisted and App DI must
+continue to register `UnavailableCaptureBackend`.
 
 The safety-core implementation and ADR are original WinDayFlow work. They do
 not modify any of the six QiDayflow-derived files or require a provenance
@@ -1005,21 +1028,20 @@ the user explicitly enables a future telemetry feature.
 ## 21. Delivery Plan
 
 Phases are release gates, not a claim of strict implementation order. As of
-2026-07-16, the no-capture manual-timeline portions of Phases 2 and 3 plus
+2026-07-17, the no-capture manual-timeline portions of Phases 2 and 3 plus
 schema v4, consent policy v2, persistent retention/exclusion/session choices,
 and user-authored typed exclusion rules are implemented. Phase 1 also has
-Accepted ADRs 0001 through 0003, verified QiDayflow source provenance, the x64
+Accepted ADRs 0001 through 0004, verified QiDayflow source provenance, the x64
 C++20 C ABI v1 foundation, six native tests, the target-scoped safety core, the
-managed asynchronous owner/quiescence contract, the inactive runtime privacy
-coordinator, the pure exclusion matcher, and the on-demand Windows privacy
-probe. The safety core covers synthetic target reuse, generation,
-acquire-to-persist permit, and stop/join/destroy races. The real Windows target
-verifier, event-driven privacy monitor, DXGI/WIC/Media Foundation writer, and
-atomic artifact publisher remain open activation gates. Issuer-bound,
-generation/target-stamped Start/Resume admission and the evidence-Pause versus
-sticky-Stop dynamic policy are also unresolved. `ScreenCapture` and
-managed-adapter runtime activation remain disabled, so no phase exit criterion
-is met.
+managed asynchronous owner/quiescence contract, owner-bound single-use
+Start/Resume admission, the inactive runtime privacy coordinator, the pure
+exclusion matcher, and the on-demand Windows privacy probe. The safety core
+covers synthetic target reuse, generation, acquire-to-persist permit,
+command-admission, and stop/join/destroy races. The real Windows target verifier,
+event-driven privacy monitor, DXGI/WIC/Media Foundation writer, atomic artifact
+publisher, and evidence-Pause versus sticky-Stop dynamic policy remain open
+activation gates. `ScreenCapture` and managed-adapter runtime activation remain
+disabled, so no phase exit criterion is met.
 
 ### Phase 0: Foundation
 

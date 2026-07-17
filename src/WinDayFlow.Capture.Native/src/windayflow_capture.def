@@ -6,9 +6,12 @@ EXPORTS
   wdf_capture_update_privacy_context
   wdf_capture_update_runtime_authorization
   wdf_capture_revoke_runtime_authorization
+  wdf_capture_issue_command_admission
   wdf_capture_start
+  wdf_capture_start_authorized
   wdf_capture_pause
   wdf_capture_resume
+  wdf_capture_resume_authorized
   wdf_capture_request_stop
   wdf_capture_wait_stopped
   wdf_capture_poll_event

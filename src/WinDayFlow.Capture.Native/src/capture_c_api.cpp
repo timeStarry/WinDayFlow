@@ -25,13 +25,16 @@ namespace {
 using windayflow::capture::CaptureEventQueue;
 using windayflow::capture::CaptureEventReadResult;
 using windayflow::capture::CapturePolicy;
+using windayflow::capture::CaptureCommand;
+using windayflow::capture::CaptureCommandAdmission;
+using windayflow::capture::CaptureCommandAdmissionPermit;
+using windayflow::capture::CaptureCommandAdmissionResult;
 using windayflow::capture::CaptureRuntimeWaitResult;
 using windayflow::capture::CaptureSafetyCore;
 using windayflow::capture::CaptureSafetyUpdateTicket;
 using windayflow::capture::CaptureSafetyUpdateResult;
 using windayflow::capture::CaptureTargetIdentity;
 using windayflow::capture::PrivacyContext;
-using windayflow::capture::PrivacyDecision;
 using windayflow::capture::RuntimeAuthorization;
 
 constexpr uint32_t kMinimumEventQueueCapacity = 16;
@@ -265,6 +268,80 @@ wdf_capture_result MapSafetyUpdateResult(CaptureSafetyUpdateResult result) {
   }
 }
 
+wdf_capture_result MapCommandAdmissionResult(
+    CaptureCommandAdmissionResult result) {
+  switch (result) {
+    case CaptureCommandAdmissionResult::kOk:
+      return WDF_CAPTURE_RESULT_OK;
+    case CaptureCommandAdmissionResult::kInvalidArgument:
+      return WDF_CAPTURE_RESULT_INVALID_ARGUMENT;
+    case CaptureCommandAdmissionResult::kPolicyBlocked:
+      return WDF_CAPTURE_RESULT_POLICY_BLOCKED;
+    case CaptureCommandAdmissionResult::kAdmissionRejected:
+      return WDF_CAPTURE_RESULT_ADMISSION_REJECTED;
+    case CaptureCommandAdmissionResult::kGenerationExhausted:
+      return WDF_CAPTURE_RESULT_GENERATION_EXHAUSTED;
+    case CaptureCommandAdmissionResult::kInternalError:
+      return WDF_CAPTURE_RESULT_INTERNAL_ERROR;
+    default:
+      return WDF_CAPTURE_RESULT_INTERNAL_ERROR;
+  }
+}
+
+bool TryCopyCommand(wdf_capture_command source, CaptureCommand* destination) {
+  if (destination == nullptr) {
+    return false;
+  }
+  switch (source) {
+    case WDF_CAPTURE_COMMAND_START:
+      *destination = CaptureCommand::kStart;
+      return true;
+    case WDF_CAPTURE_COMMAND_RESUME:
+      *destination = CaptureCommand::kResume;
+      return true;
+    default:
+      return false;
+  }
+}
+
+wdf_capture_result CopyCommandAdmission(
+    const wdf_capture_command_admission_v1* source,
+    CaptureCommandAdmission* destination) {
+  if (destination == nullptr) {
+    return WDF_CAPTURE_RESULT_INVALID_ARGUMENT;
+  }
+  const wdf_capture_result header = ValidateStructHeader(
+      source, sizeof(wdf_capture_command_admission_v1));
+  if (header != WDF_CAPTURE_RESULT_OK) {
+    return header;
+  }
+  *destination = CaptureCommandAdmission{
+      source->instance_epoch,
+      source->runtime_policy_revision,
+      source->persistence_generation,
+      source->target_epoch,
+      source->authorization_epoch,
+      source->nonce_low,
+      source->nonce_high,
+  };
+  return WDF_CAPTURE_RESULT_OK;
+}
+
+void WriteCommandAdmission(
+    const CaptureCommandAdmission& source,
+    wdf_capture_command_admission_v1* destination) {
+  *destination = {};
+  destination->struct_size = sizeof(*destination);
+  destination->abi_version = WDF_CAPTURE_ABI_VERSION;
+  destination->instance_epoch = source.instance_epoch;
+  destination->runtime_policy_revision = source.runtime_policy_revision;
+  destination->persistence_generation = source.persistence_generation;
+  destination->target_epoch = source.target_epoch;
+  destination->authorization_epoch = source.authorization_epoch;
+  destination->nonce_low = source.nonce_low;
+  destination->nonce_high = source.nonce_high;
+}
+
 wdf_capture_result CopyRuntimeAuthorization(
     const wdf_capture_runtime_authorization_v1* source,
     RuntimeAuthorization* destination) {
@@ -443,39 +520,52 @@ wdf_capture_result WaitStoppedCore(CaptureInstance& instance,
              : WDF_CAPTURE_RESULT_OK;
 }
 
-wdf_capture_result StartOrResume(wdf_capture_handle handle, bool is_resume) {
+wdf_capture_result LegacyStartOrResume(wdf_capture_handle handle) {
+  InstanceLease lease = AcquireInstance(handle);
+  if (!lease) {
+    return WDF_CAPTURE_RESULT_INVALID_ARGUMENT;
+  }
+  return WDF_CAPTURE_RESULT_ADMISSION_REQUIRED;
+}
+
+bool IsCommandStateValid(wdf_capture_state state, CaptureCommand command) {
+  if (command == CaptureCommand::kResume) {
+    return state == WDF_CAPTURE_STATE_PAUSED ||
+           state == WDF_CAPTURE_STATE_BLOCKED_BY_CONSENT;
+  }
+  return state == WDF_CAPTURE_STATE_STOPPED ||
+         state == WDF_CAPTURE_STATE_UNAVAILABLE;
+}
+
+wdf_capture_result StartOrResumeAuthorized(
+    wdf_capture_handle handle,
+    const wdf_capture_command_admission_v1* admission,
+    CaptureCommand command) {
+  CaptureCommandAdmission value;
+  const wdf_capture_result validation =
+      CopyCommandAdmission(admission, &value);
+  if (validation != WDF_CAPTURE_RESULT_OK) {
+    return validation;
+  }
   InstanceLease lease = AcquireInstance(handle);
   if (!lease) {
     return WDF_CAPTURE_RESULT_INVALID_ARGUMENT;
   }
   CaptureInstance* const instance = lease.get();
   std::lock_guard lock(instance->state_mutex);
-
-  const bool valid_state = is_resume
-                               ? instance->state == WDF_CAPTURE_STATE_PAUSED ||
-                                     instance->state ==
-                                         WDF_CAPTURE_STATE_BLOCKED_BY_CONSENT
-                               : instance->state == WDF_CAPTURE_STATE_STOPPED ||
-                                     instance->state ==
-                                         WDF_CAPTURE_STATE_UNAVAILABLE;
-  if (!valid_state) {
-    return WDF_CAPTURE_RESULT_INVALID_STATE;
+  const uint64_t owner_epoch = instance->runtime.owner_epoch();
+  if (owner_epoch == 0) {
+    return WDF_CAPTURE_RESULT_GENERATION_EXHAUSTED;
   }
-
-  const PrivacyDecision decision =
-      windayflow::capture::EvaluatePrivacyContext(instance->privacy);
-  if (!decision.allowed) {
-    const wdf_capture_state blocked_state =
-        decision.reason == WDF_CAPTURE_REASON_CONSENT_REQUIRED
-            ? WDF_CAPTURE_STATE_BLOCKED_BY_CONSENT
-            : WDF_CAPTURE_STATE_PAUSED;
-    if (!PublishState(*instance,
-                      blocked_state,
-                      decision.reason,
-                      "Capture is blocked by the fail-closed privacy policy.")) {
-      return WDF_CAPTURE_RESULT_INTERNAL_ERROR;
-    }
-    return WDF_CAPTURE_RESULT_POLICY_BLOCKED;
+  CaptureCommandAdmissionPermit permit;
+  const CaptureCommandAdmissionResult admission_result =
+      instance->safety.AcquireCommandAdmissionPermit(
+          value, command, owner_epoch, &permit);
+  if (admission_result != CaptureCommandAdmissionResult::kOk) {
+    return MapCommandAdmissionResult(admission_result);
+  }
+  if (!IsCommandStateValid(instance->state, command)) {
+    return WDF_CAPTURE_RESULT_INVALID_STATE;
   }
 
   if (!PublishState(
@@ -505,7 +595,8 @@ wdf_capture_get_capabilities(wdf_capture_capabilities* capabilities) noexcept {
                     WDF_CAPTURE_CAPABILITY_EVENT_QUEUE |
                     WDF_CAPTURE_CAPABILITY_TARGET_SCOPED_AUTHORIZATION |
                     WDF_CAPTURE_CAPABILITY_PERSISTENCE_GENERATION_BARRIER |
-                    WDF_CAPTURE_CAPABILITY_DETERMINISTIC_STOP;
+                    WDF_CAPTURE_CAPABILITY_DETERMINISTIC_STOP |
+                    WDF_CAPTURE_CAPABILITY_COMMAND_ADMISSION;
     return WDF_CAPTURE_RESULT_OK;
   } catch (...) {
     return WDF_CAPTURE_RESULT_INTERNAL_ERROR;
@@ -684,9 +775,75 @@ wdf_capture_revoke_runtime_authorization(
 }
 
 extern "C" wdf_capture_result WDF_CAPTURE_CALL
+wdf_capture_issue_command_admission(
+    wdf_capture_handle handle,
+    wdf_capture_command command,
+    uint64_t expected_persistence_generation,
+    uint64_t expected_target_epoch,
+    wdf_capture_command_admission_v1* admission) noexcept {
+  try {
+    const wdf_capture_result header = ValidateStructHeader(
+        admission, sizeof(wdf_capture_command_admission_v1));
+    if (header != WDF_CAPTURE_RESULT_OK) {
+      return header;
+    }
+    *admission = {};
+    admission->struct_size = sizeof(*admission);
+    admission->abi_version = WDF_CAPTURE_ABI_VERSION;
+
+    CaptureCommand value = CaptureCommand::kStart;
+    if (!TryCopyCommand(command, &value) ||
+        expected_persistence_generation == 0 || expected_target_epoch == 0) {
+      return WDF_CAPTURE_RESULT_INVALID_ARGUMENT;
+    }
+
+    InstanceLease lease = AcquireInstance(handle);
+    if (!lease) {
+      return WDF_CAPTURE_RESULT_INVALID_ARGUMENT;
+    }
+    CaptureInstance* const instance = lease.get();
+    std::lock_guard lock(instance->state_mutex);
+    if (!IsCommandStateValid(instance->state, value)) {
+      return WDF_CAPTURE_RESULT_INVALID_STATE;
+    }
+
+    const uint64_t owner_epoch = instance->runtime.owner_epoch();
+    if (owner_epoch == 0) {
+      return WDF_CAPTURE_RESULT_GENERATION_EXHAUSTED;
+    }
+    CaptureCommandAdmission issued;
+    const CaptureCommandAdmissionResult result =
+        instance->safety.IssueCommandAdmission(
+            value,
+            expected_persistence_generation,
+            expected_target_epoch,
+            owner_epoch,
+            &issued);
+    if (result == CaptureCommandAdmissionResult::kOk) {
+      WriteCommandAdmission(issued, admission);
+    }
+    return MapCommandAdmissionResult(result);
+  } catch (...) {
+    return WDF_CAPTURE_RESULT_INTERNAL_ERROR;
+  }
+}
+
+extern "C" wdf_capture_result WDF_CAPTURE_CALL
 wdf_capture_start(wdf_capture_handle handle) noexcept {
   try {
-    return StartOrResume(handle, false);
+    return LegacyStartOrResume(handle);
+  } catch (...) {
+    return WDF_CAPTURE_RESULT_INTERNAL_ERROR;
+  }
+}
+
+extern "C" wdf_capture_result WDF_CAPTURE_CALL
+wdf_capture_start_authorized(
+    wdf_capture_handle handle,
+    const wdf_capture_command_admission_v1* admission) noexcept {
+  try {
+    return StartOrResumeAuthorized(
+        handle, admission, CaptureCommand::kStart);
   } catch (...) {
     return WDF_CAPTURE_RESULT_INTERNAL_ERROR;
   }
@@ -720,7 +877,19 @@ wdf_capture_pause(wdf_capture_handle handle) noexcept {
 extern "C" wdf_capture_result WDF_CAPTURE_CALL
 wdf_capture_resume(wdf_capture_handle handle) noexcept {
   try {
-    return StartOrResume(handle, true);
+    return LegacyStartOrResume(handle);
+  } catch (...) {
+    return WDF_CAPTURE_RESULT_INTERNAL_ERROR;
+  }
+}
+
+extern "C" wdf_capture_result WDF_CAPTURE_CALL
+wdf_capture_resume_authorized(
+    wdf_capture_handle handle,
+    const wdf_capture_command_admission_v1* admission) noexcept {
+  try {
+    return StartOrResumeAuthorized(
+        handle, admission, CaptureCommand::kResume);
   } catch (...) {
     return WDF_CAPTURE_RESULT_INTERNAL_ERROR;
   }

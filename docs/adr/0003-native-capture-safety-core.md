@@ -141,16 +141,13 @@ resumed or reused.
 Normal shutdown and every activation failure use the explicit asynchronous
 owner.
 
-The current Boolean `IsCaptureAuthorized` observation and tokenless
-Start/Resume calls are not accepted as live command authorization. They leave a
-TOCTOU window when one fully allowed target or generation is replaced by
-another. Before activation, the current native instance must issue an
-owner-bound admission stamp. Start/Resume supplies its expected persistence
-generation and target epoch, and the native/owner boundary compares both with
-the current fully allowed authorization in the same critical section that
-admits the worker. A stamp from another owner or instance, or any mismatch,
-fails closed before capture work starts. Pause and Stop do not require an Allow
-stamp.
+The Boolean `IsCaptureAuthorized` observation is not accepted as live command
+authority. ADR 0004 satisfies this safety-core activation gate with a
+native-issued, owner-bound, single-use Start/Resume admission stamp. It binds
+the expected persistence generation and target epoch, plus native and managed
+owner generations, and consumes the stamp under the current fully allowed
+authorization. A stamp from another owner or instance, or any mismatch, fails
+closed before capture work starts. Pause and Stop do not require an Allow stamp.
 
 Dynamic privacy transitions also need a product-level action contract. The
 future Windows monitor and owner distinguish an evidence Pause, which blocks
@@ -162,12 +159,12 @@ the safety-core milestone intentionally implements neither mapping.
 ### Capability Gate
 
 ABI v1 adds distinct capability bits for target-scoped authorization,
-generation-guarded persistence, and deterministic stop. The complete live
-recording mask requires all of:
+generation-guarded persistence, deterministic stop, and command admission. The
+complete live recording mask requires all of:
 
 ```text
 PrivacyGuard | EventQueue | TargetScopedAuthorization |
-PersistenceGenerationBarrier | DeterministicStop |
+PersistenceGenerationBarrier | DeterministicStop | CommandAdmission |
 ScreenCapture | H264Chunks
 ```
 
@@ -185,20 +182,18 @@ bit or persist live user evidence.
 The safety core is necessary but not sufficient for live capture. Activation
 still requires all of the following to use the contract end to end:
 
-1. Issuer-bound Start/Resume admission that atomically validates the expected
-   persistence generation and target epoch against the current native instance
-   before admitting worker activity.
-2. A real Windows target verifier that obtains and revalidates HWND, PID,
+1. A real Windows target verifier that obtains and revalidates HWND, PID,
    process creation time, target epoch, and display selection without exposing
    raw title or path data.
-3. An event-driven Windows privacy monitor for session, desktop, remote,
+2. An event-driven Windows privacy monitor for session, desktop, remote,
    presentation, sleep/resume, storage, and application/window identity state,
    with tested evidence-Pause versus sticky-session-Stop classification.
-4. The real DXGI/WIC/Media Foundation writer and metadata path carrying the
-   acquisition snapshot through every persistence boundary.
-5. Atomic temporary-file completion, rename, committed-event ordering, cleanup,
+3. The real DXGI/WIC/Media Foundation writer and metadata path carrying the
+   consumed command grant and acquisition snapshot through every persistence
+   boundary.
+4. Atomic temporary-file completion, rename, committed-event ordering, cleanup,
    interruption, disk-full, and recovery tests against real filesystem output.
-6. Managed composition-root activation only after the complete capability mask
+5. Managed composition-root activation only after the complete capability mask
    is returned by the packaged architecture-matching binary.
 
 ## Required Verification
@@ -209,17 +204,21 @@ acquire-to-persist invalidation, Block/revoke linearization, stop/join/destroy,
 timeouts, injected failures, concurrency, and idempotence. Tests use explicit
 barriers rather than timing sleeps.
 
-`capture_c_api_tests` covers the additive export and capability dependencies;
-the C17 header test covers the 112-byte size, offsets, numeric constants, and C
-callability. Managed interop tests cover the same layout, complete-mask
-negotiation, owner call order, quiescence, timeout/failure quarantine, and
-cancellation semantics. Debug and Release native and managed suites must pass.
+`capture_c_api_tests` covers the additive exports, command authenticity, and
+capability dependencies; the C17 header test covers the 112-byte authorization
+and 64-byte command-admission sizes, offsets, numeric constants, and C
+callability. Managed interop tests cover both layouts, complete-mask
+negotiation, owner call order, one-shot stamps, quiescence, timeout/failure
+quarantine, and cancellation semantics. Debug and Release native and managed
+suites must pass.
 
 These tests prove only the synthetic safety boundary until the real writer and
-Windows verifier integration tests named above exist. Before `ScreenCapture`
-can be enabled, additional tests must race an Allow A-to-B replacement against
-Start/Resume, reject stale and foreign admission stamps, atomically validate
-both expected values, and exercise evidence Pause and sticky Stop recovery.
+Windows verifier integration tests named above exist. The synthetic suite now
+races both orderings of an Allow A-to-B replacement against Start/Resume,
+rejects stale and foreign admission stamps, and validates the complete expected
+snapshot. Before `ScreenCapture` can be enabled, the same grant must be carried
+through a real worker and persistence path, and evidence Pause versus sticky
+Stop recovery must be exercised against live Windows transitions.
 
 ## Provenance
 

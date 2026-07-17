@@ -19,7 +19,15 @@ internal enum NativeCaptureResult
     TargetMismatch = -9,
     PolicyRevisionGap = -10,
     GenerationExhausted = -11,
+    AdmissionRequired = -12,
+    AdmissionRejected = -13,
     InternalError = -255,
+}
+
+internal enum NativeCaptureCommand
+{
+    Start = 1,
+    Resume = 2,
 }
 
 internal enum NativeCaptureEventKind
@@ -85,6 +93,29 @@ internal unsafe struct NativeCaptureRuntimeAuthorizationV1
     public int WindowAllowed;
     public int StorageAvailable;
     public fixed uint Reserved[8];
+}
+
+[StructLayout(LayoutKind.Sequential, Pack = 8)]
+internal struct NativeCaptureCommandAdmissionV1
+{
+    public uint StructSize;
+    public uint AbiVersion;
+    public ulong InstanceEpoch;
+    public ulong RuntimePolicyRevision;
+    public ulong PersistenceGeneration;
+    public ulong TargetEpoch;
+    public ulong AuthorizationEpoch;
+    public ulong NonceLow;
+    public ulong NonceHigh;
+
+    public static NativeCaptureCommandAdmissionV1 Create()
+    {
+        return new NativeCaptureCommandAdmissionV1
+        {
+            StructSize = checked((uint)Marshal.SizeOf<NativeCaptureCommandAdmissionV1>()),
+            AbiVersion = NativeCaptureAbiContract.AbiVersion,
+        };
+    }
 }
 
 [StructLayout(LayoutKind.Sequential, Pack = 8)]
@@ -216,6 +247,21 @@ internal interface INativeCaptureApi
         return NativeCaptureResult.NotImplemented;
     }
 
+    NativeCaptureResult IssueCommandAdmission(
+        SafeCaptureHandle handle,
+        NativeCaptureCommand command,
+        ulong expectedPersistenceGeneration,
+        ulong expectedTargetEpoch,
+        ref NativeCaptureCommandAdmissionV1 admission);
+
+    NativeCaptureResult StartAuthorized(
+        SafeCaptureHandle handle,
+        ref NativeCaptureCommandAdmissionV1 admission);
+
+    NativeCaptureResult ResumeAuthorized(
+        SafeCaptureHandle handle,
+        ref NativeCaptureCommandAdmissionV1 admission);
+
     NativeCaptureResult Start(SafeCaptureHandle handle);
 
     NativeCaptureResult Pause(SafeCaptureHandle handle);
@@ -275,6 +321,29 @@ internal sealed class PInvokeNativeCaptureApi : INativeCaptureApi
         NativeCaptureMethods.wdf_capture_revoke_runtime_authorization(
             handle,
             out persistenceGeneration);
+
+    public NativeCaptureResult IssueCommandAdmission(
+        SafeCaptureHandle handle,
+        NativeCaptureCommand command,
+        ulong expectedPersistenceGeneration,
+        ulong expectedTargetEpoch,
+        ref NativeCaptureCommandAdmissionV1 admission) =>
+        NativeCaptureMethods.wdf_capture_issue_command_admission(
+            handle,
+            command,
+            expectedPersistenceGeneration,
+            expectedTargetEpoch,
+            ref admission);
+
+    public NativeCaptureResult StartAuthorized(
+        SafeCaptureHandle handle,
+        ref NativeCaptureCommandAdmissionV1 admission) =>
+        NativeCaptureMethods.wdf_capture_start_authorized(handle, ref admission);
+
+    public NativeCaptureResult ResumeAuthorized(
+        SafeCaptureHandle handle,
+        ref NativeCaptureCommandAdmissionV1 admission) =>
+        NativeCaptureMethods.wdf_capture_resume_authorized(handle, ref admission);
 
     public NativeCaptureResult Start(SafeCaptureHandle handle) =>
         NativeCaptureMethods.wdf_capture_start(handle);
@@ -387,6 +456,24 @@ internal static class NativeCaptureMethods
     internal static extern NativeCaptureResult wdf_capture_revoke_runtime_authorization(
         SafeCaptureHandle handle,
         out ulong persistenceGeneration);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern NativeCaptureResult wdf_capture_issue_command_admission(
+        SafeCaptureHandle handle,
+        NativeCaptureCommand command,
+        ulong expectedPersistenceGeneration,
+        ulong expectedTargetEpoch,
+        ref NativeCaptureCommandAdmissionV1 admission);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern NativeCaptureResult wdf_capture_start_authorized(
+        SafeCaptureHandle handle,
+        ref NativeCaptureCommandAdmissionV1 admission);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern NativeCaptureResult wdf_capture_resume_authorized(
+        SafeCaptureHandle handle,
+        ref NativeCaptureCommandAdmissionV1 admission);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
     internal static extern NativeCaptureResult wdf_capture_start(SafeCaptureHandle handle);

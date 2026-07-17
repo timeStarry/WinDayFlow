@@ -7,6 +7,8 @@
 #include <mutex>
 #include <thread>
 
+#include "capture_safety_core.h"
+
 namespace windayflow::capture {
 
 enum class CaptureRuntimeStopResult {
@@ -30,7 +32,8 @@ class CaptureRuntimeOwner {
   CaptureRuntimeOwner(const CaptureRuntimeOwner&) = delete;
   CaptureRuntimeOwner& operator=(const CaptureRuntimeOwner&) = delete;
 
-  bool Start(Worker worker);
+  bool Start(CaptureCommandAdmissionPermit permit, Worker worker);
+  bool Resume(CaptureCommandAdmissionPermit permit);
   CaptureRuntimeStopResult RequestStop();
   CaptureRuntimeWaitResult WaitStopped(uint32_t timeout_ms);
   void Shutdown();
@@ -39,9 +42,11 @@ class CaptureRuntimeOwner {
   bool WaitForStop(uint32_t timeout_ms);
   bool worker_failed() const;
   uint64_t join_count() const;
+  uint64_t owner_epoch() const;
 
  private:
   void WorkerMain(Worker worker) noexcept;
+  bool AdvanceOwnerEpochUnderLock();
 
   mutable std::mutex mutex_;
   std::condition_variable state_changed_;
@@ -52,6 +57,8 @@ class CaptureRuntimeOwner {
   bool joined_ = true;
   bool worker_failed_ = false;
   uint64_t join_count_ = 0;
+  uint64_t owner_epoch_ = 1;
+  bool owner_epoch_exhausted_ = false;
 };
 
 }  // namespace windayflow::capture

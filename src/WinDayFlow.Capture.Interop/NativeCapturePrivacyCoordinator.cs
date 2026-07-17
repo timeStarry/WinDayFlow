@@ -15,8 +15,14 @@ public interface INativeCaptureAuthorizationTarget
         CancellationToken cancellationToken = default);
 }
 
+internal readonly record struct NativeCaptureAdmissionSnapshot(
+    long InvalidationGeneration,
+    ulong RuntimePolicyRevision,
+    ulong PersistenceGeneration,
+    ulong TargetEpoch);
+
 public sealed class NativeCapturePrivacyCoordinator
-    : IAppSettingsCommitBarrier, ICaptureRuntimeAuthorization, IDisposable
+    : IAppSettingsCommitBarrier, IDisposable
 {
     private readonly INativeCaptureAuthorizationTarget _target;
     private readonly object _disposeSync = new();
@@ -104,6 +110,123 @@ public sealed class NativeCapturePrivacyCoordinator
         }
     }
 
+    internal async Task<NativeCaptureAdmissionSnapshot?> TryIssueAdmissionAsync(
+        Func<NativeCaptureAdmissionSnapshot, CancellationToken, Task<bool>> issueNative,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(issueNative);
+        cancellationToken.ThrowIfCancellationRequested();
+        ThrowIfDisposed();
+
+        await _applyGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            ThrowIfUsable();
+            var snapshot = TryCreateAdmissionSnapshot();
+            if (snapshot is null)
+            {
+                return null;
+            }
+
+            bool issued;
+            try
+            {
+                issued = await issueNative(snapshot.Value, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception exception)
+            {
+                MarkFatal(exception);
+                throw;
+            }
+
+            return issued && IsAdmissionSnapshotCurrent(snapshot.Value)
+                ? snapshot
+                : null;
+        }
+        finally
+        {
+            _applyGate.Release();
+        }
+    }
+
+    internal async Task ExecuteAdmissionAsync(
+        NativeCaptureAdmissionSnapshot expected,
+        Func<Task> executeNative,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(executeNative);
+        cancellationToken.ThrowIfCancellationRequested();
+        ThrowIfDisposed();
+
+        await _applyGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            ThrowIfUsable();
+            if (!IsAdmissionSnapshotCurrent(expected))
+            {
+                throw new CaptureRuntimeAdmissionRejectedException();
+            }
+
+            try
+            {
+                await executeNative().ConfigureAwait(false);
+            }
+            catch (Exception exception) when (exception is
+                CaptureRuntimeAdmissionRejectedException or NotSupportedException)
+            {
+                throw;
+            }
+            catch (Exception exception)
+            {
+                MarkFatal(exception);
+                throw;
+            }
+        }
+        finally
+        {
+            _applyGate.Release();
+        }
+    }
+
+    internal async Task ReconcileAfterStopAsync()
+    {
+        await _applyGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+        try
+        {
+            ThrowIfUsable();
+            SetCaptureAuthorized(authorized: false);
+
+            var forceNativeUpdate = true;
+            NativeCapturePrivacySignals signals;
+            NativeCapturePrivacyContext applied;
+            do
+            {
+                signals = Volatile.Read(ref _signals);
+                applied = await ApplyUnderGateAsync(
+                        Volatile.Read(ref _committedSettings),
+                        signals,
+                        forceBlock: Volatile.Read(ref _forcedBlock) != 0,
+                        cancellationToken: CancellationToken.None,
+                        forceNativeUpdate: forceNativeUpdate)
+                    .ConfigureAwait(false);
+                forceNativeUpdate = false;
+            }
+            while (signals != Volatile.Read(ref _signals));
+
+            PublishAuthorization(applied, signals);
+        }
+        finally
+        {
+            _applyGate.Release();
+        }
+    }
+
     public Task QuiesceAsync()
     {
         TaskCompletionSource? completion = null;
@@ -140,12 +263,6 @@ public sealed class NativeCapturePrivacyCoordinator
         ThrowIfDisposed();
 
         var restrictive = IsRestrictiveChange(previous, proposed);
-        if (restrictive)
-        {
-            Interlocked.Exchange(ref _forcedBlock, 1);
-            SetCaptureAuthorized(authorized: false);
-        }
-
         ThrowIfUsable();
         BeginPreparedSettingsCommit(previous, proposed);
         if (!restrictive)
@@ -157,6 +274,8 @@ public sealed class NativeCapturePrivacyCoordinator
         try
         {
             ThrowIfUsable();
+            Interlocked.Exchange(ref _forcedBlock, 1);
+            SetCaptureAuthorized(authorized: false);
             var signals = Volatile.Read(ref _signals);
             var applied = await ApplyUnderGateAsync(
                     proposed,
@@ -226,7 +345,7 @@ public sealed class NativeCapturePrivacyCoordinator
         }
     }
 
-    public Task AbortedAsync(
+    public async Task AbortedAsync(
         AppSettings previous,
         AppSettings proposed,
         bool settingsApplied,
@@ -237,15 +356,29 @@ public sealed class NativeCapturePrivacyCoordinator
         ArgumentNullException.ThrowIfNull(proposed);
         ArgumentNullException.ThrowIfNull(failure);
         _ = cancellationToken;
-        if (settingsApplied)
+        try
         {
-            Volatile.Write(ref _committedSettings, proposed);
-            Interlocked.Exchange(ref _forcedBlock, 1);
-            SetCaptureAuthorized(authorized: false);
-        }
+            if (!settingsApplied)
+            {
+                return;
+            }
 
-        CompletePreparedSettingsCommit();
-        return Task.CompletedTask;
+            await _applyGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+            try
+            {
+                Volatile.Write(ref _committedSettings, proposed);
+                Interlocked.Exchange(ref _forcedBlock, 1);
+                SetCaptureAuthorized(authorized: false);
+            }
+            finally
+            {
+                _applyGate.Release();
+            }
+        }
+        finally
+        {
+            CompletePreparedSettingsCommit();
+        }
     }
 
     public async Task UpdateSignalsAsync(
@@ -256,42 +389,29 @@ public sealed class NativeCapturePrivacyCoordinator
         cancellationToken.ThrowIfCancellationRequested();
         ThrowIfDisposed();
 
-        Volatile.Write(ref _signals, signals);
-        var preview = Compose(
-            Volatile.Read(ref _committedSettings),
-            signals,
-            forceBlock: Volatile.Read(ref _forcedBlock) != 0,
-            LastAppliedContext.RuntimePolicyRevision);
-        if (!IsFullyAllowed(preview.PrivacyContext)
-            || !HasSameDecisions(Volatile.Read(ref _lastApplied), preview))
-        {
-            SetCaptureAuthorized(authorized: false);
-        }
-
         await _applyGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
         try
         {
             ThrowIfUsable();
-            var signalsToApply = signals;
-            NativeCapturePrivacyContext applied;
-            while (true)
+            Volatile.Write(ref _signals, signals);
+            var preview = Compose(
+                Volatile.Read(ref _committedSettings),
+                signals,
+                forceBlock: Volatile.Read(ref _forcedBlock) != 0,
+                LastAppliedContext.RuntimePolicyRevision);
+            if (!IsFullyAllowed(preview.PrivacyContext)
+                || !HasSameDecisions(Volatile.Read(ref _lastApplied), preview))
             {
-                applied = await ApplyUnderGateAsync(
-                        Volatile.Read(ref _committedSettings),
-                        signalsToApply,
-                        forceBlock: Volatile.Read(ref _forcedBlock) != 0,
-                        CancellationToken.None)
-                    .ConfigureAwait(false);
-                var latestSignals = Volatile.Read(ref _signals);
-                if (signalsToApply == latestSignals)
-                {
-                    break;
-                }
-
-                signalsToApply = latestSignals;
+                SetCaptureAuthorized(authorized: false);
             }
 
-            PublishAuthorization(applied, signalsToApply);
+            var applied = await ApplyUnderGateAsync(
+                    Volatile.Read(ref _committedSettings),
+                    signals,
+                    forceBlock: Volatile.Read(ref _forcedBlock) != 0,
+                    CancellationToken.None)
+                .ConfigureAwait(false);
+            PublishAuthorization(applied, signals);
         }
         finally
         {
@@ -325,14 +445,15 @@ public sealed class NativeCapturePrivacyCoordinator
         AppSettings settings,
         NativeCapturePrivacySignals signals,
         bool forceBlock,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool forceNativeUpdate = false)
     {
         var preview = Compose(
             settings,
             signals,
             forceBlock,
             _lastApplied.RuntimePolicyRevision);
-        if (HasSameDecisions(_lastApplied, preview))
+        if (!forceNativeUpdate && HasSameDecisions(_lastApplied, preview))
         {
             return _lastApplied.PrivacyContext;
         }
@@ -369,6 +490,56 @@ public sealed class NativeCapturePrivacyCoordinator
 
         Volatile.Write(ref _lastApplied, next);
         return next.PrivacyContext;
+    }
+
+    private NativeCaptureAdmissionSnapshot? TryCreateAdmissionSnapshot()
+    {
+        var authorization = Volatile.Read(ref _lastApplied);
+        var persistenceGeneration = LastPersistenceGeneration;
+        var invalidationGeneration = InvalidationGeneration;
+        if (!IsAdmissionStateCurrent(
+                authorization,
+                persistenceGeneration,
+                invalidationGeneration))
+        {
+            return null;
+        }
+
+        return new NativeCaptureAdmissionSnapshot(
+            invalidationGeneration,
+            authorization.RuntimePolicyRevision,
+            persistenceGeneration,
+            authorization.Target.TargetEpoch);
+    }
+
+    private bool IsAdmissionSnapshotCurrent(NativeCaptureAdmissionSnapshot expected)
+    {
+        var authorization = Volatile.Read(ref _lastApplied);
+        return IsAdmissionStateCurrent(
+                authorization,
+                LastPersistenceGeneration,
+                InvalidationGeneration)
+            && expected.InvalidationGeneration == InvalidationGeneration
+            && expected.RuntimePolicyRevision == authorization.RuntimePolicyRevision
+            && expected.PersistenceGeneration == LastPersistenceGeneration
+            && expected.TargetEpoch == authorization.Target.TargetEpoch;
+    }
+
+    private bool IsAdmissionStateCurrent(
+        NativeCaptureRuntimeAuthorization authorization,
+        ulong persistenceGeneration,
+        long invalidationGeneration)
+    {
+        return Volatile.Read(ref _captureAuthorized) != 0
+            && Volatile.Read(ref _forcedBlock) == 0
+            && Volatile.Read(ref _fatalFailure) is null
+            && Volatile.Read(ref _quiescing) == 0
+            && !Volatile.Read(ref _disposed)
+            && invalidationGeneration >= 0
+            && persistenceGeneration != 0
+            && IsFullyAllowed(authorization.PrivacyContext)
+            && authorization.Target.State == NativeCaptureTargetIdentityState.Present
+            && authorization.Target.TargetEpoch != 0;
     }
 
     private static NativeCaptureRuntimeAuthorization Compose(

@@ -84,6 +84,13 @@ wdf_capture_runtime_authorization_v1 RuntimeAuthorization(
   return context;
 }
 
+wdf_capture_command_admission_v1 EmptyAdmission() {
+  wdf_capture_command_admission_v1 admission{};
+  admission.struct_size = sizeof(admission);
+  admission.abi_version = WDF_CAPTURE_ABI_VERSION;
+  return admission;
+}
+
 bool PollEvent(wdf_capture_handle handle,
                wdf_capture_event_v1* event,
                std::string* detail) {
@@ -133,9 +140,11 @@ bool TestAbiAndArgumentValidation() {
                   (capabilities &
                    WDF_CAPTURE_CAPABILITY_PERSISTENCE_GENERATION_BARRIER) !=
                       0 &&
-                  (capabilities & WDF_CAPTURE_CAPABILITY_DETERMINISTIC_STOP) !=
-                      0 &&
-                  (capabilities & WDF_CAPTURE_CAPABILITY_SCREEN_CAPTURE) == 0 &&
+                   (capabilities & WDF_CAPTURE_CAPABILITY_DETERMINISTIC_STOP) !=
+                       0 &&
+                   (capabilities & WDF_CAPTURE_CAPABILITY_COMMAND_ADMISSION) !=
+                       0 &&
+                   (capabilities & WDF_CAPTURE_CAPABILITY_SCREEN_CAPTURE) == 0 &&
                   (capabilities & WDF_CAPTURE_CAPABILITY_H264_CHUNKS) == 0 &&
                   (capabilities &
                    WDF_CAPTURE_CAPABILITY_EVIDENCE_EXTRACTION) == 0,
@@ -202,9 +211,25 @@ bool TestTrulyShortVersionedStructures() {
               short_storage.data()),
           &generation) == WDF_CAPTURE_RESULT_INVALID_ARGUMENT,
       "four-byte runtime authorization header was read beyond its declared size");
+  const bool command_issue_rejected = Expect(
+      wdf_capture_issue_command_admission(
+          handle,
+          WDF_CAPTURE_COMMAND_START,
+          1,
+          1,
+          reinterpret_cast<wdf_capture_command_admission_v1*>(
+              short_storage.data())) == WDF_CAPTURE_RESULT_INVALID_ARGUMENT,
+      "four-byte command admission output was read beyond its declared size");
+  const bool command_consume_rejected = Expect(
+      wdf_capture_start_authorized(
+          handle,
+          reinterpret_cast<const wdf_capture_command_admission_v1*>(
+              short_storage.data())) == WDF_CAPTURE_RESULT_INVALID_ARGUMENT,
+      "four-byte command admission input was read beyond its declared size");
   wdf_capture_destroy(&handle);
   return event_rejected && privacy_rejected &&
-         runtime_authorization_rejected;
+         runtime_authorization_rejected && command_issue_rejected &&
+         command_consume_rejected;
 }
 
 bool TestLifecycleIsPrivacyGatedAndUnavailable() {
@@ -234,16 +259,10 @@ bool TestLifecycleIsPrivacyGatedAndUnavailable() {
   if (!Expect(wdf_capture_update_privacy_context(handle, &blocked) ==
                   WDF_CAPTURE_RESULT_OK &&
                   wdf_capture_start(handle) ==
-                      WDF_CAPTURE_RESULT_POLICY_BLOCKED,
-              "blocked consent reached the capture backend") ||
-      !PollEvent(handle, &event, &detail) ||
-      !Expect(event.sequence == 2 &&
-                  event.state == WDF_CAPTURE_STATE_BLOCKED_BY_CONSENT &&
-                  event.reason == WDF_CAPTURE_REASON_CONSENT_REQUIRED &&
-                  event.persistence_generation == 2,
-              "consent block event was incorrect") ||
-      !Expect(wdf_capture_start(handle) == WDF_CAPTURE_RESULT_INVALID_STATE,
-              "start bypassed the explicit resume transition")) {
+                      WDF_CAPTURE_RESULT_ADMISSION_REQUIRED &&
+                  wdf_capture_resume(handle) ==
+                      WDF_CAPTURE_RESULT_ADMISSION_REQUIRED,
+              "tokenless lifecycle command bypassed admission")) {
     wdf_capture_destroy(&handle);
     return false;
   }
@@ -253,16 +272,8 @@ bool TestLifecycleIsPrivacyGatedAndUnavailable() {
   if (!Expect(wdf_capture_update_privacy_context(handle, &allowed) ==
                   WDF_CAPTURE_RESULT_OK &&
                   wdf_capture_resume(handle) ==
-                      WDF_CAPTURE_RESULT_NOT_IMPLEMENTED,
-              "foundation build incorrectly reported live capture support") ||
-      !PollEvent(handle, &event, &detail) ||
-      !Expect(event.sequence == 3 &&
-                  event.state == WDF_CAPTURE_STATE_UNAVAILABLE &&
-                  event.reason == WDF_CAPTURE_REASON_BACKEND_UNAVAILABLE &&
-                  event.persistence_generation == 3,
-              "unavailable backend event was incorrect") ||
-      !Expect(wdf_capture_resume(handle) == WDF_CAPTURE_RESULT_INVALID_STATE,
-              "resume was accepted outside a paused state")) {
+                      WDF_CAPTURE_RESULT_ADMISSION_REQUIRED,
+              "legacy allow bypassed command admission")) {
     wdf_capture_destroy(&handle);
     return false;
   }
@@ -285,12 +296,12 @@ bool TestLifecycleIsPrivacyGatedAndUnavailable() {
       !Expect(wdf_capture_wait_stopped(handle, 0) == WDF_CAPTURE_RESULT_OK,
               "stop wait failed") ||
       !PollEvent(handle, &event, &detail) ||
-      !Expect(event.sequence == 4 &&
+      !Expect(event.sequence == 2 &&
                   event.state == WDF_CAPTURE_STATE_STOPPING &&
                   event.reason == WDF_CAPTURE_REASON_USER_STOPPED,
               "stopping event was incorrect") ||
       !PollEvent(handle, &event, &detail) ||
-      !Expect(event.sequence == 5 &&
+      !Expect(event.sequence == 3 &&
                   event.state == WDF_CAPTURE_STATE_STOPPED &&
                   event.reason == WDF_CAPTURE_REASON_USER_STOPPED &&
                   event.persistence_generation == 3,
@@ -338,8 +349,9 @@ bool TestPrivacyRevisionNeverRegresses() {
       Expect(wdf_capture_update_privacy_context(handle, &block_v2) ==
                  WDF_CAPTURE_RESULT_OK,
              "same-revision idempotent policy was rejected") &&
-      Expect(wdf_capture_start(handle) == WDF_CAPTURE_RESULT_POLICY_BLOCKED,
-             "newer block policy was not retained");
+      Expect(wdf_capture_start(handle) ==
+                 WDF_CAPTURE_RESULT_ADMISSION_REQUIRED,
+             "tokenless start bypassed command admission");
   wdf_capture_destroy(&handle);
   return valid;
 }
@@ -448,6 +460,461 @@ bool TestRuntimeAuthorizationBarrierContract() {
   return unknown_flags_rejected && reserved_rejected &&
          allow_without_target_rejected && block_with_target_rejected &&
          revision_and_target_rules;
+}
+
+bool TestCommandAdmissionAuthenticityAndOwnership() {
+  wdf_capture_config_v1 config = ValidConfig();
+  wdf_capture_handle first = 0;
+  wdf_capture_handle second = 0;
+  if (wdf_capture_create(&config, &first) != WDF_CAPTURE_RESULT_OK ||
+      wdf_capture_create(&config, &second) != WDF_CAPTURE_RESULT_OK) {
+    wdf_capture_destroy(&first);
+    wdf_capture_destroy(&second);
+    return Expect(false, "command admission handles could not be created");
+  }
+  wdf_capture_runtime_authorization_v1 authorization =
+      RuntimeAuthorization(WDF_CAPTURE_POLICY_ALLOW, 1);
+  uint64_t first_generation = 0;
+  uint64_t second_generation = 0;
+  if (wdf_capture_update_runtime_authorization(
+          first, &authorization, &first_generation) != WDF_CAPTURE_RESULT_OK ||
+      wdf_capture_update_runtime_authorization(
+          second, &authorization, &second_generation) !=
+          WDF_CAPTURE_RESULT_OK) {
+    wdf_capture_destroy(&first);
+    wdf_capture_destroy(&second);
+    return Expect(false, "command admission handles could not be authorized");
+  }
+
+  wdf_capture_command_admission_v1 admission = EmptyAdmission();
+  if (!Expect(wdf_capture_issue_command_admission(
+                  first,
+                  99,
+                  first_generation,
+                  authorization.target_epoch,
+                  &admission) == WDF_CAPTURE_RESULT_INVALID_ARGUMENT,
+              "unknown command admission action was accepted") ||
+      !Expect(admission.struct_size == sizeof(admission) &&
+                  admission.instance_epoch == 0,
+              "failed command issue exposed admission data") ||
+      !Expect(wdf_capture_start(first) ==
+                      WDF_CAPTURE_RESULT_ADMISSION_REQUIRED &&
+                  wdf_capture_resume(first) ==
+                      WDF_CAPTURE_RESULT_ADMISSION_REQUIRED,
+              "legacy lifecycle exports bypassed command admission")) {
+    wdf_capture_destroy(&first);
+    wdf_capture_destroy(&second);
+    return false;
+  }
+
+  admission = EmptyAdmission();
+  if (!Expect(wdf_capture_issue_command_admission(
+                  first,
+                  WDF_CAPTURE_COMMAND_START,
+                  first_generation,
+                  authorization.target_epoch,
+                  &admission) == WDF_CAPTURE_RESULT_OK,
+              "valid start admission was not issued") ||
+      !Expect(admission.instance_epoch != 0 &&
+                  admission.runtime_policy_revision == 1 &&
+                  admission.persistence_generation == first_generation &&
+                  admission.target_epoch == authorization.target_epoch &&
+                  (admission.authorization_epoch & 1U) != 0 &&
+                  (admission.nonce_low != 0 || admission.nonce_high != 0),
+              "issued C admission snapshot was incomplete")) {
+    wdf_capture_destroy(&first);
+    wdf_capture_destroy(&second);
+    return false;
+  }
+
+  wdf_capture_command_admission_v1 forged = admission;
+  forged.nonce_high ^= 1U;
+  if (!Expect(wdf_capture_start_authorized(first, &forged) ==
+                  WDF_CAPTURE_RESULT_ADMISSION_REJECTED,
+              "forged C admission nonce was accepted") ||
+      !Expect(wdf_capture_start_authorized(first, &admission) ==
+                  WDF_CAPTURE_RESULT_NOT_IMPLEMENTED,
+              "foreign nonce attempt consumed valid C admission") ||
+      !Expect(wdf_capture_start_authorized(first, &admission) ==
+                  WDF_CAPTURE_RESULT_ADMISSION_REJECTED,
+              "C admission was replayed")) {
+    wdf_capture_destroy(&first);
+    wdf_capture_destroy(&second);
+    return false;
+  }
+
+  wdf_capture_command_admission_v1 tamper_source = EmptyAdmission();
+  if (wdf_capture_issue_command_admission(first,
+                                          WDF_CAPTURE_COMMAND_START,
+                                          first_generation,
+                                          authorization.target_epoch,
+                                          &tamper_source) !=
+      WDF_CAPTURE_RESULT_OK) {
+    wdf_capture_destroy(&first);
+    wdf_capture_destroy(&second);
+    return Expect(false, "tamper C admission was not issued");
+  }
+  wdf_capture_command_admission_v1 tampered = tamper_source;
+  ++tampered.persistence_generation;
+  if (!Expect(wdf_capture_start_authorized(first, &tampered) ==
+                  WDF_CAPTURE_RESULT_ADMISSION_REJECTED,
+              "tampered C admission fields were accepted") ||
+      !Expect(wdf_capture_start_authorized(first, &tamper_source) ==
+                  WDF_CAPTURE_RESULT_ADMISSION_REJECTED,
+              "matching-nonce C tamper did not consume admission")) {
+    wdf_capture_destroy(&first);
+    wdf_capture_destroy(&second);
+    return false;
+  }
+
+  wdf_capture_command_admission_v1 overwritten = EmptyAdmission();
+  wdf_capture_command_admission_v1 replacement = EmptyAdmission();
+  if (wdf_capture_issue_command_admission(first,
+                                          WDF_CAPTURE_COMMAND_START,
+                                          first_generation,
+                                          authorization.target_epoch,
+                                          &overwritten) !=
+          WDF_CAPTURE_RESULT_OK ||
+      wdf_capture_issue_command_admission(first,
+                                          WDF_CAPTURE_COMMAND_START,
+                                          first_generation,
+                                          authorization.target_epoch,
+                                          &replacement) !=
+          WDF_CAPTURE_RESULT_OK) {
+    wdf_capture_destroy(&first);
+    wdf_capture_destroy(&second);
+    return Expect(false, "replacement C admission was not issued");
+  }
+  if (!Expect(wdf_capture_start_authorized(first, &overwritten) ==
+                  WDF_CAPTURE_RESULT_ADMISSION_REJECTED,
+              "overwritten C admission was accepted") ||
+      !Expect(wdf_capture_start_authorized(first, &replacement) ==
+                  WDF_CAPTURE_RESULT_NOT_IMPLEMENTED,
+              "old C admission attempt consumed replacement")) {
+    wdf_capture_destroy(&first);
+    wdf_capture_destroy(&second);
+    return false;
+  }
+
+  wdf_capture_command_admission_v1 wrong_action = EmptyAdmission();
+  if (wdf_capture_issue_command_admission(first,
+                                          WDF_CAPTURE_COMMAND_START,
+                                          first_generation,
+                                          authorization.target_epoch,
+                                          &wrong_action) !=
+      WDF_CAPTURE_RESULT_OK) {
+    wdf_capture_destroy(&first);
+    wdf_capture_destroy(&second);
+    return Expect(false, "wrong-action C admission was not issued");
+  }
+  if (!Expect(wdf_capture_resume_authorized(first, &wrong_action) ==
+                  WDF_CAPTURE_RESULT_ADMISSION_REJECTED,
+              "start admission was accepted by resume") ||
+      !Expect(wdf_capture_start_authorized(first, &wrong_action) ==
+                  WDF_CAPTURE_RESULT_ADMISSION_REJECTED,
+              "wrong-action C attempt did not consume admission")) {
+    wdf_capture_destroy(&first);
+    wdf_capture_destroy(&second);
+    return false;
+  }
+
+  wdf_capture_command_admission_v1 local_only = EmptyAdmission();
+  if (wdf_capture_issue_command_admission(first,
+                                          WDF_CAPTURE_COMMAND_START,
+                                          first_generation,
+                                          authorization.target_epoch,
+                                          &local_only) !=
+      WDF_CAPTURE_RESULT_OK) {
+    wdf_capture_destroy(&first);
+    wdf_capture_destroy(&second);
+    return Expect(false, "local-only C admission was not issued");
+  }
+  const bool valid =
+      Expect(wdf_capture_start_authorized(second, &local_only) ==
+                 WDF_CAPTURE_RESULT_ADMISSION_REJECTED,
+             "C admission crossed capture handles") &&
+      Expect(wdf_capture_start_authorized(first, &local_only) ==
+                 WDF_CAPTURE_RESULT_NOT_IMPLEMENTED,
+             "foreign handle attempt consumed local C admission");
+  wdf_capture_destroy(&first);
+  wdf_capture_destroy(&second);
+  return valid;
+}
+
+bool TestCommandAdmissionInvalidationAndConcurrency() {
+  wdf_capture_config_v1 config = ValidConfig();
+  wdf_capture_handle handle = 0;
+  if (wdf_capture_create(&config, &handle) != WDF_CAPTURE_RESULT_OK) {
+    return Expect(false, "command invalidation handle could not be created");
+  }
+  wdf_capture_runtime_authorization_v1 target_a =
+      RuntimeAuthorization(WDF_CAPTURE_POLICY_ALLOW, 1, 1, 100);
+  uint64_t generation = 0;
+  if (wdf_capture_update_runtime_authorization(
+          handle, &target_a, &generation) != WDF_CAPTURE_RESULT_OK) {
+    wdf_capture_destroy(&handle);
+    return Expect(false, "command invalidation handle was not authorized");
+  }
+
+  wdf_capture_command_admission_v1 idempotent_stale = EmptyAdmission();
+  if (wdf_capture_issue_command_admission(handle,
+                                          WDF_CAPTURE_COMMAND_START,
+                                          generation,
+                                          target_a.target_epoch,
+                                          &idempotent_stale) !=
+          WDF_CAPTURE_RESULT_OK ||
+      wdf_capture_update_runtime_authorization(
+          handle, &target_a, &generation) != WDF_CAPTURE_RESULT_OK ||
+      generation != 2) {
+    wdf_capture_destroy(&handle);
+    return Expect(false, "idempotent C authorization setup failed");
+  }
+  if (!Expect(wdf_capture_start_authorized(handle, &idempotent_stale) ==
+                  WDF_CAPTURE_RESULT_ADMISSION_REJECTED,
+              "idempotent C close/reopen revived admission")) {
+    wdf_capture_destroy(&handle);
+    return false;
+  }
+
+  wdf_capture_command_admission_v1 stale_a = EmptyAdmission();
+  if (wdf_capture_issue_command_admission(handle,
+                                          WDF_CAPTURE_COMMAND_START,
+                                          generation,
+                                          target_a.target_epoch,
+                                          &stale_a) != WDF_CAPTURE_RESULT_OK) {
+    wdf_capture_destroy(&handle);
+    return Expect(false, "A admission was not issued");
+  }
+  wdf_capture_runtime_authorization_v1 target_b =
+      RuntimeAuthorization(WDF_CAPTURE_POLICY_ALLOW, 2, 2, 101);
+  if (wdf_capture_update_runtime_authorization(
+          handle, &target_b, &generation) != WDF_CAPTURE_RESULT_OK ||
+      generation != 3 ||
+      !Expect(wdf_capture_start_authorized(handle, &stale_a) ==
+                  WDF_CAPTURE_RESULT_ADMISSION_REJECTED,
+              "A admission started after B authorization")) {
+    wdf_capture_destroy(&handle);
+    return false;
+  }
+
+  wdf_capture_command_admission_v1 prior = EmptyAdmission();
+  if (wdf_capture_issue_command_admission(handle,
+                                          WDF_CAPTURE_COMMAND_START,
+                                          generation,
+                                          target_b.target_epoch,
+                                          &prior) != WDF_CAPTURE_RESULT_OK) {
+    wdf_capture_destroy(&handle);
+    return Expect(false, "expected-pair C admission was not issued");
+  }
+  wdf_capture_command_admission_v1 mismatch = EmptyAdmission();
+  if (!Expect(wdf_capture_issue_command_admission(handle,
+                                                  WDF_CAPTURE_COMMAND_START,
+                                                  generation + 1,
+                                                  target_b.target_epoch,
+                                                  &mismatch) ==
+                  WDF_CAPTURE_RESULT_ADMISSION_REJECTED &&
+                  mismatch.instance_epoch == 0,
+              "mismatched C expected generation was accepted") ||
+      !Expect(wdf_capture_start_authorized(handle, &prior) ==
+                  WDF_CAPTURE_RESULT_ADMISSION_REJECTED,
+              "failed C issue did not invalidate prior admission") ||
+      !Expect(wdf_capture_issue_command_admission(handle,
+                                                  WDF_CAPTURE_COMMAND_START,
+                                                  generation,
+                                                  target_b.target_epoch + 1,
+                                                  &mismatch) ==
+                  WDF_CAPTURE_RESULT_ADMISSION_REJECTED,
+              "mismatched C expected target was accepted")) {
+    wdf_capture_destroy(&handle);
+    return false;
+  }
+
+  wdf_capture_command_admission_v1 concurrent = EmptyAdmission();
+  if (wdf_capture_issue_command_admission(handle,
+                                          WDF_CAPTURE_COMMAND_START,
+                                          generation,
+                                          target_b.target_epoch,
+                                          &concurrent) !=
+      WDF_CAPTURE_RESULT_OK) {
+    wdf_capture_destroy(&handle);
+    return Expect(false, "concurrent C admission was not issued");
+  }
+  std::array<std::atomic<wdf_capture_result>, 2> results{
+      WDF_CAPTURE_RESULT_INTERNAL_ERROR,
+      WDF_CAPTURE_RESULT_INTERNAL_ERROR,
+  };
+  std::thread first([&] {
+    results[0].store(wdf_capture_start_authorized(handle, &concurrent));
+  });
+  std::thread second([&] {
+    results[1].store(wdf_capture_start_authorized(handle, &concurrent));
+  });
+  first.join();
+  second.join();
+  const wdf_capture_result first_result = results[0].load();
+  const wdf_capture_result second_result = results[1].load();
+  if (!Expect((first_result == WDF_CAPTURE_RESULT_NOT_IMPLEMENTED &&
+               second_result == WDF_CAPTURE_RESULT_ADMISSION_REJECTED) ||
+                  (second_result == WDF_CAPTURE_RESULT_NOT_IMPLEMENTED &&
+                   first_result == WDF_CAPTURE_RESULT_ADMISSION_REJECTED),
+              "concurrent C double-consume was not exactly once")) {
+    wdf_capture_destroy(&handle);
+    return false;
+  }
+
+  wdf_capture_command_admission_v1 revoked = EmptyAdmission();
+  if (wdf_capture_issue_command_admission(handle,
+                                          WDF_CAPTURE_COMMAND_START,
+                                          generation,
+                                          target_b.target_epoch,
+                                          &revoked) !=
+      WDF_CAPTURE_RESULT_OK) {
+    wdf_capture_destroy(&handle);
+    return Expect(false, "pre-revoke C admission was not issued");
+  }
+  if (!Expect(wdf_capture_revoke_runtime_authorization(
+                  handle, &generation) == WDF_CAPTURE_RESULT_OK &&
+                  generation == 4,
+              "C authorization revoke failed") ||
+      !Expect(wdf_capture_start_authorized(handle, &revoked) ==
+                  WDF_CAPTURE_RESULT_ADMISSION_REJECTED,
+              "revoke did not invalidate C admission")) {
+    wdf_capture_destroy(&handle);
+    return false;
+  }
+  wdf_capture_command_admission_v1 blocked = EmptyAdmission();
+  if (!Expect(wdf_capture_issue_command_admission(handle,
+                                                  WDF_CAPTURE_COMMAND_START,
+                                                  generation,
+                                                  target_b.target_epoch,
+                                                  &blocked) ==
+                  WDF_CAPTURE_RESULT_POLICY_BLOCKED,
+              "revoked C policy did not block admission issue")) {
+    wdf_capture_destroy(&handle);
+    return false;
+  }
+
+  wdf_capture_runtime_authorization_v1 target_c =
+      RuntimeAuthorization(WDF_CAPTURE_POLICY_ALLOW, 3, 3, 102);
+  if (wdf_capture_update_runtime_authorization(
+          handle, &target_c, &generation) != WDF_CAPTURE_RESULT_OK ||
+      generation != 5) {
+    wdf_capture_destroy(&handle);
+    return Expect(false, "post-revoke C authorization failed");
+  }
+  wdf_capture_command_admission_v1 stopped = EmptyAdmission();
+  if (wdf_capture_issue_command_admission(handle,
+                                          WDF_CAPTURE_COMMAND_START,
+                                          generation,
+                                          target_c.target_epoch,
+                                          &stopped) != WDF_CAPTURE_RESULT_OK ||
+      wdf_capture_request_stop(handle) != WDF_CAPTURE_RESULT_OK) {
+    wdf_capture_destroy(&handle);
+    return Expect(false, "pre-stop C admission setup failed");
+  }
+  if (!Expect(wdf_capture_start_authorized(handle, &stopped) ==
+                  WDF_CAPTURE_RESULT_ADMISSION_REJECTED,
+              "stop did not invalidate C admission") ||
+      !Expect(wdf_capture_wait_stopped(handle, 5'000) ==
+                  WDF_CAPTURE_RESULT_OK,
+              "command invalidation stop did not join")) {
+    wdf_capture_destroy(&handle);
+    return false;
+  }
+  wdf_capture_destroy(&handle);
+
+  wdf_capture_handle destroyed = 0;
+  if (wdf_capture_create(&config, &destroyed) != WDF_CAPTURE_RESULT_OK) {
+    return Expect(false, "destroyed-admission handle could not be created");
+  }
+  generation = 0;
+  if (wdf_capture_update_runtime_authorization(
+          destroyed, &target_a, &generation) != WDF_CAPTURE_RESULT_OK) {
+    wdf_capture_destroy(&destroyed);
+    return Expect(false, "destroyed-admission handle was not authorized");
+  }
+  wdf_capture_command_admission_v1 destroyed_stamp = EmptyAdmission();
+  if (wdf_capture_issue_command_admission(destroyed,
+                                          WDF_CAPTURE_COMMAND_START,
+                                          generation,
+                                          target_a.target_epoch,
+                                          &destroyed_stamp) !=
+      WDF_CAPTURE_RESULT_OK) {
+    wdf_capture_destroy(&destroyed);
+    return Expect(false, "pre-destroy C admission was not issued");
+  }
+  const wdf_capture_handle stale_handle = destroyed;
+  if (wdf_capture_destroy(&destroyed) != WDF_CAPTURE_RESULT_OK) {
+    return Expect(false, "admission owner could not be destroyed");
+  }
+  wdf_capture_handle recreated = 0;
+  if (wdf_capture_create(&config, &recreated) != WDF_CAPTURE_RESULT_OK ||
+      wdf_capture_update_runtime_authorization(
+          recreated, &target_a, &generation) != WDF_CAPTURE_RESULT_OK) {
+    wdf_capture_destroy(&recreated);
+    return Expect(false, "recreated admission handle setup failed");
+  }
+  const bool valid =
+      Expect(wdf_capture_start_authorized(stale_handle, &destroyed_stamp) ==
+                 WDF_CAPTURE_RESULT_INVALID_ARGUMENT,
+             "destroyed handle accepted command admission") &&
+      Expect(wdf_capture_start_authorized(recreated, &destroyed_stamp) ==
+                 WDF_CAPTURE_RESULT_ADMISSION_REJECTED,
+             "destroyed admission crossed recreated instance");
+  wdf_capture_destroy(&recreated);
+  return valid;
+}
+
+bool TestCommandAdmissionDestroyRace() {
+  wdf_capture_config_v1 config = ValidConfig();
+  for (int iteration = 0; iteration < 32; ++iteration) {
+    wdf_capture_handle handle = 0;
+    if (wdf_capture_create(&config, &handle) != WDF_CAPTURE_RESULT_OK) {
+      return Expect(false, "destroy-race admission handle could not be created");
+    }
+    wdf_capture_runtime_authorization_v1 authorization =
+        RuntimeAuthorization(WDF_CAPTURE_POLICY_ALLOW, 1);
+    uint64_t generation = 0;
+    wdf_capture_command_admission_v1 admission = EmptyAdmission();
+    if (wdf_capture_update_runtime_authorization(
+            handle, &authorization, &generation) != WDF_CAPTURE_RESULT_OK ||
+        wdf_capture_issue_command_admission(
+            handle,
+            WDF_CAPTURE_COMMAND_START,
+            generation,
+            authorization.target_epoch,
+            &admission) != WDF_CAPTURE_RESULT_OK) {
+      wdf_capture_destroy(&handle);
+      return Expect(false, "destroy-race admission setup failed");
+    }
+
+    const wdf_capture_handle raw_handle = handle;
+    std::atomic<bool> ready{false};
+    std::atomic<wdf_capture_result> start_result{
+        WDF_CAPTURE_RESULT_INTERNAL_ERROR};
+    std::thread starter([&] {
+      ready.store(true, std::memory_order_release);
+      ready.notify_one();
+      start_result.store(
+          wdf_capture_start_authorized(raw_handle, &admission),
+          std::memory_order_release);
+    });
+    ready.wait(false, std::memory_order_acquire);
+    const wdf_capture_result destroy_result = wdf_capture_destroy(&handle);
+    starter.join();
+
+    const wdf_capture_result observed =
+        start_result.load(std::memory_order_acquire);
+    if (!Expect(destroy_result == WDF_CAPTURE_RESULT_OK && handle == 0,
+                "destroy failed during command admission race") ||
+        !Expect(observed == WDF_CAPTURE_RESULT_NOT_IMPLEMENTED ||
+                    observed == WDF_CAPTURE_RESULT_ADMISSION_REJECTED ||
+                    observed == WDF_CAPTURE_RESULT_INVALID_ARGUMENT,
+                "command admission returned an invalid destroy-race result")) {
+      return false;
+    }
+  }
+  return true;
 }
 
 bool TestLegacyAndRuntimeRevisionNamespacesCannotMix() {
@@ -626,6 +1093,9 @@ int main() {
       !TestLifecycleIsPrivacyGatedAndUnavailable() ||
       !TestPrivacyRevisionNeverRegresses() ||
       !TestRuntimeAuthorizationBarrierContract() ||
+      !TestCommandAdmissionAuthenticityAndOwnership() ||
+      !TestCommandAdmissionInvalidationAndConcurrency() ||
+      !TestCommandAdmissionDestroyRace() ||
       !TestLegacyAndRuntimeRevisionNamespacesCannotMix() ||
       !TestStaleHandleCannotTargetRecreatedInstance() ||
       !TestConcurrentPollAndDestroyAreSafe() ||

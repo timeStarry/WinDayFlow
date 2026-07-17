@@ -71,21 +71,20 @@ public sealed class ConsentGatedCaptureService : ICaptureService, IDisposable
     }
 
     public Task StartAsync(CancellationToken cancellationToken = default) =>
-        InvokeBackendAsync(
+        InvokeAuthorizedBackendAsync(
+            CaptureAdmissionOperation.Start,
             _backend.StartAsync,
-            requiresConsent: true,
             cancellationToken);
 
     public Task PauseAsync(CancellationToken cancellationToken = default) =>
         InvokeBackendAsync(
             _backend.PauseAsync,
-            requiresConsent: false,
             cancellationToken);
 
     public Task ResumeAsync(CancellationToken cancellationToken = default) =>
-        InvokeBackendAsync(
+        InvokeAuthorizedBackendAsync(
+            CaptureAdmissionOperation.Resume,
             _backend.ResumeAsync,
-            requiresConsent: true,
             cancellationToken);
 
     public Task StopAsync(CancellationToken cancellationToken = default) =>
@@ -93,7 +92,6 @@ public sealed class ConsentGatedCaptureService : ICaptureService, IDisposable
             token => ShouldInitiateConsentStop(_backend.CurrentStatus.State)
                 ? _backend.StopAsync(token)
                 : Task.CompletedTask,
-            requiresConsent: false,
             cancellationToken);
 
     public void Dispose()
@@ -117,7 +115,6 @@ public sealed class ConsentGatedCaptureService : ICaptureService, IDisposable
 
     private async Task InvokeBackendAsync(
         Func<CancellationToken, Task> operation,
-        bool requiresConsent,
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -132,12 +129,56 @@ public sealed class ConsentGatedCaptureService : ICaptureService, IDisposable
         try
         {
             ThrowIfDisposed();
-            if (requiresConsent && !HasCaptureAuthorization())
+            await operation(linkedCancellation.Token).ConfigureAwait(false);
+        }
+        finally
+        {
+            UpdateStatus(_backend.CurrentStatus);
+            _lifecycleGate.Release();
+        }
+    }
+
+    private async Task InvokeAuthorizedBackendAsync(
+        CaptureAdmissionOperation admissionOperation,
+        Func<ICaptureRuntimeAdmissionStamp, CancellationToken, Task> operation,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        ThrowIfDisposed();
+
+        using var linkedCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+            cancellationToken,
+            _lifetimeCancellation.Token);
+        await _lifecycleGate
+            .WaitAsync(linkedCancellation.Token)
+            .ConfigureAwait(false);
+        try
+        {
+            ThrowIfDisposed();
+            if (!HasPersistentCaptureAuthorization())
             {
                 throw new RecordingConsentRequiredException();
             }
 
-            await operation(linkedCancellation.Token).ConfigureAwait(false);
+            var admissionStamp = await _runtimeAuthorization
+                .TryIssueAdmissionAsync(admissionOperation, linkedCancellation.Token)
+                .ConfigureAwait(false);
+            if (admissionStamp is null)
+            {
+                throw new RecordingConsentRequiredException();
+            }
+
+            ThrowIfDisposed();
+            linkedCancellation.Token.ThrowIfCancellationRequested();
+            if (!HasCaptureAuthorization()
+                || admissionStamp.InvalidationGeneration
+                    != _runtimeAuthorization.InvalidationGeneration)
+            {
+                throw new RecordingConsentRequiredException();
+            }
+
+            await operation(admissionStamp, linkedCancellation.Token)
+                .ConfigureAwait(false);
         }
         finally
         {
@@ -382,9 +423,14 @@ public sealed class ConsentGatedCaptureService : ICaptureService, IDisposable
 
     private bool HasCaptureAuthorization()
     {
-        return _settings.Current.CaptureEnabled
-            && _settings.HasValidRecordingConsent
+        return HasPersistentCaptureAuthorization()
             && _runtimeAuthorization.IsCaptureAuthorized;
+    }
+
+    private bool HasPersistentCaptureAuthorization()
+    {
+        return _settings.Current.CaptureEnabled
+            && _settings.HasValidRecordingConsent;
     }
 
     private bool IsDisposed()

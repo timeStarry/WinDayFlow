@@ -85,6 +85,138 @@ public sealed class ConsentGatedCaptureServiceTests
     }
 
     [Fact]
+    public async Task NullAdmissionIsRejectedWithoutRetryingOrCallingBackend()
+    {
+        using var settings = await CreateConsentedSettingsAsync();
+        var backend = new StubCaptureBackend(CaptureState.Stopped);
+        var authorization = new ControlledRuntimeAuthorization(isCaptureAuthorized: true)
+        {
+            IssueOperation = static (_, _) =>
+                Task.FromResult<ICaptureRuntimeAdmissionStamp?>(null),
+        };
+        using var service = new ConsentGatedCaptureService(
+            backend,
+            settings,
+            authorization);
+
+        await Assert.ThrowsAsync<RecordingConsentRequiredException>(
+            () => service.StartAsync());
+
+        Assert.Equal(1, authorization.IssueCount);
+        Assert.Equal(0, backend.StartCount);
+    }
+
+    [Fact]
+    public async Task PauseAndStopNeverRequestAdmission()
+    {
+        using var settings = await CreateConsentedSettingsAsync();
+        var backend = new StubCaptureBackend(CaptureState.Recording);
+        var authorization = new ControlledRuntimeAuthorization(
+            isCaptureAuthorized: true);
+        using var service = new ConsentGatedCaptureService(
+            backend,
+            settings,
+            authorization);
+
+        await service.PauseAsync();
+        await service.StopAsync();
+
+        Assert.Equal(0, authorization.IssueCount);
+        Assert.Equal(1, backend.PauseCount);
+        Assert.Equal(1, backend.StopCount);
+    }
+
+    [Fact]
+    public async Task SettingsChangedAfterAdmissionIssueRejectsWithoutBackendCall()
+    {
+        using var settings = await CreateConsentedSettingsAsync();
+        var backend = new StubCaptureBackend(CaptureState.Stopped);
+        var authorization = new ControlledRuntimeAuthorization(
+            isCaptureAuthorized: true)
+        {
+            IssueOperation = async (_, cancellationToken) =>
+            {
+                var stamp = new TestAdmissionStamp(0);
+                await settings
+                    .SetCaptureEnabledAsync(enabled: false, cancellationToken)
+                    .ConfigureAwait(false);
+                return stamp;
+            },
+        };
+        using var service = new ConsentGatedCaptureService(
+            backend,
+            settings,
+            authorization);
+
+        await Assert.ThrowsAsync<RecordingConsentRequiredException>(
+            () => service.StartAsync());
+
+        Assert.Equal(1, authorization.IssueCount);
+        Assert.Equal(0, backend.StartCount);
+    }
+
+    [Fact]
+    public async Task RecoveredInvalidationAfterIssueRejectsWithoutRefreshingStamp()
+    {
+        using var settings = await CreateConsentedSettingsAsync();
+        var backend = new StubCaptureBackend(CaptureState.Stopped);
+        var authorization = new ControlledRuntimeAuthorization(
+            isCaptureAuthorized: true);
+        authorization.IssueOperation = (_, _) =>
+        {
+            var stamp = new TestAdmissionStamp(
+                authorization.InvalidationGeneration);
+            authorization.SetCaptureAuthorized(authorized: false);
+            authorization.SetCaptureAuthorized(authorized: true);
+            return Task.FromResult<ICaptureRuntimeAdmissionStamp?>(stamp);
+        };
+        using var service = new ConsentGatedCaptureService(
+            backend,
+            settings,
+            authorization);
+
+        await Assert.ThrowsAsync<RecordingConsentRequiredException>(
+            () => service.ResumeAsync());
+
+        Assert.True(authorization.IsCaptureAuthorized);
+        Assert.Equal(1, authorization.InvalidationGeneration);
+        Assert.Equal(1, authorization.IssueCount);
+        Assert.Equal(0, backend.ResumeCount);
+    }
+
+    [Fact]
+    public async Task CancellationWhileAdmissionIsIssuingNeverCallsBackend()
+    {
+        using var settings = await CreateConsentedSettingsAsync();
+        var backend = new StubCaptureBackend(CaptureState.Stopped);
+        var issueStarted = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var authorization = new ControlledRuntimeAuthorization(
+            isCaptureAuthorized: true)
+        {
+            IssueOperation = async (_, cancellationToken) =>
+            {
+                issueStarted.TrySetResult();
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+                return null;
+            },
+        };
+        using var service = new ConsentGatedCaptureService(
+            backend,
+            settings,
+            authorization);
+        using var cancellation = new CancellationTokenSource();
+
+        var start = service.StartAsync(cancellation.Token);
+        await issueStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => start);
+        Assert.Equal(1, authorization.IssueCount);
+        Assert.Equal(0, backend.StartCount);
+    }
+
+    [Fact]
     public async Task RevokingConsentStopsBackendBeforePublishingBlockedStatus()
     {
         using var settings = await CreateConsentedSettingsAsync();
@@ -640,8 +772,11 @@ public sealed class ConsentGatedCaptureServiceTests
             remove => _statusChanged -= value;
         }
 
-        public async Task StartAsync(CancellationToken cancellationToken = default)
+        public async Task StartAsync(
+            ICaptureRuntimeAdmissionStamp admissionStamp,
+            CancellationToken cancellationToken = default)
         {
+            ArgumentNullException.ThrowIfNull(admissionStamp);
             cancellationToken.ThrowIfCancellationRequested();
             StartCount++;
             _startStarted.TrySetResult();
@@ -672,8 +807,11 @@ public sealed class ConsentGatedCaptureServiceTests
             }
         }
 
-        public Task ResumeAsync(CancellationToken cancellationToken = default)
+        public Task ResumeAsync(
+            ICaptureRuntimeAdmissionStamp admissionStamp,
+            CancellationToken cancellationToken = default)
         {
+            ArgumentNullException.ThrowIfNull(admissionStamp);
             cancellationToken.ThrowIfCancellationRequested();
             ResumeCount++;
             if (TransitionOnCommands)
@@ -751,6 +889,16 @@ public sealed class ConsentGatedCaptureServiceTests
 
         public long InvalidationGeneration => 0;
 
+        public ValueTask<ICaptureRuntimeAdmissionStamp?> TryIssueAdmissionAsync(
+            CaptureAdmissionOperation operation,
+            CancellationToken cancellationToken = default)
+        {
+            _ = operation;
+            cancellationToken.ThrowIfCancellationRequested();
+            return ValueTask.FromResult<ICaptureRuntimeAdmissionStamp?>(
+                IsCaptureAuthorized ? new TestAdmissionStamp(0) : null);
+        }
+
         public event EventHandler<CaptureRuntimeAuthorizationChangedEventArgs>? AuthorizationChanged
         {
             add { }
@@ -777,6 +925,18 @@ public sealed class ConsentGatedCaptureServiceTests
         public Task BlockStarted => _blockStarted.Task;
 
         public event EventHandler<CaptureRuntimeAuthorizationChangedEventArgs>? AuthorizationChanged;
+
+        public ValueTask<ICaptureRuntimeAdmissionStamp?> TryIssueAdmissionAsync(
+            CaptureAdmissionOperation operation,
+            CancellationToken cancellationToken = default)
+        {
+            _ = operation;
+            cancellationToken.ThrowIfCancellationRequested();
+            return ValueTask.FromResult<ICaptureRuntimeAdmissionStamp?>(
+                IsCaptureAuthorized
+                    ? new TestAdmissionStamp(InvalidationGeneration)
+                    : null);
+        }
 
         public async Task PrepareAsync(
             AppSettings previous,
@@ -854,6 +1014,18 @@ public sealed class ConsentGatedCaptureServiceTests
             remove => _authorizationChanged -= value;
         }
 
+        public ValueTask<ICaptureRuntimeAdmissionStamp?> TryIssueAdmissionAsync(
+            CaptureAdmissionOperation operation,
+            CancellationToken cancellationToken = default)
+        {
+            _ = operation;
+            cancellationToken.ThrowIfCancellationRequested();
+            return ValueTask.FromResult<ICaptureRuntimeAdmissionStamp?>(
+                IsCaptureAuthorized
+                    ? new TestAdmissionStamp(InvalidationGeneration)
+                    : null);
+        }
+
         public void SetCaptureAuthorized(bool authorized)
         {
             var previous = Interlocked.Exchange(
@@ -876,4 +1048,72 @@ public sealed class ConsentGatedCaptureServiceTests
                     InvalidationGeneration));
         }
     }
+
+    private sealed class ControlledRuntimeAuthorization(bool isCaptureAuthorized)
+        : ICaptureRuntimeAuthorization
+    {
+        private int _authorized = isCaptureAuthorized ? 1 : 0;
+        private int _issueCount;
+        private long _invalidationGeneration;
+
+        public bool IsCaptureAuthorized => Volatile.Read(ref _authorized) != 0;
+
+        public long InvalidationGeneration =>
+            Volatile.Read(ref _invalidationGeneration);
+
+        public int IssueCount => Volatile.Read(ref _issueCount);
+
+        public Func<
+            CaptureAdmissionOperation,
+            CancellationToken,
+            Task<ICaptureRuntimeAdmissionStamp?>>?
+            IssueOperation
+        { get; set; }
+
+        public event EventHandler<CaptureRuntimeAuthorizationChangedEventArgs>?
+            AuthorizationChanged;
+
+        public ValueTask<ICaptureRuntimeAdmissionStamp?> TryIssueAdmissionAsync(
+            CaptureAdmissionOperation operation,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Interlocked.Increment(ref _issueCount);
+            if (IssueOperation is { } issueOperation)
+            {
+                return new ValueTask<ICaptureRuntimeAdmissionStamp?>(
+                    issueOperation(operation, cancellationToken));
+            }
+
+            return ValueTask.FromResult<ICaptureRuntimeAdmissionStamp?>(
+                IsCaptureAuthorized
+                    ? new TestAdmissionStamp(InvalidationGeneration)
+                    : null);
+        }
+
+        public void SetCaptureAuthorized(bool authorized)
+        {
+            var previous = Interlocked.Exchange(
+                ref _authorized,
+                authorized ? 1 : 0) != 0;
+            if (previous == authorized)
+            {
+                return;
+            }
+
+            if (!authorized)
+            {
+                Interlocked.Increment(ref _invalidationGeneration);
+            }
+
+            AuthorizationChanged?.Invoke(
+                this,
+                new CaptureRuntimeAuthorizationChangedEventArgs(
+                    authorized,
+                    InvalidationGeneration));
+        }
+    }
+
+    private sealed record TestAdmissionStamp(long InvalidationGeneration)
+        : ICaptureRuntimeAdmissionStamp;
 }

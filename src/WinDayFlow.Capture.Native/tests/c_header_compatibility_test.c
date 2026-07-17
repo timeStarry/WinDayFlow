@@ -25,6 +25,7 @@ int main(void) {
       (capabilities &
        WDF_CAPTURE_CAPABILITY_PERSISTENCE_GENERATION_BARRIER) == 0 ||
       (capabilities & WDF_CAPTURE_CAPABILITY_DETERMINISTIC_STOP) == 0 ||
+      (capabilities & WDF_CAPTURE_CAPABILITY_COMMAND_ADMISSION) == 0 ||
       (capabilities & WDF_CAPTURE_CAPABILITY_SCREEN_CAPTURE) != 0 ||
       (capabilities & WDF_CAPTURE_CAPABILITY_H264_CHUNKS) != 0 ||
       (capabilities & WDF_CAPTURE_CAPABILITY_EVIDENCE_EXTRACTION) != 0) {
@@ -36,6 +37,7 @@ int main(void) {
   if (sizeof(wdf_capture_config_v1) != 80 ||
       sizeof(wdf_capture_privacy_context_v1) != 80 ||
       sizeof(wdf_capture_runtime_authorization_v1) != 112 ||
+      sizeof(wdf_capture_command_admission_v1) != 64 ||
       sizeof(wdf_capture_event_v1) != 80 ||
       offsetof(wdf_capture_runtime_authorization_v1,
                runtime_policy_revision) != 8 ||
@@ -48,6 +50,16 @@ int main(void) {
       offsetof(wdf_capture_runtime_authorization_v1, target_flags) != 44 ||
       offsetof(wdf_capture_runtime_authorization_v1, consent_granted) != 48 ||
       offsetof(wdf_capture_runtime_authorization_v1, reserved) != 80 ||
+      offsetof(wdf_capture_command_admission_v1, instance_epoch) != 8 ||
+      offsetof(wdf_capture_command_admission_v1,
+               runtime_policy_revision) != 16 ||
+      offsetof(wdf_capture_command_admission_v1,
+               persistence_generation) != 24 ||
+      offsetof(wdf_capture_command_admission_v1, target_epoch) != 32 ||
+      offsetof(wdf_capture_command_admission_v1,
+               authorization_epoch) != 40 ||
+      offsetof(wdf_capture_command_admission_v1, nonce_low) != 48 ||
+      offsetof(wdf_capture_command_admission_v1, nonce_high) != 56 ||
       offsetof(wdf_capture_event_v1, persistence_generation) != 48 ||
       offsetof(wdf_capture_event_v1, target_epoch) != 56) {
     fputs("C translation unit observed an incompatible ABI layout\n", stderr);
@@ -66,6 +78,7 @@ int main(void) {
   {
     wdf_capture_config_v1 config = {0};
     wdf_capture_runtime_authorization_v1 authorization = {0};
+    wdf_capture_command_admission_v1 admission = {0};
     wdf_capture_handle handle = 0;
     uint64_t generation = 0;
     config.struct_size = (uint32_t)sizeof(config);
@@ -96,11 +109,33 @@ int main(void) {
     authorization.application_allowed = WDF_CAPTURE_POLICY_ALLOW;
     authorization.window_allowed = WDF_CAPTURE_POLICY_ALLOW;
     authorization.storage_available = WDF_CAPTURE_POLICY_ALLOW;
+    admission.struct_size = (uint32_t)sizeof(admission);
+    admission.abi_version = WDF_CAPTURE_ABI_VERSION;
 
     if (wdf_capture_create(&config, &handle) != WDF_CAPTURE_RESULT_OK ||
         wdf_capture_update_runtime_authorization(
             handle, &authorization, &generation) != WDF_CAPTURE_RESULT_OK ||
         generation != 2 ||
+        wdf_capture_start(handle) != WDF_CAPTURE_RESULT_ADMISSION_REQUIRED ||
+        wdf_capture_resume(handle) != WDF_CAPTURE_RESULT_ADMISSION_REQUIRED ||
+        wdf_capture_issue_command_admission(
+            handle,
+            WDF_CAPTURE_COMMAND_START,
+            generation,
+            authorization.target_epoch,
+            &admission) != WDF_CAPTURE_RESULT_OK ||
+        admission.instance_epoch == 0 ||
+        admission.runtime_policy_revision != 1 ||
+        admission.persistence_generation != generation ||
+        admission.target_epoch != authorization.target_epoch ||
+        admission.authorization_epoch == 0 ||
+        (admission.nonce_low == 0 && admission.nonce_high == 0) ||
+        wdf_capture_start_authorized(handle, &admission) !=
+            WDF_CAPTURE_RESULT_NOT_IMPLEMENTED ||
+        wdf_capture_start_authorized(handle, &admission) !=
+            WDF_CAPTURE_RESULT_ADMISSION_REJECTED ||
+        wdf_capture_resume_authorized(handle, &admission) !=
+            WDF_CAPTURE_RESULT_ADMISSION_REJECTED ||
         wdf_capture_revoke_runtime_authorization(handle, &generation) !=
             WDF_CAPTURE_RESULT_OK ||
         generation != 3 ||

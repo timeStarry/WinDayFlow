@@ -15,6 +15,14 @@ public interface ICaptureRuntimeAuthorization
     long InvalidationGeneration { get; }
 
     /// <summary>
+    /// Attempts to issue a single-use authorization for one Start or Resume command.
+    /// A null result is a fail-closed denial.
+    /// </summary>
+    ValueTask<ICaptureRuntimeAdmissionStamp?> TryIssueAdmissionAsync(
+        CaptureAdmissionOperation operation,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Reports authorization transitions together with the latest invalidation generation.
     /// </summary>
     event EventHandler<CaptureRuntimeAuthorizationChangedEventArgs>? AuthorizationChanged;
@@ -48,6 +56,15 @@ public sealed class DenyCaptureRuntimeAuthorization : ICaptureRuntimeAuthorizati
     public bool IsCaptureAuthorized => false;
 
     public long InvalidationGeneration => 0;
+
+    public ValueTask<ICaptureRuntimeAdmissionStamp?> TryIssueAdmissionAsync(
+        CaptureAdmissionOperation operation,
+        CancellationToken cancellationToken = default)
+    {
+        _ = operation;
+        cancellationToken.ThrowIfCancellationRequested();
+        return ValueTask.FromResult<ICaptureRuntimeAdmissionStamp?>(null);
+    }
 
     public event EventHandler<CaptureRuntimeAuthorizationChangedEventArgs>? AuthorizationChanged
     {

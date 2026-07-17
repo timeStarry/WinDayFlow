@@ -15,6 +15,7 @@ public enum NativeCaptureCapabilities : ulong
     TargetScopedAuthorization = 1UL << 5,
     PersistenceGenerationBarrier = 1UL << 6,
     DeterministicStop = 1UL << 7,
+    CommandAdmission = 1UL << 8,
 }
 
 public enum NativeCapturePolicyDecision
@@ -278,6 +279,12 @@ public readonly record struct NativeCaptureAbiLayout(
     int RuntimeAuthorizationRevisionOffset,
     int RuntimeAuthorizationTargetEpochOffset,
     int RuntimeAuthorizationDecisionOffset,
+    int CommandAdmissionSize,
+    int CommandAdmissionRuntimeRevisionOffset,
+    int CommandAdmissionPersistenceGenerationOffset,
+    int CommandAdmissionTargetEpochOffset,
+    int CommandAdmissionAuthorizationEpochOffset,
+    int CommandAdmissionNonceOffset,
     int EventSize,
     int EventSequenceOffset,
     int EventPersistenceGenerationOffset,
@@ -288,6 +295,7 @@ public static class NativeCaptureAbiContract
     public const uint AbiVersion = 1;
     public const int X64StructureSize = 80;
     public const int X64RuntimeAuthorizationStructureSize = 112;
+    public const int CommandAdmissionStructureSize = 64;
 
     public const NativeCaptureCapabilities FoundationCapabilities =
         NativeCaptureCapabilities.PrivacyGuard
@@ -299,8 +307,12 @@ public static class NativeCaptureAbiContract
         | NativeCaptureCapabilities.PersistenceGenerationBarrier
         | NativeCaptureCapabilities.DeterministicStop;
 
-    public const NativeCaptureCapabilities SafeScreenCaptureCapabilities =
+    public const NativeCaptureCapabilities RuntimeOwnerCapabilities =
         RuntimeSafetyCapabilities
+        | NativeCaptureCapabilities.CommandAdmission;
+
+    public const NativeCaptureCapabilities SafeScreenCaptureCapabilities =
+        RuntimeOwnerCapabilities
         | NativeCaptureCapabilities.ScreenCapture
         | NativeCaptureCapabilities.H264Chunks;
 
@@ -321,6 +333,17 @@ public static class NativeCaptureAbiContract
                 nameof(NativeCaptureRuntimeAuthorizationV1.TargetEpoch))),
             checked((int)Marshal.OffsetOf<NativeCaptureRuntimeAuthorizationV1>(
                 nameof(NativeCaptureRuntimeAuthorizationV1.ConsentGranted))),
+            Marshal.SizeOf<NativeCaptureCommandAdmissionV1>(),
+            checked((int)Marshal.OffsetOf<NativeCaptureCommandAdmissionV1>(
+                nameof(NativeCaptureCommandAdmissionV1.RuntimePolicyRevision))),
+            checked((int)Marshal.OffsetOf<NativeCaptureCommandAdmissionV1>(
+                nameof(NativeCaptureCommandAdmissionV1.PersistenceGeneration))),
+            checked((int)Marshal.OffsetOf<NativeCaptureCommandAdmissionV1>(
+                nameof(NativeCaptureCommandAdmissionV1.TargetEpoch))),
+            checked((int)Marshal.OffsetOf<NativeCaptureCommandAdmissionV1>(
+                nameof(NativeCaptureCommandAdmissionV1.AuthorizationEpoch))),
+            checked((int)Marshal.OffsetOf<NativeCaptureCommandAdmissionV1>(
+                nameof(NativeCaptureCommandAdmissionV1.NonceLow))),
             Marshal.SizeOf<NativeCaptureEventV1>(),
             checked((int)Marshal.OffsetOf<NativeCaptureEventV1>(
                 nameof(NativeCaptureEventV1.Sequence))),

@@ -58,11 +58,14 @@ contains:
   original target-scoped safety core; its additive 112-byte runtime
   authorization binds Windows target identity and target epoch, while each
   native permit adds a native-instance epoch and persistence generation behind
-  tested shared/unique write permits;
+  tested shared/unique write permits; a native-issued 64-byte, single-use
+  command admission additionally binds Start/Resume to the current native
+  instance, runtime revision, persistence generation, target epoch, and runtime
+  owner epoch;
 - a managed P/Invoke adapter with x64 ABI layout checks, safe-handle ownership,
   bounded event polling, privacy-revision updates, complete safety-capability
-  negotiation, explicit asynchronous owner/quiesce behavior, and real-DLL
-  integration tests;
+  negotiation, issuer-bound opaque admission stamps, explicit asynchronous
+  owner/quiesce behavior, and real-DLL integration tests;
 - a tested settings commit barrier, process-local capture latch with monotonic
   invalidation generations, sticky automatic-stop handling, a pure Windows
   privacy-policy composer, and a native coordinator whose runtime generations
@@ -86,16 +89,17 @@ event-driven privacy monitor, analysis queue and providers, generated Daily and
 Weekly views, journal editing, and timeline-grounded chat are **not integrated
 yet**. The safety core proves the synthetic authorization, persistence-permit,
 and stop/join/destroy boundary; it does not prove that a real frame or metadata
-writer uses that boundary. Start/Resume admission is also still tokenless: the
-Application layer checks a Boolean authorization snapshot before calling the
-backend, so an Allow A-to-B transition can race that call. Live activation
-requires an issuer-bound admission stamp and one native/owner atomic check of
-the expected persistence generation and target epoch. Dynamic lock, exclusion,
-and Unknown transitions must also receive an explicit evidence-Pause or sticky
+writer uses that boundary. Owner-bound Start/Resume admission is implemented:
+the Application service obtains a single-use opaque stamp, rechecks persisted
+and runtime authorization, and the native owner atomically consumes the stamp
+against the current generation and target without retrying a stale command.
+The foundation consumes a valid authorized command but still returns
+`NotImplemented`; it starts no capture worker. Dynamic lock, exclusion, and
+Unknown transitions must also receive an explicit evidence-Pause or sticky
 session-Stop policy; this milestone does not implement that distinction. The
-native foundation deliberately advertises no screen-capture capability, App DI
-continues to use the unavailable backend, and the development bundle is not yet
-a functional recorder.
+native foundation deliberately advertises no screen-capture, H.264-chunk, or
+evidence-extraction capability, App DI continues to use the unavailable
+backend, and the development bundle is not yet a functional recorder.
 
 See the [architecture design](docs/ARCHITECTURE.md) for delivery phases and the
 [Reference Baseline](docs/ARCHITECTURE.md#2-reference-baseline) for the reviewed
@@ -104,7 +108,10 @@ upstream revisions, adopted ideas, adaptations, and rejected coupling. The
 the typed matching, ordering, privacy-revision, and persistence contract. The
 [native safety-core ADR](docs/adr/0003-native-capture-safety-core.md) records the
 target identity, generation, write-permit, quiescence, command-admission, and
-capability gates that must precede live capture.
+capability gates that must precede live capture. The
+[owner-bound command-admission ADR](docs/adr/0004-owner-bound-command-admission.md)
+records the single-use managed/native Start/Resume authority and its
+linearization, cancellation, and failure semantics.
 
 ## Platform Support
 

@@ -21,6 +21,7 @@ target_include_directories(windayflow_capture_core
   PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/internal)
+target_link_libraries(windayflow_capture_core PUBLIC bcrypt)
 
 add_library(windayflow_capture SHARED
   src/capture_c_api.cpp

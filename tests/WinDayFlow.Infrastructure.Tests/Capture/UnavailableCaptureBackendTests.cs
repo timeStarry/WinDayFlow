@@ -21,11 +21,12 @@ public sealed class UnavailableCaptureBackendTests
     public async Task LifecycleCommandsAreConsistentlyNotSupported()
     {
         var service = new UnavailableCaptureBackend();
+        var admissionStamp = new TestAdmissionStamp();
         var commands = new Func<Task>[]
         {
-            () => service.StartAsync(),
+            () => service.StartAsync(admissionStamp),
             () => service.PauseAsync(),
-            () => service.ResumeAsync(),
+            () => service.ResumeAsync(admissionStamp),
             () => service.StopAsync(),
         };
 
@@ -46,8 +47,14 @@ public sealed class UnavailableCaptureBackendTests
         var eventCount = 0;
         service.StatusChanged += (_, _) => eventCount++;
 
-        await Assert.ThrowsAsync<NotSupportedException>(() => service.StartAsync());
+        await Assert.ThrowsAsync<NotSupportedException>(
+            () => service.StartAsync(new TestAdmissionStamp()));
 
         Assert.Equal(0, eventCount);
+    }
+
+    private sealed class TestAdmissionStamp : ICaptureRuntimeAdmissionStamp
+    {
+        public long InvalidationGeneration => 0;
     }
 }

@@ -1,5 +1,9 @@
 #include "capture_safety_core.h"
 
+#include <Windows.h>
+#include <bcrypt.h>
+
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <limits>
@@ -40,6 +44,30 @@ bool HasSameTargetTuple(const CaptureTargetIdentity& left,
          left.target_epoch == right.target_epoch;
 }
 
+bool IsValidCommand(CaptureCommand command) {
+  return command == CaptureCommand::kStart ||
+         command == CaptureCommand::kResume;
+}
+
+bool GenerateCommandAdmissionNonce(uint64_t* nonce_low,
+                                   uint64_t* nonce_high) {
+  if (nonce_low == nullptr || nonce_high == nullptr) {
+    return false;
+  }
+  std::array<uint64_t, 2> nonce{};
+  const NTSTATUS status = BCryptGenRandom(
+      nullptr,
+      reinterpret_cast<PUCHAR>(nonce.data()),
+      static_cast<ULONG>(sizeof(nonce)),
+      BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+  if (status != 0 || (nonce[0] == 0 && nonce[1] == 0)) {
+    return false;
+  }
+  *nonce_low = nonce[0];
+  *nonce_high = nonce[1];
+  return true;
+}
+
 }  // namespace
 
 bool IsFullyAllowed(const PrivacyContext& context) {
@@ -47,15 +75,18 @@ bool IsFullyAllowed(const PrivacyContext& context) {
 }
 
 CaptureSafetyCore::CaptureSafetyCore()
-    : CaptureSafetyCore(AllocateInstanceEpoch(), 1) {}
+    : CaptureSafetyCore(AllocateInstanceEpoch(), 1, {}) {}
 
 CaptureSafetyCore::CaptureSafetyCore(
     uint64_t instance_epoch,
-    uint64_t initial_persistence_generation)
+    uint64_t initial_persistence_generation,
+    CommandAdmissionNonceGenerator nonce_generator)
     : instance_epoch_(instance_epoch),
       persistence_generation_(initial_persistence_generation),
       generation_exhausted_(instance_epoch == 0 ||
                             initial_persistence_generation == 0),
+      nonce_generator_(nonce_generator ? std::move(nonce_generator)
+                                       : GenerateCommandAdmissionNonce),
       observable_{initial_persistence_generation, 0} {}
 
 CaptureSafetyUpdateResult CaptureSafetyCore::UpdateRuntimeAuthorization(
@@ -160,6 +191,131 @@ CaptureSafetyUpdateResult CaptureSafetyCore::Revoke(
   return CaptureSafetyUpdateResult::kOk;
 }
 
+CaptureCommandAdmissionResult CaptureSafetyCore::IssueCommandAdmission(
+    CaptureCommand command,
+    uint64_t expected_persistence_generation,
+    uint64_t expected_target_epoch,
+    uint64_t runtime_owner_epoch,
+    CaptureCommandAdmission* admission) {
+  if (admission == nullptr || !IsValidCommand(command) ||
+      expected_persistence_generation == 0 || expected_target_epoch == 0 ||
+      runtime_owner_epoch == 0) {
+    return CaptureCommandAdmissionResult::kInvalidArgument;
+  }
+  *admission = {};
+
+  std::lock_guard command_lock(command_mutex_);
+  issued_command_admission_.reset();
+
+  uint64_t nonce_low = 0;
+  uint64_t nonce_high = 0;
+  bool nonce_generated = false;
+  try {
+    nonce_generated = nonce_generator_(&nonce_low, &nonce_high);
+  } catch (...) {
+    nonce_generated = false;
+  }
+  if (!nonce_generated || (nonce_low == 0 && nonce_high == 0)) {
+    return CaptureCommandAdmissionResult::kInternalError;
+  }
+
+  std::shared_lock safety_lock(mutex_);
+  const uint64_t authorization_epoch =
+      admission_stamp_.load(std::memory_order_acquire);
+  if (generation_exhausted_ || instance_epoch_ == 0) {
+    return CaptureCommandAdmissionResult::kGenerationExhausted;
+  }
+  if (revoked_ || !current_.target.has_value() ||
+      !IsFullyAllowed(current_.privacy)) {
+    return CaptureCommandAdmissionResult::kPolicyBlocked;
+  }
+  if ((authorization_epoch & 1U) == 0) {
+    return CaptureCommandAdmissionResult::kAdmissionRejected;
+  }
+  if (persistence_generation_ != expected_persistence_generation ||
+      current_.target->target_epoch != expected_target_epoch) {
+    return CaptureCommandAdmissionResult::kAdmissionRejected;
+  }
+
+  CaptureCommandAdmission value{
+      instance_epoch_,
+      current_.privacy.policy_revision,
+      persistence_generation_,
+      current_.target->target_epoch,
+      authorization_epoch,
+      nonce_low,
+      nonce_high,
+  };
+  if (value.runtime_policy_revision == 0 ||
+      admission_stamp_.load(std::memory_order_acquire) !=
+          authorization_epoch) {
+    return CaptureCommandAdmissionResult::kAdmissionRejected;
+  }
+
+  issued_command_admission_ = IssuedCommandAdmission{
+      value, command, *current_.target, runtime_owner_epoch};
+  *admission = value;
+  return CaptureCommandAdmissionResult::kOk;
+}
+
+CaptureCommandAdmissionResult
+CaptureSafetyCore::AcquireCommandAdmissionPermit(
+    const CaptureCommandAdmission& admission,
+    CaptureCommand expected_command,
+    uint64_t runtime_owner_epoch,
+    CaptureCommandAdmissionPermit* permit) const {
+  if (permit == nullptr || !IsValidCommand(expected_command) ||
+      runtime_owner_epoch == 0) {
+    return CaptureCommandAdmissionResult::kInvalidArgument;
+  }
+  *permit = {};
+
+  std::lock_guard command_lock(command_mutex_);
+  if (!issued_command_admission_.has_value()) {
+    return CaptureCommandAdmissionResult::kAdmissionRejected;
+  }
+
+  const IssuedCommandAdmission issued = *issued_command_admission_;
+  const bool nonce_matches = admission.nonce_low == issued.admission.nonce_low &&
+                             admission.nonce_high ==
+                                 issued.admission.nonce_high;
+  if (!nonce_matches) {
+    return CaptureCommandAdmissionResult::kAdmissionRejected;
+  }
+  issued_command_admission_.reset();
+
+  const uint64_t current_authorization_epoch =
+      admission_stamp_.load(std::memory_order_acquire);
+  if (admission != issued.admission || expected_command != issued.command ||
+      runtime_owner_epoch != issued.runtime_owner_epoch ||
+      (current_authorization_epoch & 1U) == 0 ||
+      current_authorization_epoch != admission.authorization_epoch) {
+    return CaptureCommandAdmissionResult::kAdmissionRejected;
+  }
+
+  std::shared_lock safety_lock(mutex_);
+  if (generation_exhausted_ || revoked_ ||
+      admission_stamp_.load(std::memory_order_acquire) !=
+          admission.authorization_epoch ||
+      instance_epoch_ != admission.instance_epoch ||
+      persistence_generation_ != admission.persistence_generation ||
+      !current_.target.has_value() ||
+      current_.privacy.policy_revision != admission.runtime_policy_revision ||
+      !HasSameTargetTuple(*current_.target, issued.target) ||
+      current_.target->target_epoch != admission.target_epoch ||
+      !IsFullyAllowed(current_.privacy)) {
+    return CaptureCommandAdmissionResult::kAdmissionRejected;
+  }
+
+  *permit = CaptureCommandAdmissionPermit(
+      std::move(safety_lock),
+      expected_command,
+      runtime_owner_epoch,
+      PersistenceToken{
+          instance_epoch_, persistence_generation_, issued.target});
+  return CaptureCommandAdmissionResult::kOk;
+}
+
 std::optional<PersistenceToken> CaptureSafetyCore::MintPersistenceToken(
     const CaptureTargetIdentity& observed_target) const {
   if (!admission_open()) {
@@ -201,6 +357,10 @@ uint64_t CaptureSafetyCore::persistence_generation() const {
 
 uint64_t CaptureSafetyCore::target_epoch() const {
   return observable_snapshot().target_epoch;
+}
+
+uint64_t CaptureSafetyCore::authorization_epoch() const noexcept {
+  return admission_stamp_.load(std::memory_order_acquire);
 }
 
 CaptureSafetyObservableSnapshot CaptureSafetyCore::observable_snapshot() const {

@@ -20,6 +20,12 @@ public sealed class NativeCaptureInteropTests
         Assert.Equal(8, layout.RuntimeAuthorizationRevisionOffset);
         Assert.Equal(16, layout.RuntimeAuthorizationTargetEpochOffset);
         Assert.Equal(48, layout.RuntimeAuthorizationDecisionOffset);
+        Assert.Equal(64, layout.CommandAdmissionSize);
+        Assert.Equal(16, layout.CommandAdmissionRuntimeRevisionOffset);
+        Assert.Equal(24, layout.CommandAdmissionPersistenceGenerationOffset);
+        Assert.Equal(32, layout.CommandAdmissionTargetEpochOffset);
+        Assert.Equal(40, layout.CommandAdmissionAuthorizationEpochOffset);
+        Assert.Equal(48, layout.CommandAdmissionNonceOffset);
         Assert.Equal(80, layout.EventSize);
         Assert.Equal(8, layout.EventSequenceOffset);
         Assert.Equal(48, layout.EventPersistenceGenerationOffset);
@@ -27,6 +33,8 @@ public sealed class NativeCaptureInteropTests
         Assert.Equal(-9, (int)NativeCaptureResult.TargetMismatch);
         Assert.Equal(-10, (int)NativeCaptureResult.PolicyRevisionGap);
         Assert.Equal(-11, (int)NativeCaptureResult.GenerationExhausted);
+        Assert.Equal(-12, (int)NativeCaptureResult.AdmissionRequired);
+        Assert.Equal(-13, (int)NativeCaptureResult.AdmissionRejected);
         Assert.Equal(
             1UL << 5,
             (ulong)NativeCaptureCapabilities.TargetScopedAuthorization);
@@ -36,6 +44,9 @@ public sealed class NativeCaptureInteropTests
         Assert.Equal(
             1UL << 7,
             (ulong)NativeCaptureCapabilities.DeterministicStop);
+        Assert.Equal(
+            1UL << 8,
+            (ulong)NativeCaptureCapabilities.CommandAdmission);
     }
 
     [Fact]
@@ -57,6 +68,9 @@ public sealed class NativeCaptureInteropTests
 
     [Theory]
     [InlineData((ulong)NativeCaptureCapabilities.TargetScopedAuthorization)]
+    [InlineData((ulong)(NativeCaptureCapabilities.PrivacyGuard
+        | NativeCaptureCapabilities.EventQueue
+        | NativeCaptureCapabilities.CommandAdmission))]
     [InlineData((ulong)(NativeCaptureCapabilities.PrivacyGuard
         | NativeCaptureCapabilities.EventQueue
         | NativeCaptureCapabilities.ScreenCapture
@@ -188,6 +202,8 @@ public sealed class NativeCaptureInteropTests
             NativeCaptureCapabilities.PersistenceGenerationBarrier));
         Assert.True(probe.Capabilities.HasFlag(
             NativeCaptureCapabilities.DeterministicStop));
+        Assert.True(probe.Capabilities.HasFlag(
+            NativeCaptureCapabilities.CommandAdmission));
         Assert.False(probe.Capabilities.HasFlag(NativeCaptureCapabilities.ScreenCapture));
         Assert.Null(probe.Failure);
     }
@@ -212,9 +228,24 @@ public sealed class NativeCaptureInteropTests
         Assert.Equal(CaptureState.Unavailable, backend.CurrentStatus.State);
         Assert.Equal(CaptureReasonCode.BackendUnavailable, backend.CurrentStatus.Reason);
         Assert.True(backend.CurrentStatus.Sequence > 0);
-        await Assert.ThrowsAsync<NotSupportedException>(() => backend.StartAsync());
+        var authorization = CreateAllowedRuntimeAuthorization(runtimePolicyRevision: 2);
+        var persistenceGeneration = await backend
+            .UpdateRuntimeAuthorizationAsync(authorization);
+        var startAdmission = await backend.TryIssueCommandAdmissionAsync(
+            CaptureAdmissionOperation.Start,
+            authorization.RuntimePolicyRevision,
+            persistenceGeneration,
+            authorization.Target.TargetEpoch);
+        Assert.NotNull(startAdmission);
+        await Assert.ThrowsAsync<NotSupportedException>(
+            () => backend.StartAuthorizedAsync(startAdmission.Value));
         await Assert.ThrowsAsync<NotSupportedException>(() => backend.PauseAsync());
-        await Assert.ThrowsAsync<NotSupportedException>(() => backend.ResumeAsync());
+        var resumeAdmission = await backend.TryIssueCommandAdmissionAsync(
+            CaptureAdmissionOperation.Resume,
+            authorization.RuntimePolicyRevision,
+            persistenceGeneration,
+            authorization.Target.TargetEpoch);
+        Assert.Null(resumeAdmission);
         await Assert.ThrowsAsync<NotSupportedException>(() => backend.StopAsync());
     }
 
@@ -813,9 +844,13 @@ public sealed class NativeCaptureInteropTests
             | NativeCaptureCapabilities.H264Chunks
             | NativeCaptureCapabilities.TargetScopedAuthorization
             | NativeCaptureCapabilities.PersistenceGenerationBarrier
-            | NativeCaptureCapabilities.DeterministicStop;
+            | NativeCaptureCapabilities.DeterministicStop
+            | NativeCaptureCapabilities.CommandAdmission;
 
         private ulong _persistenceGeneration;
+        private ulong _runtimePolicyRevision;
+        private ulong _targetEpoch;
+        private ulong _authorizationEpoch;
         private bool _runtimeAuthorizationRevoked;
 
         public int GetCapabilitiesCallCount => Volatile.Read(ref _getCapabilitiesCallCount);
@@ -916,6 +951,8 @@ public sealed class NativeCaptureInteropTests
             LastAuthorizationTargetFlags = authorization.TargetFlags;
             LastAuthorizationConsent =
                 (NativeCapturePolicyDecision)authorization.ConsentGranted;
+            _runtimePolicyRevision = authorization.RuntimePolicyRevision;
+            _targetEpoch = authorization.TargetEpoch;
             _persistenceGeneration++;
             _runtimeAuthorizationRevoked = authorization.TargetFlags == 0;
             persistenceGeneration = NextUpdatePersistenceGeneration
@@ -939,6 +976,52 @@ public sealed class NativeCaptureInteropTests
                 }
             }
 
+            return NativeCaptureResult.Ok;
+        }
+
+        public NativeCaptureResult IssueCommandAdmission(
+            SafeCaptureHandle handle,
+            NativeCaptureCommand command,
+            ulong expectedPersistenceGeneration,
+            ulong expectedTargetEpoch,
+            ref NativeCaptureCommandAdmissionV1 admission)
+        {
+            _ = handle;
+            _ = command;
+            if (_runtimeAuthorizationRevoked
+                || expectedPersistenceGeneration != _persistenceGeneration
+                || expectedTargetEpoch != _targetEpoch)
+            {
+                return NativeCaptureResult.AdmissionRejected;
+            }
+
+            admission.StructSize = NativeCaptureAbiContract.CommandAdmissionStructureSize;
+            admission.AbiVersion = NativeCaptureAbiContract.AbiVersion;
+            admission.InstanceEpoch = 1;
+            admission.RuntimePolicyRevision = _runtimePolicyRevision;
+            admission.PersistenceGeneration = _persistenceGeneration;
+            admission.TargetEpoch = _targetEpoch;
+            admission.AuthorizationEpoch = ++_authorizationEpoch;
+            admission.NonceLow = _authorizationEpoch;
+            admission.NonceHigh = ~_authorizationEpoch;
+            return NativeCaptureResult.Ok;
+        }
+
+        public NativeCaptureResult StartAuthorized(
+            SafeCaptureHandle handle,
+            ref NativeCaptureCommandAdmissionV1 admission)
+        {
+            _ = handle;
+            _ = admission;
+            return NativeCaptureResult.Ok;
+        }
+
+        public NativeCaptureResult ResumeAuthorized(
+            SafeCaptureHandle handle,
+            ref NativeCaptureCommandAdmissionV1 admission)
+        {
+            _ = handle;
+            _ = admission;
             return NativeCaptureResult.Ok;
         }
 
