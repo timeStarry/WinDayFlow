@@ -273,7 +273,7 @@ Infrastructure -> Application, Domain
 Capture.Interop -> Application
 
 Current: Capture.Interop <-> Capture.Native is built and integration-tested
-Runtime: App remains unavailable until the real writer, target verifier, and event monitor exist
+Runtime: App remains unavailable until verifier, event-monitor, and writer activation gates close
 ```
 
 `ICaptureService` and `ICaptureBackend` are owned by Application. The
@@ -290,11 +290,14 @@ updates versioned privacy context and target-scoped runtime authorization, and
 polls bounded native events without callbacks. An explicit asynchronous owner
 quiesces by applying Block, stopping, joining, and destroying in order;
 `SafeHandle` remains a final fallback rather than the normal shutdown proof.
-The native backend remains unregistered because the real Windows target
-verifier, event-driven privacy monitor, and DXGI/WIC/Media Foundation writer are
-not connected to that safety boundary. The native foundation does not reference
-managed UI or domain assemblies. The App project may reference concrete
-adapters for
+The native backend remains unregistered. A synchronous Windows foreground
+target-verifier foundation now exists, but it is not connected to the native
+owner or live writer; publisher-signer binding, hosted-app child attribution,
+event-driven invalidation, DXGI output mapping, and writer revalidation remain
+activation gates. The event-driven privacy monitor and DXGI/WIC/Media
+Foundation writer are also not connected to the safety boundary. The native
+foundation does not reference managed UI or domain assemblies. The App project
+may reference concrete adapters for
 dependency-injection registration; feature code consumes their inward-facing
 contracts. The domain project must not reference WinUI, SQLite, HTTP, Windows
 App SDK, or the native capture implementation.
@@ -411,6 +414,13 @@ with a native-issued, owner-bound, single-use stamp. It fixes the additive
 cancellation semantics, and managed/native linearization. It does not activate
 the backend or authorize a real writer.
 
+[ADR 0005](adr/0005-windows-foreground-target-verification.md), "Windows
+Foreground Target Verification," fixes the synchronous HWND/process/display
+observation, process-wide monotonic target-epoch, hosted-app fail-closed, and
+redaction contracts. It deliberately remains separate from policy composition,
+time-bounded title reads, WinEvent invalidation, DXGI output resolution, and
+writer persistence authority.
+
 `CaptureStatus` is a stable machine-readable contract, not just display text.
 It carries an unsigned 64-bit `Sequence`, `CaptureReasonCode`, and
 `CaptureErrorCode` in addition to state, timestamp, and optional localized
@@ -497,13 +507,17 @@ The inactive `WindowsCapturePrivacyProbe` can synchronously sample documented
 Windows 10 1809+ signals for session unlock, input desktop, RDP/remote control,
 Windows Presentation Mode, and storage headroom. API failure or ambiguity is
 isolated per signal and becomes Unknown while later signals continue sampling;
-application/window identity remains Unknown and no window title is read. A pure
-typed matcher now evaluates persisted application and window rule scopes
+its own application/window fields remain Unknown and it reads no window title.
+The separate synchronous `WindowsCaptureTargetVerifier` now observes a stable
+foreground target, display anchor, and size-bounded identity snapshot. A pure
+typed matcher evaluates the committed application and window rule scopes
 independently and returns only a matched rule ID. Each observed identity and
 title is `Unknown`, known `Absent`, or `Present`; Unknown and malformed present
 identities fail closed when a rule requires them, while Absent is a conclusive
-non-match. A real Windows target verifier, live identity acquisition,
-event-driven signal monitoring, real-writer permit integration, and App
+non-match.
+The verifier does not compose a policy decision and is not yet wired into the
+runtime owner. Publisher-signer binding, hosted-app child attribution,
+event-driven signal invalidation, real-writer permit integration, and App
 registration remain pending. Phase 1 activates the implemented native backend
 only after those platform inputs and the complete screen-capture capability
 mask are present, then adds evidence-extraction
@@ -556,23 +570,120 @@ consume a command stamp but return `NotImplemented` without creating a worker.
 The App continues to use `DenyCaptureRuntimeAuthorization` and
 `UnavailableCaptureBackend`, and the shell recording control remains disabled.
 
-The remaining activation gates are integration work beyond command admission.
-A real Windows target verifier must supply and revalidate the target tuple and
-epoch; an event-driven monitor must publish every supported privacy transition
-and select evidence Pause versus sticky session Stop; and the real
-DXGI/WIC/Media Foundation pixel and metadata writer must carry the consumed
-command grant and native persistence permit through worker admission, encode,
-temporary output, final rename, and committed-event publication. Atomic
+The remaining activation gates are integration work beyond command admission
+and synchronous target observation. Publisher identity must be bound to the
+running image, hosted windows must be attributed to one real child application,
+the title reader must have a tested wall-clock timeout, and WinEvent callbacks
+must synchronously invalidate the current observation generation before
+asynchronous parsing. The selected HMONITOR/device key must be mapped to a DXGI
+output, and the real DXGI/WIC/Media Foundation pixel and metadata writer must
+revalidate target and display before and after acquisition while carrying the
+consumed command grant and native persistence permit through worker admission,
+encode, temporary output, final rename, and committed-event publication. Atomic
 filesystem interruption, cleanup, disk-full, recovery, owner-epoch races, and
 Windows lifecycle tests must then prove that end-to-end path. Until those gates
 pass, no live frame or context metadata can be persisted and App DI must
-continue to register `UnavailableCaptureBackend`.
+continue to register `DenyCaptureRuntimeAuthorization` and
+`UnavailableCaptureBackend`.
 
 The safety-core implementation and ADR are original WinDayFlow work. They do
 not modify any of the six QiDayflow-derived files or require a provenance
 manifest/hash update. A later adaptation of QiDayflow `capture_service.*` or a
 change to an existing derived file still follows the provenance workflow before
 commit or distribution.
+
+### 9.2 Windows Foreground Target Verification Foundation
+
+`WindowsCaptureTargetVerifier` is a synchronous, serialized observer for the
+supported Windows x64 baseline. One verification performs this fixed-size
+sequence; its buffers are bounded, but its elapsed time is not yet bounded:
+
+1. Read the foreground HWND, its owner TID/PID, and the HMONITOR plus
+   `GetMonitorInfoW` device key selected by `MonitorFromWindow`.
+2. Open the owner with `PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE`, then
+   establish the process ID, creation time, and that the process is still
+   active.
+3. Read the window title, executable basename, package-family name, publisher
+   observation, and the window title again. The two title observations must be
+   identical. A known `ApplicationFrameHost.exe` result is unresolved and fails
+   closed instead of being treated as the foreground application.
+4. Re-read process ID, creation time, liveness, foreground HWND, owner TID/PID,
+   and display anchor. Any target-stability mismatch becomes `Unknown` and the
+   process handle is always released.
+
+A zero foreground HWND is known `Absent`. Unsupported platforms, API ambiguity,
+permissions failures, process exit, unstable title/owner/display observations,
+and recoverable platform exceptions are `Unknown`. Identity-field failures are
+kept field-scoped as `Unknown` inside `NativeCaptureIdentitySnapshot`; they are
+not invented as `Absent` or a non-match. The coordinator must evaluate the
+complete committed exclusion-rule snapshot again and fail closed wherever a
+rule requires an unresolved field.
+
+Identity observation is deliberately bounded in character count. The executable
+reader returns only the basename; the complete process path exists only inside
+the P/Invoke read buffer and that pooled buffer is cleared on return.
+Package-family absence is accepted only for `APPMODEL_ERROR_NO_PACKAGE`; other
+results are `Unknown`. Window-title and package buffers have fixed upper bounds.
+This is not a wall-clock bound: direct `GetWindowTextW` can block when the target
+window belongs to the current process, so a tested time-bounded title-read path
+is still a live-activation gate. Publisher-certificate identity remains
+`Unknown` until an offline trust check can bind the primary signer leaf to the
+opened running image and hash its DER bytes with SHA-256. Looking up a
+certificate from an unbound path is not accepted as proof.
+
+The stable fingerprint is HWND, PID, process creation time, owner TID,
+HMONITOR, and a case-normalized display device key. One locked, process-wide
+source atomically owns the current fingerprint, its invalidated/gap state, and
+the last issued epoch. Constructing any verifier globally invalidates the
+current fingerprint. A stable verification resolves through the source: the
+same current fingerprint keeps its epoch, while an invalidated or changed
+fingerprint receives a newly issued nonzero epoch. Every `Absent` or `Unknown`
+result also globally invalidates the fingerprint, so even the same tuple
+receives a fresh process-wide epoch after the gap.
+
+Because resolution and invalidation share the source lock, an older overlapping
+verifier cannot revive its prior epoch after another verifier is constructed or
+observes a gap. Its next stable verification either joins the process-wide
+current fingerprint and epoch or advances the source for a different target.
+Verifier recreation therefore cannot create an ABA by restarting local state.
+
+The source never wraps. After it issues `ulong.MaxValue`, an unchanged target
+may continue reporting that already-issued value, but the process can never
+issue another epoch. Any later gap, target/display change, or verifier
+recreation that needs a new value fails closed for the rest of the process
+lifetime. A new process, or a future explicitly persisted epoch namespace, is
+required to resume issuance. The verifier lock serializes one complete
+observation within an instance, while the source lock serializes fingerprint
+resolution, invalidation, and issuance across every instance. Live integration
+must still keep one verifier instance with the native runtime owner/handle
+lifecycle so construction and invalidation linearize with native revocation;
+the shared source prevents epoch reuse but does not itself revoke native work.
+
+The result contains three slices: `NativeCaptureTargetIdentity` for the native
+authorization tuple, a managed-only `WindowsCaptureDisplayTarget`, and a
+`NativeCaptureIdentitySnapshot` for typed rule matching. It is not a complete
+`NativeCapturePrivacySignals` value, does not evaluate user policy, does not
+mint command admission or persistence authority, and does not prove that the
+HMONITOR maps to the DXGI output being acquired. Target, display, and identity
+`ToString()` representations expose states only and replace observed values
+with `[REDACTED]`; raw paths, titles, package identities, handles, and display
+keys must not enter logs or native events.
+
+This foundation closes the stable synchronous-observation portion of ADR 0003,
+not the live-activation gate. Live use remains blocked until all of the
+following are implemented and tested together:
+
+- primary publisher-signer verification bound to the running image;
+- unique child-application attribution for hosted Windows surfaces;
+- a wall-clock-bounded title reader that returns `Unknown` on timeout and cannot
+  publish a late result after invalidation;
+- WinEvent-driven synchronous invalidation with an observation generation,
+  followed by asynchronous re-observation and explicit evidence-Pause versus
+  sticky-session-Stop classification;
+- HMONITOR/device-key to DXGI-output mapping plus writer-side target/display
+  revalidation before and after acquisition; and
+- real acquisition, encoding, temporary output, atomic publication, metadata,
+  cleanup, and recovery under the native persistence-permit boundary.
 
 Capture invariants:
 
@@ -992,6 +1103,29 @@ the user explicitly enables a future telemetry feature.
 - Atomic file completion and recovery.
 - Native event queue ordering and shutdown.
 
+### Capture Interoperability
+
+- Deterministic managed verifier tests cover stable double-read observation,
+  HWND/owner/process/display races, PID reuse, target changes and display
+  instability,
+  `Absent` and `Unknown` gaps, process exit and API failures, unresolved
+  `ApplicationFrameHost.exe`, field-scoped malformed identity, epoch exhaustion,
+  verifier recreation, a gap observed by one overlapping verifier preventing
+  another from reviving an old epoch, process-handle disposal, and
+  value-redacting text representations.
+- A Windows-only P/Invoke smoke test opens the current process with query and
+  synchronize access, proves creation-time and liveness reads, verifies that
+  only an executable basename escapes the process-image reader, and confirms
+  that publisher identity remains `Unknown` until signer binding is implemented.
+- Epoch-source tests must prove that verifier recreation cannot reuse a value,
+  concurrent issuers remain strictly ordered, and exhaustion permanently denies
+  every later issuance in that process.
+- Live-activation tests must later cover synchronous WinEvent invalidation,
+  observation-generation races, a blocked title read returning `Unknown` within
+  its deadline with no late publication, hosted-app attribution, signer
+  replacement, display-topology and DXGI-output mapping, writer pre/post
+  revalidation, and stale-work rejection at every native persistence boundary.
+
 ### Domain and Application
 
 - Time ranges, merge rules, weighted metrics, and user-edit protection.
@@ -1031,17 +1165,22 @@ Phases are release gates, not a claim of strict implementation order. As of
 2026-07-17, the no-capture manual-timeline portions of Phases 2 and 3 plus
 schema v4, consent policy v2, persistent retention/exclusion/session choices,
 and user-authored typed exclusion rules are implemented. Phase 1 also has
-Accepted ADRs 0001 through 0004, verified QiDayflow source provenance, the x64
+Accepted ADRs 0001 through 0005, verified QiDayflow source provenance, the x64
 C++20 C ABI v1 foundation, six native tests, the target-scoped safety core, the
 managed asynchronous owner/quiescence contract, owner-bound single-use
 Start/Resume admission, the inactive runtime privacy coordinator, the pure
-exclusion matcher, and the on-demand Windows privacy probe. The safety core
-covers synthetic target reuse, generation, acquire-to-persist permit,
-command-admission, and stop/join/destroy races. The real Windows target verifier,
-event-driven privacy monitor, DXGI/WIC/Media Foundation writer, atomic artifact
-publisher, and evidence-Pause versus sticky-Stop dynamic policy remain open
-activation gates. `ScreenCapture` and managed-adapter runtime activation remain
-disabled, so no phase exit criterion is met.
+exclusion matcher, the on-demand Windows privacy probe, and the synchronous
+Windows foreground-target verifier foundation. The safety core covers synthetic
+target reuse, generation, acquire-to-persist permit, command-admission, and
+stop/join/destroy races; the verifier covers stable HWND/TID/PID/process/display
+observation and process-wide monotonic target epochs. Publisher-signer binding,
+child attribution, time-bounded title reads, WinEvent synchronous invalidation
+generations, DXGI-output mapping with writer pre/post revalidation, the real
+DXGI/WIC/Media Foundation acquisition and persistence path, atomic artifact
+publication, and the evidence-Pause versus sticky-Stop dynamic policy remain
+open activation gates. `ScreenCapture`, `H264Chunks`, `EvidenceExtraction`, and
+managed-adapter runtime activation remain disabled, so no phase exit criterion
+is met.
 
 ### Phase 0: Foundation
 

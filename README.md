@@ -66,6 +66,14 @@ contains:
   bounded event polling, privacy-revision updates, complete safety-capability
   negotiation, issuer-bound opaque admission stamps, explicit asynchronous
   owner/quiesce behavior, and real-DLL integration tests;
+- a synchronous, fail-closed Windows foreground-target verifier foundation that
+  double-checks the foreground HWND, owner TID/PID, process creation time and
+  liveness, window title, and monitor selection; it emits a stable numeric
+  target/display anchor plus size-bounded identity observations, rejects
+  unresolved `ApplicationFrameHost.exe` attribution,
+  obtains target epochs from a process-wide monotonic source across
+  target/display changes, Unknown gaps, and verifier recreation, and redacts
+  observed values from diagnostic text;
 - a tested settings commit barrier, process-local capture latch with monotonic
   invalidation generations, sticky automatic-stop handling, a pure Windows
   privacy-policy composer, and a native coordinator whose runtime generations
@@ -84,12 +92,17 @@ contains:
 Manual activities, consent, privacy settings, and user-authored exclusion rules
 are stored at `%LOCALAPPDATA%\WinDayFlow\Data\windayflow.db` and survive
 application restarts.
-The real DXGI/WIC/Media Foundation writer, Windows target verifier,
+The real DXGI/WIC/Media Foundation acquisition and persistence path,
 event-driven privacy monitor, analysis queue and providers, generated Daily and
 Weekly views, journal editing, and timeline-grounded chat are **not integrated
-yet**. The safety core proves the synthetic authorization, persistence-permit,
-and stop/join/destroy boundary; it does not prove that a real frame or metadata
-writer uses that boundary. Owner-bound Start/Resume admission is implemented:
+yet**. The foreground verifier is a synchronous foundation, not a live
+activation claim: publisher-signer binding, hosted-app child attribution,
+bounded-time window-title reads, WinEvent synchronous invalidation with an
+observation generation, and DXGI output mapping with writer pre/post
+revalidation remain open gates. The safety core proves the synthetic
+authorization, persistence-permit, and stop/join/destroy boundary; it does not
+prove that a real frame or metadata writer uses that boundary.
+Owner-bound Start/Resume admission is implemented:
 the Application service obtains a single-use opaque stamp, rechecks persisted
 and runtime authorization, and the native owner atomically consumes the stamp
 against the current generation and target without retrying a stale command.
@@ -111,7 +124,10 @@ target identity, generation, write-permit, quiescence, command-admission, and
 capability gates that must precede live capture. The
 [owner-bound command-admission ADR](docs/adr/0004-owner-bound-command-admission.md)
 records the single-use managed/native Start/Resume authority and its
-linearization, cancellation, and failure semantics.
+linearization, cancellation, and failure semantics. The
+[Windows foreground-target verification ADR](docs/adr/0005-windows-foreground-target-verification.md)
+records the stable observation, process-wide monotonic epoch, privacy-redaction,
+time-bounded title-read requirement, and remaining live-activation boundaries.
 
 ## Platform Support
 
