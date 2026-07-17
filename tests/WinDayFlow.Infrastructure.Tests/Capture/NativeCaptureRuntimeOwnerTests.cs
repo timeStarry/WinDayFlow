@@ -95,6 +95,15 @@ public sealed class NativeCaptureRuntimeOwnerTests
 
         await Assert.ThrowsAsync<ObjectDisposedException>(
             () => owner.UpdateSignalsAsync(NativeCapturePrivacySignals.FailClosed));
+        Assert.Throws<ObjectDisposedException>(
+            () => owner.InvalidatePrivacyObservation());
+        await Assert.ThrowsAsync<ObjectDisposedException>(
+            () => owner.ApplyPrivacyInvalidationAsync(
+                owner.PrivacyObservationGeneration));
+        await Assert.ThrowsAsync<ObjectDisposedException>(
+            () => owner.TryUpdateSignalsAsync(
+                owner.PrivacyObservationGeneration,
+                NativeCapturePrivacySignals.FailClosed));
 
         backend.ReleaseAuthorizationUpdate();
         await termination;
@@ -119,6 +128,30 @@ public sealed class NativeCaptureRuntimeOwnerTests
 
         await Assert.ThrowsAsync<InvalidOperationException>(
             () => owner.UpdateSignalsAsync(signals));
+        await Assert.ThrowsAnyAsync<Exception>(() => owner.Termination);
+
+        Assert.Contains("Revoke", backend.Operations);
+        Assert.Contains("RequestStop", backend.Operations);
+        Assert.Contains("WaitStopped:5000", backend.Operations);
+        Assert.Contains("StopEventPump", backend.Operations);
+        Assert.Equal("Destroy", backend.Operations[^2]);
+        Assert.Equal("Complete", backend.Operations[^1]);
+        Assert.Equal(1, backend.DestroyCount);
+    }
+
+    [Fact]
+    public async Task PrivacyBarrierFailureAutomaticallyTerminatesTheOwnedHandle()
+    {
+        var backend = new ScriptedRuntimeBackend
+        {
+            UpdateFailure = new InvalidOperationException("privacy barrier failed"),
+        };
+        var owner = CreateOwner(backend);
+        var generation = owner.InvalidatePrivacyObservation();
+
+        var failure = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => owner.ApplyPrivacyInvalidationAsync(generation));
+        Assert.Equal("privacy barrier failed", failure.Message);
         await Assert.ThrowsAnyAsync<Exception>(() => owner.Termination);
 
         Assert.Contains("Revoke", backend.Operations);

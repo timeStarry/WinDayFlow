@@ -292,15 +292,18 @@ quiesces by applying Block, stopping, joining, and destroying in order;
 `SafeHandle` remains a final fallback rather than the normal shutdown proof.
 The native backend remains unregistered. A synchronous Windows foreground
 target-verifier foundation now exists, but it is not connected to the native
-owner or live writer; publisher-signer binding, hosted-app child attribution,
-event-driven invalidation, DXGI output mapping, and writer revalidation remain
-activation gates. The event-driven privacy monitor and DXGI/WIC/Media
-Foundation writer are also not connected to the safety boundary. The native
-foundation does not reference managed UI or domain assemblies. The App project
-may reference concrete adapters for
-dependency-injection registration; feature code consumes their inward-facing
-contracts. The domain project must not reference WinUI, SQLite, HTTP, Windows
-App SDK, or the native capture implementation.
+owner or live writer. An event-driven monitor foundation now synchronously
+invalidates managed admission and target continuity, applies a generation-bound
+native barrier, and asynchronously re-observes through a dedicated WinEvent
+thread, but it is also not connected to the App or native owner.
+Publisher-signer binding, hosted-app child attribution, bounded title reads,
+complete location/display/session/power event coverage, DXGI output mapping,
+and writer revalidation remain activation gates. The DXGI/WIC/Media Foundation
+writer is not connected to the safety boundary. The native foundation does not
+reference managed UI or domain assemblies. The App project may reference
+concrete adapters for dependency-injection registration; feature code consumes
+their inward-facing contracts. The domain project must not reference WinUI,
+SQLite, HTTP, Windows App SDK, or the native capture implementation.
 
 ## 8. Core Domain Model
 
@@ -421,6 +424,14 @@ redaction contracts. It deliberately remains separate from policy composition,
 time-bounded title reads, WinEvent invalidation, DXGI output resolution, and
 writer persistence authority.
 
+[ADR 0006](adr/0006-event-driven-capture-privacy-monitor.md), "Event-Driven
+Capture Privacy Monitor," fixes callback-time latch and target invalidation, an
+independent observation generation, the forced native barrier and single
+generation-bound publication protocol, WinEvent thread ownership, worker
+coalescing, stale-Allow compensation, sanitized terminal faults, and teardown
+ordering. It remains inactive and does not define Pause/Stop policy or authorize
+a real writer.
+
 `CaptureStatus` is a stable machine-readable contract, not just display text.
 It carries an unsigned 64-bit `Sequence`, `CaptureReasonCode`, and
 `CaptureErrorCode` in addition to state, timestamp, and optional localized
@@ -517,8 +528,10 @@ identities fail closed when a rule requires them, while Absent is a conclusive
 non-match.
 The verifier does not compose a policy decision and is not yet wired into the
 runtime owner. Publisher-signer binding, hosted-app child attribution,
-event-driven signal invalidation, real-writer permit integration, and App
-registration remain pending. Phase 1 activates the implemented native backend
+complete event coverage, real-writer permit integration, and App registration
+remain pending. The inactive event monitor supplies only the first foreground,
+desktop, and top-level-window invalidation foundation. Phase 1 activates the
+implemented native backend
 only after those platform inputs and the complete screen-capture capability
 mask are present, then adds evidence-extraction
 interfaces under Capture.Interop. Capture options come from validated
@@ -570,18 +583,20 @@ consume a command stamp but return `NotImplemented` without creating a worker.
 The App continues to use `DenyCaptureRuntimeAuthorization` and
 `UnavailableCaptureBackend`, and the shell recording control remains disabled.
 
-The remaining activation gates are integration work beyond command admission
-and synchronous target observation. Publisher identity must be bound to the
-running image, hosted windows must be attributed to one real child application,
-the title reader must have a tested wall-clock timeout, and WinEvent callbacks
-must synchronously invalidate the current observation generation before
-asynchronous parsing. The selected HMONITOR/device key must be mapped to a DXGI
-output, and the real DXGI/WIC/Media Foundation pixel and metadata writer must
-revalidate target and display before and after acquisition while carrying the
-consumed command grant and native persistence permit through worker admission,
-encode, temporary output, final rename, and committed-event publication. Atomic
-filesystem interruption, cleanup, disk-full, recovery, owner-epoch races, and
-Windows lifecycle tests must then prove that end-to-end path. Until those gates
+The remaining activation gates are integration work beyond command admission,
+synchronous target observation, and the inactive event-monitor foundation.
+Publisher identity must be bound to the running image, hosted windows must be
+attributed to one real child application, and the title reader must have a
+tested wall-clock timeout. The current foreground/desktop/window hooks must be
+extended for window movement, display topology, WTS session, power/resume,
+presentation, and periodic storage transitions. The selected HMONITOR/device
+key must be mapped to a DXGI output, and the real DXGI/WIC/Media Foundation pixel
+and metadata writer must revalidate target and display before and after
+acquisition while carrying the consumed command grant and native persistence
+permit through worker admission, encode, temporary output, final rename, and
+committed-event publication. Atomic filesystem interruption, cleanup,
+disk-full, recovery, owner-epoch races, and Windows lifecycle tests must then
+prove that end-to-end path. Until those gates
 pass, no live frame or context metadata can be persisted and App DI must
 continue to register `DenyCaptureRuntimeAuthorization` and
 `UnavailableCaptureBackend`.
@@ -677,13 +692,61 @@ following are implemented and tested together:
 - unique child-application attribution for hosted Windows surfaces;
 - a wall-clock-bounded title reader that returns `Unknown` on timeout and cannot
   publish a late result after invalidation;
-- WinEvent-driven synchronous invalidation with an observation generation,
-  followed by asynchronous re-observation and explicit evidence-Pause versus
-  sticky-session-Stop classification;
+- integration of the implemented WinEvent generation foundation with complete
+  window-location and Windows lifecycle coverage, followed by explicit
+  evidence-Pause versus sticky-session-Stop classification;
 - HMONITOR/device-key to DXGI-output mapping plus writer-side target/display
   revalidation before and after acquisition; and
 - real acquisition, encoding, temporary output, atomic publication, metadata,
   cleanup, and recovery under the native persistence-permit boundary.
+
+### 9.3 Event-Driven Privacy Monitor Foundation
+
+The inactive `WindowsCapturePrivacyMonitor` closes the polling-only race around
+the ADR 0005 verifier. Its dedicated `WINEVENT_OUTOFCONTEXT` source observes
+foreground and desktop switches plus top-level window create, destroy, and name
+changes on an owner thread with a Windows message pump. The callback carries
+only a stable change kind. It does not read HWND titles, process identity,
+settings, exclusion policy, or capture lifecycle state.
+
+Before each accepted callback returns, the monitor replaces the coordinator's
+signals with FailClosed, closes managed admission, advances a
+privacy-observation generation, invalidates target-epoch continuity, and offers
+one wake token. Every event advances the generation even when a burst coalesces
+to one worker sample. This observation generation is independent from the
+runtime invalidation generation used by Application command admission.
+
+The coordinator enforces the per-generation sequence:
+
+```text
+synchronous invalidation
+-> forced FailClosed native persistence barrier
+-> at most one generation-bound resolved publication
+```
+
+The worker owns no settings snapshot. After the barrier it double-samples the
+base Windows privacy probe around one atomic target/identity/display verification
+and publishes through the coordinator, which recomposes against the latest
+committed settings. A changed generation rejects an old sample even when its
+values equal the new sample. An older native Allow that completes after
+invalidation receives a compensating FailClosed update under the same apply
+gate. Quiescence cannot be reversed by an overlapping authorizing settings
+commit.
+
+The single-slot wake channel is a work-coalescing mechanism, not an invalidation
+coalescer. Start, runtime, callback, generation, and teardown failures close the
+monitor and expose stable enum-only exceptions without raw Windows values or
+inner exceptions. Hook teardown occurs on the owner thread in reverse order;
+the callback bridge is released after clean unhook and conservatively retained
+only while native callback completion cannot be proven.
+
+This foundation still cannot revoke a native persistence permit already held by
+a future writer. Live activation requires a native generation gate or writer
+pre/post checks through acquisition and atomic publication. The present hooks
+also do not cover foreground-window location changes across monitors, display
+topology, WTS session, sleep/resume, presentation, or periodic storage changes.
+The monitor does not choose evidence Pause versus sticky session Stop and is not
+registered in App dependency injection. See ADR 0006 for the complete contract.
 
 Capture invariants:
 
@@ -910,8 +973,10 @@ application-level database encryption.
   consent. Settings persist a 30-day conservative
   default plus user-selectable retention, sensitive-application exclusion,
   remote-session pause, screen-sharing pause choices, and typed ordered
-  application/window rule lists. Full first-run onboarding and live
-  application/window identity monitoring remain Phase 1 work.
+  application/window rule lists. Full first-run onboarding remains Phase 1
+  work. The event-driven application/window identity monitor foundation is
+  implemented but inactive; complete Windows lifecycle coverage and live
+  activation also remain Phase 1 work.
 - The current `pause_during_screen_sharing` storage name is retained for schema
   compatibility, but the Windows UI describes only Windows Presentation Mode.
   Windows has no public, universal signal for arbitrary third-party screen
@@ -1120,10 +1185,15 @@ the user explicitly enables a future telemetry feature.
 - Epoch-source tests must prove that verifier recreation cannot reuse a value,
   concurrent issuers remain strictly ordered, and exhaustion permanently denies
   every later issuance in that process.
-- Live-activation tests must later cover synchronous WinEvent invalidation,
-  observation-generation races, a blocked title read returning `Unknown` within
-  its deadline with no late publication, hosted-app attribution, signer
-  replacement, display-topology and DXGI-output mapping, writer pre/post
+- Deterministic monitor tests cover callback-time invalidation, generation
+  advancement under event bursts, forced barrier ordering, stale observation
+  rejection during sampling and publication, recoverable FailClosed sampling,
+  WinEvent owner-thread startup/shutdown, late callbacks, terminal faults,
+  generation phase enforcement, quiescence races, and redacted diagnostics.
+- Live-activation tests must later cover a blocked title read returning
+  `Unknown` within its deadline with no late publication, hosted-app
+  attribution, signer replacement, foreground-window movement,
+  session/power/display topology events, DXGI-output mapping, writer pre/post
   revalidation, and stale-work rejection at every native persistence boundary.
 
 ### Domain and Application
@@ -1165,22 +1235,23 @@ Phases are release gates, not a claim of strict implementation order. As of
 2026-07-17, the no-capture manual-timeline portions of Phases 2 and 3 plus
 schema v4, consent policy v2, persistent retention/exclusion/session choices,
 and user-authored typed exclusion rules are implemented. Phase 1 also has
-Accepted ADRs 0001 through 0005, verified QiDayflow source provenance, the x64
+Accepted ADRs 0001 through 0006, verified QiDayflow source provenance, the x64
 C++20 C ABI v1 foundation, six native tests, the target-scoped safety core, the
 managed asynchronous owner/quiescence contract, owner-bound single-use
 Start/Resume admission, the inactive runtime privacy coordinator, the pure
 exclusion matcher, the on-demand Windows privacy probe, and the synchronous
-Windows foreground-target verifier foundation. The safety core covers synthetic
-target reuse, generation, acquire-to-persist permit, command-admission, and
-stop/join/destroy races; the verifier covers stable HWND/TID/PID/process/display
-observation and process-wide monotonic target epochs. Publisher-signer binding,
-child attribution, time-bounded title reads, WinEvent synchronous invalidation
-generations, DXGI-output mapping with writer pre/post revalidation, the real
-DXGI/WIC/Media Foundation acquisition and persistence path, atomic artifact
-publication, and the evidence-Pause versus sticky-Stop dynamic policy remain
-open activation gates. `ScreenCapture`, `H264Chunks`, `EvidenceExtraction`, and
-managed-adapter runtime activation remain disabled, so no phase exit criterion
-is met.
+Windows foreground-target verifier foundation, plus the inactive event-driven
+privacy monitor with its independent generation and forced barrier. The safety
+core covers synthetic target reuse, generation, acquire-to-persist permit,
+command-admission, and stop/join/destroy races; the verifier covers stable
+HWND/TID/PID/process/display observation and process-wide monotonic target
+epochs. Publisher-signer binding, child attribution, time-bounded title reads,
+complete window-location, display/session/power event coverage, DXGI-output
+mapping with native writer pre/post revalidation, the real DXGI/WIC/Media
+Foundation acquisition and persistence path, atomic artifact publication, and
+the evidence-Pause versus sticky-Stop dynamic policy remain open activation
+gates. `ScreenCapture`, `H264Chunks`, `EvidenceExtraction`, and managed-adapter
+runtime activation remain disabled, so no phase exit criterion is met.
 
 ### Phase 0: Foundation
 

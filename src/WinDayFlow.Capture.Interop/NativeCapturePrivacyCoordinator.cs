@@ -46,6 +46,9 @@ public sealed class NativeCapturePrivacyCoordinator
     private int _forcedBlock = 1;
     private int _captureAuthorized;
     private long _invalidationGeneration;
+    private long _privacyObservationGeneration;
+    private PrivacyObservationPhase _privacyObservationPhase =
+        PrivacyObservationPhase.Legacy;
     private EventHandler<CaptureRuntimeAuthorizationChangedEventArgs>? _authorizationChanged;
     private Task? _quiesceTask;
     private int _quiescing;
@@ -79,6 +82,9 @@ public sealed class NativeCapturePrivacyCoordinator
 
     public long InvalidationGeneration =>
         Volatile.Read(ref _invalidationGeneration);
+
+    public long PrivacyObservationGeneration =>
+        Volatile.Read(ref _privacyObservationGeneration);
 
     public NativeCapturePrivacyContext LastAppliedContext =>
         Volatile.Read(ref _lastApplied).PrivacyContext;
@@ -203,23 +209,28 @@ public sealed class NativeCapturePrivacyCoordinator
             SetCaptureAuthorized(authorized: false);
 
             var forceNativeUpdate = true;
-            NativeCapturePrivacySignals signals;
+            PrivacyObservationSnapshot observation;
             NativeCapturePrivacyContext applied;
             do
             {
-                signals = Volatile.Read(ref _signals);
+                observation = CapturePrivacyObservation();
                 applied = await ApplyUnderGateAsync(
                         Volatile.Read(ref _committedSettings),
-                        signals,
+                        observation.Signals,
                         forceBlock: Volatile.Read(ref _forcedBlock) != 0,
                         cancellationToken: CancellationToken.None,
                         forceNativeUpdate: forceNativeUpdate)
                     .ConfigureAwait(false);
                 forceNativeUpdate = false;
             }
-            while (signals != Volatile.Read(ref _signals));
+            while (!IsPrivacyObservationCurrent(observation));
 
-            PublishAuthorization(applied, signals);
+            var published = PublishAuthorization(applied, observation);
+            if (!published)
+            {
+                await CompensateStaleAllowUnderGateAsync(applied)
+                    .ConfigureAwait(false);
+            }
         }
         finally
         {
@@ -276,14 +287,14 @@ public sealed class NativeCapturePrivacyCoordinator
             ThrowIfUsable();
             Interlocked.Exchange(ref _forcedBlock, 1);
             SetCaptureAuthorized(authorized: false);
-            var signals = Volatile.Read(ref _signals);
+            var observation = CapturePrivacyObservation();
             var applied = await ApplyUnderGateAsync(
                     proposed,
-                    signals,
+                    observation.Signals,
                     forceBlock: true,
                     CancellationToken.None)
                 .ConfigureAwait(false);
-            PublishAuthorization(applied, signals);
+            PublishAuthorization(applied, observation);
         }
         finally
         {
@@ -313,26 +324,31 @@ public sealed class NativeCapturePrivacyCoordinator
                 Volatile.Write(ref _committedSettings, current);
                 var forceBlock = Volatile.Read(ref _forcedBlock) != 0
                     && !authorizingTransition;
-                NativeCapturePrivacySignals signals;
+                PrivacyObservationSnapshot observation;
                 NativeCapturePrivacyContext applied;
                 do
                 {
-                    signals = Volatile.Read(ref _signals);
+                    observation = CapturePrivacyObservation();
                     applied = await ApplyUnderGateAsync(
                             current,
-                            signals,
+                            observation.Signals,
                             forceBlock,
                             CancellationToken.None)
                         .ConfigureAwait(false);
                 }
-                while (signals != Volatile.Read(ref _signals));
+                while (!IsPrivacyObservationCurrent(observation));
 
                 if (authorizingTransition)
                 {
                     ClearForcedBlockIfActive();
                 }
 
-                PublishAuthorization(applied, signals);
+                var published = PublishAuthorization(applied, observation);
+                if (!published)
+                {
+                    await CompensateStaleAllowUnderGateAsync(applied)
+                        .ConfigureAwait(false);
+                }
             }
             finally
             {
@@ -389,20 +405,148 @@ public sealed class NativeCapturePrivacyCoordinator
         cancellationToken.ThrowIfCancellationRequested();
         ThrowIfDisposed();
 
+        var privacyObservationGeneration = PrivacyObservationGeneration;
+        _ = await TryUpdateSignalsCoreAsync(
+                privacyObservationGeneration,
+                signals,
+                generationBound: false)
+            .ConfigureAwait(false);
+    }
+
+    public async Task<bool> TryUpdateSignalsAsync(
+        long privacyObservationGeneration,
+        NativeCapturePrivacySignals signals,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(signals);
+        ValidatePrivacyObservationGeneration(privacyObservationGeneration);
+        cancellationToken.ThrowIfCancellationRequested();
+        ThrowIfDisposed();
+
+        if (!IsPrivacyObservationGenerationCurrent(privacyObservationGeneration))
+        {
+            return false;
+        }
+
+        return await TryUpdateSignalsCoreAsync(
+                privacyObservationGeneration,
+                signals,
+                generationBound: true)
+            .ConfigureAwait(false);
+    }
+
+    public long InvalidatePrivacyObservation()
+    {
+        InvalidOperationException? exhausted = null;
+        long nextGeneration;
+        lock (_disposeSync)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            Volatile.Write(ref _signals, NativeCapturePrivacySignals.FailClosed);
+            var currentGeneration = PrivacyObservationGeneration;
+            if (currentGeneration == long.MaxValue)
+            {
+                exhausted = new InvalidOperationException(
+                    "The privacy observation generation has been exhausted; the native handle must be recreated.");
+                Volatile.Write(ref _fatalFailure, exhausted);
+                Interlocked.Exchange(ref _forcedBlock, 1);
+                nextGeneration = currentGeneration;
+            }
+            else
+            {
+                nextGeneration = currentGeneration + 1;
+                Volatile.Write(
+                    ref _privacyObservationGeneration,
+                    nextGeneration);
+            }
+
+            _privacyObservationPhase = PrivacyObservationPhase.Invalidated;
+
+            var notification = SetCaptureAuthorizedUnderLock(authorized: false);
+            RaiseAuthorizationChanged(
+                notification.Handler,
+                notification.EventArgs);
+        }
+
+        if (exhausted is not null)
+        {
+            throw exhausted;
+        }
+
+        return nextGeneration;
+    }
+
+    public async Task ApplyPrivacyInvalidationAsync(
+        long privacyObservationGeneration,
+        CancellationToken cancellationToken = default)
+    {
+        ValidatePrivacyObservationGeneration(privacyObservationGeneration);
+        cancellationToken.ThrowIfCancellationRequested();
+        ThrowIfDisposed();
+
+        if (!IsPrivacyObservationGenerationCurrent(privacyObservationGeneration))
+        {
+            return;
+        }
+
         await _applyGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
         try
         {
             ThrowIfUsable();
-            Volatile.Write(ref _signals, signals);
-            var preview = Compose(
-                Volatile.Read(ref _committedSettings),
-                signals,
-                forceBlock: Volatile.Read(ref _forcedBlock) != 0,
-                LastAppliedContext.RuntimePolicyRevision);
-            if (!IsFullyAllowed(preview.PrivacyContext)
-                || !HasSameDecisions(Volatile.Read(ref _lastApplied), preview))
+            if (!TryBeginPrivacyInvalidationBarrierUnderGate(
+                    privacyObservationGeneration))
             {
-                SetCaptureAuthorized(authorized: false);
+                return;
+            }
+
+            var applied = await ApplyUnderGateAsync(
+                    Volatile.Read(ref _committedSettings),
+                    NativeCapturePrivacySignals.FailClosed,
+                    forceBlock: true,
+                    CancellationToken.None,
+                    forceNativeUpdate: true)
+                .ConfigureAwait(false);
+            if (!TryCompletePrivacyInvalidationBarrierUnderGate(
+                    privacyObservationGeneration))
+            {
+                return;
+            }
+
+            PublishAuthorization(
+                applied,
+                new PrivacyObservationSnapshot(
+                    privacyObservationGeneration,
+                    NativeCapturePrivacySignals.FailClosed));
+        }
+        finally
+        {
+            _applyGate.Release();
+        }
+    }
+
+    private async Task<bool> TryUpdateSignalsCoreAsync(
+        long privacyObservationGeneration,
+        NativeCapturePrivacySignals signals,
+        bool generationBound)
+    {
+        await _applyGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+        try
+        {
+            ThrowIfUsable();
+            if (!IsPrivacyObservationGenerationCurrent(
+                    privacyObservationGeneration)
+                || !TrySetSignalsForGenerationUnderGate(
+                    privacyObservationGeneration,
+                    signals,
+                    generationBound))
+            {
+                return false;
+            }
+
+            if (!IsPrivacyObservationGenerationCurrent(
+                    privacyObservationGeneration))
+            {
+                return false;
             }
 
             var applied = await ApplyUnderGateAsync(
@@ -411,7 +555,27 @@ public sealed class NativeCapturePrivacyCoordinator
                     forceBlock: Volatile.Read(ref _forcedBlock) != 0,
                     CancellationToken.None)
                 .ConfigureAwait(false);
-            PublishAuthorization(applied, signals);
+            if (!IsPrivacyObservationGenerationCurrent(
+                    privacyObservationGeneration))
+            {
+                await CompensateStaleAllowUnderGateAsync(applied)
+                    .ConfigureAwait(false);
+                return false;
+            }
+
+            var published = PublishAuthorization(
+                applied,
+                new PrivacyObservationSnapshot(
+                    privacyObservationGeneration,
+                    signals));
+            if (!published)
+            {
+                await CompensateStaleAllowUnderGateAsync(applied)
+                    .ConfigureAwait(false);
+                return false;
+            }
+
+            return true;
         }
         finally
         {
@@ -419,10 +583,142 @@ public sealed class NativeCapturePrivacyCoordinator
         }
     }
 
+    private bool TrySetSignalsForGenerationUnderGate(
+        long privacyObservationGeneration,
+        NativeCapturePrivacySignals signals,
+        bool generationBound)
+    {
+        var preview = Compose(
+            Volatile.Read(ref _committedSettings),
+            signals,
+            forceBlock: Volatile.Read(ref _forcedBlock) != 0,
+            LastAppliedContext.RuntimePolicyRevision);
+        lock (_disposeSync)
+        {
+            if (_disposed
+                || privacyObservationGeneration != PrivacyObservationGeneration)
+            {
+                return false;
+            }
+
+            if (generationBound)
+            {
+                if (privacyObservationGeneration > 0
+                    && _privacyObservationPhase
+                        != PrivacyObservationPhase.BarrierApplied)
+                {
+                    return false;
+                }
+
+                if (privacyObservationGeneration > 0)
+                {
+                    _privacyObservationPhase = PrivacyObservationPhase.Published;
+                }
+            }
+            else if (privacyObservationGeneration != 0
+                     || _privacyObservationPhase != PrivacyObservationPhase.Legacy)
+            {
+                return false;
+            }
+
+            Volatile.Write(ref _signals, signals);
+            if (!IsFullyAllowed(preview.PrivacyContext)
+                || !HasSameDecisions(Volatile.Read(ref _lastApplied), preview))
+            {
+                var notification = SetCaptureAuthorizedUnderLock(
+                    authorized: false);
+                RaiseAuthorizationChanged(
+                    notification.Handler,
+                    notification.EventArgs);
+            }
+        }
+
+        return true;
+    }
+
+    private bool TryBeginPrivacyInvalidationBarrierUnderGate(
+        long privacyObservationGeneration)
+    {
+        var signals = NativeCapturePrivacySignals.FailClosed;
+        var preview = Compose(
+            Volatile.Read(ref _committedSettings),
+            signals,
+            forceBlock: true,
+            LastAppliedContext.RuntimePolicyRevision);
+        lock (_disposeSync)
+        {
+            if (_disposed
+                || privacyObservationGeneration != PrivacyObservationGeneration)
+            {
+                return false;
+            }
+
+            if (privacyObservationGeneration > 0
+                && _privacyObservationPhase != PrivacyObservationPhase.Invalidated)
+            {
+                return false;
+            }
+
+            Volatile.Write(ref _signals, signals);
+            if (!IsFullyAllowed(preview.PrivacyContext)
+                || !HasSameDecisions(Volatile.Read(ref _lastApplied), preview))
+            {
+                var notification = SetCaptureAuthorizedUnderLock(
+                    authorized: false);
+                RaiseAuthorizationChanged(
+                    notification.Handler,
+                    notification.EventArgs);
+            }
+        }
+
+        return true;
+    }
+
+    private bool TryCompletePrivacyInvalidationBarrierUnderGate(
+        long privacyObservationGeneration)
+    {
+        lock (_disposeSync)
+        {
+            if (_disposed
+                || privacyObservationGeneration != PrivacyObservationGeneration)
+            {
+                return false;
+            }
+
+            if (privacyObservationGeneration > 0)
+            {
+                if (_privacyObservationPhase != PrivacyObservationPhase.Invalidated)
+                {
+                    return false;
+                }
+
+                _privacyObservationPhase = PrivacyObservationPhase.BarrierApplied;
+            }
+
+            return true;
+        }
+    }
+
+    private async Task CompensateStaleAllowUnderGateAsync(
+        NativeCapturePrivacyContext applied)
+    {
+        if (!IsFullyAllowed(applied))
+        {
+            return;
+        }
+
+        SetCaptureAuthorized(authorized: false);
+        _ = await ApplyUnderGateAsync(
+                Volatile.Read(ref _committedSettings),
+                NativeCapturePrivacySignals.FailClosed,
+                forceBlock: true,
+                CancellationToken.None,
+                forceNativeUpdate: true)
+            .ConfigureAwait(false);
+    }
+
     public void Dispose()
     {
-        EventHandler<CaptureRuntimeAuthorizationChangedEventArgs>? handler;
-        CaptureRuntimeAuthorizationChangedEventArgs? eventArgs;
         lock (_disposeSync)
         {
             if (_disposed)
@@ -432,12 +728,14 @@ public sealed class NativeCapturePrivacyCoordinator
 
             Interlocked.Exchange(ref _forcedBlock, 1);
             Volatile.Write(ref _disposed, true);
-            (handler, eventArgs) = SetCaptureAuthorizedUnderLock(authorized: false);
+            var notification = SetCaptureAuthorizedUnderLock(authorized: false);
+            RaiseAuthorizationChanged(
+                notification.Handler,
+                notification.EventArgs);
             _authorizationChanged = null;
         }
 
         _authorizationNotifications.Writer.TryComplete();
-        RaiseAuthorizationChanged(handler, eventArgs);
         GC.SuppressFinalize(this);
     }
 
@@ -542,6 +840,32 @@ public sealed class NativeCapturePrivacyCoordinator
             && authorization.Target.TargetEpoch != 0;
     }
 
+    private PrivacyObservationSnapshot CapturePrivacyObservation()
+    {
+        lock (_disposeSync)
+        {
+            return new PrivacyObservationSnapshot(
+                PrivacyObservationGeneration,
+                Volatile.Read(ref _signals));
+        }
+    }
+
+    private bool IsPrivacyObservationCurrent(
+        PrivacyObservationSnapshot observation)
+    {
+        lock (_disposeSync)
+        {
+            return observation.Generation == PrivacyObservationGeneration
+                && observation.Signals == Volatile.Read(ref _signals);
+        }
+    }
+
+    private bool IsPrivacyObservationGenerationCurrent(
+        long privacyObservationGeneration)
+    {
+        return privacyObservationGeneration == PrivacyObservationGeneration;
+    }
+
     private static NativeCaptureRuntimeAuthorization Compose(
         AppSettings settings,
         NativeCapturePrivacySignals signals,
@@ -633,15 +957,28 @@ public sealed class NativeCapturePrivacyCoordinator
             && context.StorageAvailable == NativeCapturePolicyDecision.Allow;
     }
 
-    private void PublishAuthorization(
+    private bool PublishAuthorization(
         NativeCapturePrivacyContext context,
-        NativeCapturePrivacySignals appliedSignals)
+        PrivacyObservationSnapshot observation)
     {
-        var authorized = Volatile.Read(ref _forcedBlock) == 0
-            && Volatile.Read(ref _fatalFailure) is null
-            && appliedSignals == Volatile.Read(ref _signals)
-            && IsFullyAllowed(context);
-        SetCaptureAuthorized(authorized);
+        bool observationCurrent;
+        lock (_disposeSync)
+        {
+            observationCurrent = !_disposed
+                && observation.Generation == PrivacyObservationGeneration
+                && observation.Signals == Volatile.Read(ref _signals);
+            var authorized = observationCurrent
+                && Volatile.Read(ref _forcedBlock) == 0
+                && Volatile.Read(ref _fatalFailure) is null
+                && Volatile.Read(ref _quiescing) == 0
+                && IsFullyAllowed(context);
+            var notification = SetCaptureAuthorizedUnderLock(authorized);
+            RaiseAuthorizationChanged(
+                notification.Handler,
+                notification.EventArgs);
+        }
+
+        return observationCurrent;
     }
 
     private void MarkFatal(Exception failure)
@@ -653,21 +990,20 @@ public sealed class NativeCapturePrivacyCoordinator
 
     private void SetCaptureAuthorized(bool authorized)
     {
-        EventHandler<CaptureRuntimeAuthorizationChangedEventArgs>? handler;
-        CaptureRuntimeAuthorizationChangedEventArgs? eventArgs;
         lock (_disposeSync)
         {
-            (handler, eventArgs) = SetCaptureAuthorizedUnderLock(authorized);
+            var notification = SetCaptureAuthorizedUnderLock(authorized);
+            RaiseAuthorizationChanged(
+                notification.Handler,
+                notification.EventArgs);
         }
-
-        RaiseAuthorizationChanged(handler, eventArgs);
     }
 
     private void ClearForcedBlockIfActive()
     {
         lock (_disposeSync)
         {
-            if (!_disposed)
+            if (!_disposed && Volatile.Read(ref _quiescing) == 0)
             {
                 Interlocked.Exchange(ref _forcedBlock, 0);
             }
@@ -679,7 +1015,9 @@ public sealed class NativeCapturePrivacyCoordinator
         CaptureRuntimeAuthorizationChangedEventArgs? EventArgs)
         SetCaptureAuthorizedUnderLock(bool authorized)
     {
-        authorized = authorized && !_disposed;
+        authorized = authorized
+            && !_disposed
+            && Volatile.Read(ref _quiescing) == 0;
         var previous = Volatile.Read(ref _captureAuthorized) != 0;
         if (previous == authorized)
         {
@@ -901,6 +1239,25 @@ public sealed class NativeCapturePrivacyCoordinator
     private sealed record AuthorizationNotification(
         EventHandler<CaptureRuntimeAuthorizationChangedEventArgs> Handler,
         CaptureRuntimeAuthorizationChangedEventArgs EventArgs);
+
+    private readonly record struct PrivacyObservationSnapshot(
+        long Generation,
+        NativeCapturePrivacySignals Signals);
+
+    private enum PrivacyObservationPhase
+    {
+        Legacy = 0,
+        Invalidated = 1,
+        BarrierApplied = 2,
+        Published = 3,
+    }
+
+    private static void ValidatePrivacyObservationGeneration(
+        long privacyObservationGeneration)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(
+            privacyObservationGeneration);
+    }
 
     private void ValidateAdvancedPersistenceGeneration(
         ulong persistenceGeneration,

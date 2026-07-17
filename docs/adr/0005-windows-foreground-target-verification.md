@@ -182,9 +182,11 @@ ADR 0003 target gate. Live activation remains blocked by all of the following:
 3. Window-title observation must have a tested wall-clock deadline, return
    `Unknown` on timeout, and reject late completion from an invalidated
    observation.
-4. A WinEvent-driven monitor must synchronously invalidate the process capture
-   latch and observation generation when a relevant event arrives, before any
-   asynchronous target parsing or policy recomposition.
+4. The WinEvent-driven monitor defined by ADR 0006 must remain integrated with
+   this verifier so every relevant event synchronously invalidates the process
+   capture latch, observation generation, and target continuity before any
+   asynchronous target parsing or policy recomposition. Its current event set
+   still requires window-location and complete Windows lifecycle coverage.
 5. HMONITOR/device key must map to the actual DXGI output. The writer must
    revalidate target and display before and after acquisition and carry the same
    epoch through the native persistence-permit boundary.
@@ -222,13 +224,14 @@ basename-only executable observation. It also asserts that publisher identity
 is still `Unknown`, preventing a placeholder implementation from being mistaken
 for signer proof.
 
-Future activation tests must inject WinEvent/worker races and prove synchronous
-generation invalidation, a blocked title read returning `Unknown` within its
-deadline without late publication or unbounded worker growth, unique hosted-app
-attribution, image-bound signer verification, DXGI output mapping, acquisition
-pre/post revalidation, stale permit rejection, atomic publication ordering,
-disk-full cleanup, restart recovery, and teardown across display and process
-replacement.
+ADR 0006 deterministic tests now inject WinEvent/worker races and prove the
+synchronous generation foundation. Future activation tests must add real
+Windows location/session/power/display coverage, a blocked title read returning
+`Unknown` within its deadline without late publication or unbounded worker
+growth, unique hosted-app attribution, image-bound signer verification, DXGI
+output mapping, acquisition pre/post revalidation, stale permit rejection,
+atomic publication ordering, disk-full cleanup, restart recovery, and teardown
+across display and process replacement.
 
 ## Provenance
 

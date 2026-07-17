@@ -69,6 +69,9 @@ public sealed class NativeCaptureRuntimeOwner
 
     public long InvalidationGeneration => _coordinator.InvalidationGeneration;
 
+    public long PrivacyObservationGeneration =>
+        _coordinator.PrivacyObservationGeneration;
+
     public async ValueTask<ICaptureRuntimeAdmissionStamp?> TryIssueAdmissionAsync(
         CaptureAdmissionOperation operation,
         CancellationToken cancellationToken = default)
@@ -220,6 +223,48 @@ public sealed class NativeCaptureRuntimeOwner
         ThrowIfTerminating();
         return InvokeCoordinatorAsync(
             () => _coordinator.UpdateSignalsAsync(signals, cancellationToken));
+    }
+
+    public long InvalidatePrivacyObservation()
+    {
+        ThrowIfTerminating();
+        try
+        {
+            return _coordinator.InvalidatePrivacyObservation();
+        }
+        catch
+        {
+            if (_coordinator.IsFaulted)
+            {
+                _ = BeginTermination();
+            }
+
+            throw;
+        }
+    }
+
+    public Task ApplyPrivacyInvalidationAsync(
+        long privacyObservationGeneration,
+        CancellationToken cancellationToken = default)
+    {
+        ThrowIfTerminating();
+        return InvokeCoordinatorAsync(
+            () => _coordinator.ApplyPrivacyInvalidationAsync(
+                privacyObservationGeneration,
+                cancellationToken));
+    }
+
+    public Task<bool> TryUpdateSignalsAsync(
+        long privacyObservationGeneration,
+        NativeCapturePrivacySignals signals,
+        CancellationToken cancellationToken = default)
+    {
+        ThrowIfTerminating();
+        return InvokeCoordinatorAsync(
+            () => _coordinator.TryUpdateSignalsAsync(
+                privacyObservationGeneration,
+                signals,
+                cancellationToken));
     }
 
     public ValueTask DisposeAsync()

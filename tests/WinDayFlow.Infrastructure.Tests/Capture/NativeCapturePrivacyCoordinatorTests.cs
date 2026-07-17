@@ -476,6 +476,160 @@ public sealed class NativeCapturePrivacyCoordinatorTests
     }
 
     [Fact]
+    public async Task EveryPrivacyInvalidationAdvancesAndForcesANativeBarrier()
+    {
+        var target = new TestPrivacyTarget();
+        var initial = NativeCapturePrivacyContext.FailClosed(runtimePolicyRevision: 1);
+        using var coordinator = new NativeCapturePrivacyCoordinator(target, initial);
+        var settings = CreateEnabledSettings();
+        await coordinator.UpdateSignalsAsync(CreateAllowedSignals());
+        await CommitAsync(coordinator, AppSettings.Default, settings);
+        target.Reset();
+
+        var first = coordinator.InvalidatePrivacyObservation();
+
+        Assert.Equal(1, first);
+        Assert.Equal(first, coordinator.PrivacyObservationGeneration);
+        Assert.False(coordinator.IsCaptureAuthorized);
+        Assert.Empty(target.Authorizations);
+        await coordinator.ApplyPrivacyInvalidationAsync(first);
+
+        var second = coordinator.InvalidatePrivacyObservation();
+
+        Assert.Equal(first + 1, second);
+        Assert.False(coordinator.IsCaptureAuthorized);
+        await coordinator.ApplyPrivacyInvalidationAsync(second);
+        Assert.Equal(2, target.Authorizations.Count);
+        Assert.All(
+            target.Authorizations,
+            static authorization => Assert.Equal(
+                NativeCapturePolicyDecision.Block,
+                authorization.PrivacyContext.ConsentGranted));
+    }
+
+    [Fact]
+    public async Task GenerationBoundPublishRequiresOneCompletedBarrierAndIsConsumedOnce()
+    {
+        var target = new TestPrivacyTarget();
+        var initial = NativeCapturePrivacyContext.FailClosed(runtimePolicyRevision: 1);
+        using var coordinator = new NativeCapturePrivacyCoordinator(target, initial);
+        var settings = CreateEnabledSettings();
+        var allowed = CreateAllowedSignals();
+        await coordinator.UpdateSignalsAsync(allowed);
+        await CommitAsync(coordinator, AppSettings.Default, settings);
+        target.Reset();
+
+        var generation = coordinator.InvalidatePrivacyObservation();
+
+        Assert.False(await coordinator.TryUpdateSignalsAsync(generation, allowed));
+        Assert.False(coordinator.IsCaptureAuthorized);
+        Assert.Empty(target.Authorizations);
+
+        await coordinator.UpdateSignalsAsync(allowed);
+        Assert.False(coordinator.IsCaptureAuthorized);
+        Assert.Empty(target.Authorizations);
+
+        await coordinator.ApplyPrivacyInvalidationAsync(generation);
+        var barrier = Assert.Single(target.Authorizations);
+        Assert.Equal(
+            NativeCapturePolicyDecision.Block,
+            barrier.PrivacyContext.ConsentGranted);
+
+        await coordinator.ApplyPrivacyInvalidationAsync(generation);
+        Assert.Single(target.Authorizations);
+
+        Assert.True(await coordinator.TryUpdateSignalsAsync(generation, allowed));
+        Assert.True(coordinator.IsCaptureAuthorized);
+        Assert.Equal(2, target.Authorizations.Count);
+
+        await coordinator.ApplyPrivacyInvalidationAsync(generation);
+        Assert.False(await coordinator.TryUpdateSignalsAsync(generation, allowed));
+        await coordinator.UpdateSignalsAsync(NativeCapturePrivacySignals.FailClosed);
+
+        Assert.True(coordinator.IsCaptureAuthorized);
+        Assert.Equal(2, target.Authorizations.Count);
+    }
+
+    [Fact]
+    public async Task StaleAllowIsCompensatedBeforeTheCurrentGenerationCanRecover()
+    {
+        var target = new TestPrivacyTarget();
+        var initial = NativeCapturePrivacyContext.FailClosed(runtimePolicyRevision: 1);
+        using var coordinator = new NativeCapturePrivacyCoordinator(target, initial);
+        var settings = CreateEnabledSettings();
+        var allowed = CreateAllowedSignals();
+        await coordinator.UpdateSignalsAsync(allowed);
+        await CommitAsync(coordinator, AppSettings.Default, settings);
+        target.Reset();
+        target.BlockNextUpdate();
+        var staleGeneration = coordinator.PrivacyObservationGeneration;
+        var changedTarget = NativeCaptureTargetIdentity.Present(
+            windowHandle: 0x5678,
+            processId: 43,
+            processCreationTime100ns: 101,
+            targetEpoch: 2);
+
+        var staleUpdate = coordinator.TryUpdateSignalsAsync(
+            staleGeneration,
+            CopySignals(allowed, target: changedTarget));
+        await target.UpdateStarted.WaitAsync(TimeSpan.FromSeconds(5));
+        var currentGeneration = coordinator.InvalidatePrivacyObservation();
+        Assert.False(coordinator.IsCaptureAuthorized);
+
+        target.ReleaseUpdate();
+        Assert.False(await staleUpdate.WaitAsync(TimeSpan.FromSeconds(5)));
+
+        Assert.Equal(2, target.Authorizations.Count);
+        Assert.Equal(changedTarget, target.Authorizations[0].Target);
+        Assert.Equal(
+            NativeCapturePolicyDecision.Allow,
+            target.Authorizations[0].PrivacyContext.ConsentGranted);
+        Assert.Equal(
+            NativeCapturePolicyDecision.Block,
+            target.Authorizations[1].PrivacyContext.ConsentGranted);
+        Assert.Equal(
+            NativeCaptureTargetIdentityState.Unknown,
+            target.Authorizations[1].Target.State);
+        Assert.False(coordinator.IsCaptureAuthorized);
+
+        await coordinator.ApplyPrivacyInvalidationAsync(currentGeneration);
+        Assert.True(await coordinator.TryUpdateSignalsAsync(
+            currentGeneration,
+            allowed));
+        Assert.True(coordinator.IsCaptureAuthorized);
+        Assert.False(await coordinator.TryUpdateSignalsAsync(
+            staleGeneration,
+            allowed));
+        Assert.True(coordinator.IsCaptureAuthorized);
+    }
+
+    [Fact]
+    public async Task PrivacyObservationGenerationExhaustionNeverWrapsAndFaultsClosed()
+    {
+        var target = new TestPrivacyTarget();
+        var initial = NativeCapturePrivacyContext.FailClosed(runtimePolicyRevision: 1);
+        using var coordinator = new NativeCapturePrivacyCoordinator(target, initial);
+        var settings = CreateEnabledSettings();
+        await coordinator.UpdateSignalsAsync(CreateAllowedSignals());
+        await CommitAsync(coordinator, AppSettings.Default, settings);
+        var generationField = typeof(NativeCapturePrivacyCoordinator).GetField(
+            "_privacyObservationGeneration",
+            System.Reflection.BindingFlags.Instance
+                | System.Reflection.BindingFlags.NonPublic);
+        Assert.NotNull(generationField);
+        generationField.SetValue(coordinator, long.MaxValue - 1);
+
+        Assert.Equal(long.MaxValue, coordinator.InvalidatePrivacyObservation());
+        var exhausted = Assert.Throws<InvalidOperationException>(
+            () => coordinator.InvalidatePrivacyObservation());
+
+        Assert.Contains("exhausted", exhausted.Message, StringComparison.Ordinal);
+        Assert.Equal(long.MaxValue, coordinator.PrivacyObservationGeneration);
+        Assert.False(coordinator.IsCaptureAuthorized);
+        Assert.True(coordinator.IsFaulted);
+    }
+
+    [Fact]
     public async Task QuiesceWaitsForAnOutstandingUpdateThenMakesTargetInaccessible()
     {
         var target = new TestPrivacyTarget();
@@ -537,6 +691,41 @@ public sealed class NativeCapturePrivacyCoordinatorTests
         Assert.Same(first, reentrant);
         Assert.Equal(updatesBefore + 1, target.Authorizations.Count);
         Assert.Equal(1, target.RevokeCount);
+    }
+
+    [Fact]
+    public async Task AuthorizingCommitCannotClearAConcurrentQuiesce()
+    {
+        var target = new TestPrivacyTarget();
+        var initial = NativeCapturePrivacyContext.FailClosed(runtimePolicyRevision: 1);
+        using var coordinator = new NativeCapturePrivacyCoordinator(target, initial);
+        var disabled = CreateDisabledConsentedSettings();
+        var enabled = CreateEnabledSettings();
+        await coordinator.UpdateSignalsAsync(CreateAllowedSignals());
+        await CommitAsync(coordinator, AppSettings.Default, disabled);
+        target.Reset();
+        target.BlockNextUpdate();
+        await coordinator.PrepareAsync(disabled, enabled);
+
+        var commit = coordinator.CommittedAsync(disabled, enabled);
+        await target.UpdateStarted.WaitAsync(TimeSpan.FromSeconds(5));
+        var quiesce = coordinator.QuiesceAsync();
+
+        Assert.False(coordinator.IsCaptureAuthorized);
+        Assert.False(commit.IsCompleted);
+        Assert.False(quiesce.IsCompleted);
+
+        target.ReleaseUpdate();
+        await commit.WaitAsync(TimeSpan.FromSeconds(5));
+        await quiesce.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.False(coordinator.IsCaptureAuthorized);
+        Assert.Equal(1, target.RevokeCount);
+        Assert.Equal(
+            NativeCapturePolicyDecision.Block,
+            coordinator.LastAppliedContext.ConsentGranted);
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => coordinator.UpdateSignalsAsync(CreateAllowedSignals()));
     }
 
     [Fact]
@@ -610,7 +799,7 @@ public sealed class NativeCapturePrivacyCoordinatorTests
     }
 
     [Fact]
-    public async Task DisposeDuringAuthorizingNativeUpdateCannotRepublishAuthorization()
+    public async Task DisposeDuringAuthorizingNativeUpdateCompensatesTheNativeAllow()
     {
         var target = new TestPrivacyTarget();
         var initial = NativeCapturePrivacyContext.FailClosed(runtimePolicyRevision: 1);
@@ -631,10 +820,49 @@ public sealed class NativeCapturePrivacyCoordinatorTests
 
         Assert.False(coordinator.IsCaptureAuthorized);
         Assert.Equal(
-            NativeCapturePolicyDecision.Allow,
+            NativeCapturePolicyDecision.Block,
             coordinator.LastAppliedContext.ConsentGranted);
+        Assert.Equal(
+            new[]
+            {
+                NativeCapturePolicyDecision.Allow,
+                NativeCapturePolicyDecision.Block,
+            },
+            target.Contexts.Select(static context => context.ConsentGranted));
         await Assert.ThrowsAsync<ObjectDisposedException>(
             () => coordinator.UpdateSignalsAsync(CreateAllowedSignals()));
+    }
+
+    [Fact]
+    public async Task DisposeDuringStopReconciliationCompensatesTheNativeAllow()
+    {
+        var target = new TestPrivacyTarget();
+        var initial = NativeCapturePrivacyContext.FailClosed(runtimePolicyRevision: 1);
+        var coordinator = new NativeCapturePrivacyCoordinator(target, initial);
+        var settings = CreateEnabledSettings();
+        await coordinator.UpdateSignalsAsync(CreateAllowedSignals());
+        await CommitAsync(coordinator, AppSettings.Default, settings);
+        target.Reset();
+        target.BlockNextUpdate();
+
+        var reconcile = coordinator.ReconcileAfterStopAsync();
+        await target.UpdateStarted.WaitAsync(TimeSpan.FromSeconds(5));
+
+        coordinator.Dispose();
+        target.ReleaseUpdate();
+        await reconcile.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.False(coordinator.IsCaptureAuthorized);
+        Assert.Equal(
+            NativeCapturePolicyDecision.Block,
+            coordinator.LastAppliedContext.ConsentGranted);
+        Assert.Equal(
+            new[]
+            {
+                NativeCapturePolicyDecision.Allow,
+                NativeCapturePolicyDecision.Block,
+            },
+            target.Contexts.Select(static context => context.ConsentGranted));
     }
 
     private static AppSettings CreateEnabledSettings(long privacyRevision = 1)

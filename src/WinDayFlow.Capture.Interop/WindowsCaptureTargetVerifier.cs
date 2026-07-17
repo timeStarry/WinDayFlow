@@ -203,6 +203,11 @@ public sealed class WindowsCaptureTargetVerifier
         }
     }
 
+    internal void InvalidateObservation()
+    {
+        _epochSource.Invalidate();
+    }
+
     private WindowsCaptureTargetVerificationResult VerifyCore()
     {
         if (!_nativeApi.IsSupportedPlatform

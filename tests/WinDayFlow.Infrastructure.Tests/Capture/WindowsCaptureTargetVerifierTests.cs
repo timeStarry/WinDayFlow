@@ -121,6 +121,21 @@ public sealed class WindowsCaptureTargetVerifierTests
     }
 
     [Fact]
+    public void ExplicitObservationInvalidationAdvancesTheRecoveredEpoch()
+    {
+        var api = FakeWindowsCaptureTargetNativeApi.CreateStable();
+        var verifier = new WindowsCaptureTargetVerifier(api);
+        var beforeInvalidation = verifier.Verify();
+
+        verifier.InvalidateObservation();
+        var afterInvalidation = verifier.Verify();
+
+        Assert.True(
+            afterInvalidation.Target.TargetEpoch
+                > beforeInvalidation.Target.TargetEpoch);
+    }
+
+    [Fact]
     public void ForegroundWindowRaceFailsClosedAndDisposesTheProcess()
     {
         var api = FakeWindowsCaptureTargetNativeApi.CreateStable();
