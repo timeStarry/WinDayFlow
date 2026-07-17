@@ -68,18 +68,24 @@ contains:
   owner/quiesce behavior, and real-DLL integration tests;
 - a synchronous, fail-closed Windows foreground-target verifier foundation that
   double-checks the foreground HWND, owner TID/PID, process creation time and
-  liveness, window title, and monitor selection; it emits a stable numeric
-  target/display anchor plus size-bounded identity observations, rejects
-  unresolved `ApplicationFrameHost.exe` attribution,
+  liveness, window title, and monitor selection; production title reads share
+  one process-wide background worker with a 100 ms wall-clock deadline,
+  permanent fail-stop behavior after an in-flight timeout, late-result
+  rejection, and a cleared private 32K-character buffer; the verifier emits a
+  stable numeric target/display anchor plus size-bounded identity observations,
+  rejects unresolved `ApplicationFrameHost.exe` attribution,
   obtains target epochs from a process-wide monotonic source across
   target/display changes, Unknown gaps, and verifier recreation, and redacts
   observed values from diagnostic text;
 - an inactive event-driven Windows privacy-monitor foundation with a dedicated
-  WinEvent message thread, narrow foreground/desktop/window hooks, synchronous
-  managed-latch and target-epoch invalidation, an independent monotonic
-  observation generation, a forced native FailClosed barrier, latest-generation
-  worker coalescing, generation-bound publication, stale-Allow compensation,
-  bounded teardown, and value-only sanitized fault contracts;
+  WinEvent message thread, narrow foreground/desktop/window hooks, and an exact
+  `0x800B..0x800C` location/name range; a qualifying nonzero-HWND
+  `OBJID_WINDOW`/`CHILDID_SELF` location event conservatively invalidates the
+  managed latch, observation generation, and target continuity, but does not
+  prove that the window is top-level or foreground; the monitor also provides a
+  forced native FailClosed barrier, latest-generation worker coalescing,
+  generation-bound publication, stale-Allow compensation, bounded teardown,
+  and value-only sanitized fault contracts;
 - a tested settings commit barrier, process-local capture latch with monotonic
   invalidation generations, sticky automatic-stop handling, a pure Windows
   privacy-policy composer, and a native coordinator whose runtime generations
@@ -102,12 +108,15 @@ The real DXGI/WIC/Media Foundation acquisition and persistence path, analysis
 queue and providers, generated Daily and Weekly views, journal editing, and
 timeline-grounded chat are **not integrated yet**. The foreground verifier and
 event monitor are inactive foundations, not a live activation claim:
-publisher-signer binding, hosted-app child attribution, bounded-time
-window-title reads, foreground-window location/display and Windows lifecycle
-event coverage, DXGI output mapping, and native writer pre/post generation
-revalidation remain open gates. The safety core proves the synthetic
-authorization, persistence-permit, and stop/join/destroy boundary; it does not
-prove that a real frame or metadata writer uses that boundary.
+image-bound publisher-signer verification, unique hosted-app attribution,
+display-topology/WTS/power/resume/presentation/storage signals, native display
+binding and DXGI output resolution, writer-side generation/permit enforcement,
+and the real DXGI/WIC/Media Foundation writer remain open gates. The bounded
+title-read and conservative window-location invalidation gates are closed; they
+do not prove foreground/top-level identity, bind an HMONITOR to a DXGI output,
+or authorize persistence. The safety core proves the synthetic authorization,
+persistence-permit, and stop/join/destroy boundary; it does not prove that a
+real frame or metadata writer uses that boundary.
 Owner-bound Start/Resume admission is implemented:
 the Application service obtains a single-use opaque stamp, rechecks persisted
 and runtime authorization, and the native owner atomically consumes the stamp
@@ -133,11 +142,15 @@ records the single-use managed/native Start/Resume authority and its
 linearization, cancellation, and failure semantics. The
 [Windows foreground-target verification ADR](docs/adr/0005-windows-foreground-target-verification.md)
 records the stable observation, process-wide monotonic epoch, privacy-redaction,
-time-bounded title-read requirement, and remaining live-activation boundaries.
+title-observation contract, and remaining live-activation boundaries.
 The [event-driven privacy-monitor ADR](docs/adr/0006-event-driven-capture-privacy-monitor.md)
 records callback-time invalidation, the enforced three-phase generation
 protocol, WinEvent thread ownership, worker coalescing, sanitized failure
-semantics, and remaining native-writer and Windows-lifecycle gates.
+semantics, and remaining native-writer and Windows-lifecycle gates. The
+[bounded title and location-invalidation ADR](docs/adr/0007-bounded-window-title-and-location-invalidation.md)
+records the process-wide 100 ms title-worker fail-stop contract, exact
+location/name hook range, conservative object filtering, and the two activation
+gates closed by that implementation.
 
 ## Platform Support
 
@@ -236,23 +249,25 @@ never to imply project affiliation. Branding, logos, fonts, screenshots, and
 other visual assets are not reused by WinDayFlow unless separately licensed and
 explicitly documented.
 
-WinDayFlow is distributed under the [MIT License](LICENSE). This project
+WinDayFlow remains distributed under the [MIT License](LICENSE). This project
 license applies to WinDayFlow-owned work; it does not replace the terms or
-notices of incorporated third-party material. See
+notices of incorporated third-party material, and it does not require a change
+away from WinUI-related components. See
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the redistributed runtime
 terms and [docs/provenance/QiDayflow-capture.md](docs/provenance/QiDayflow-capture.md)
 for capture-source provenance.
 
-WinUI 3 and Windows App SDK remain the project's selected UI stack. Dependency
-terms are handled by choosing an appropriate WinUI servicing release and by
-honoring its packaging and distribution conditions; they are not a reason to
-replace the native Windows architecture.
+WinUI 3 and Windows App SDK remain the project's selected UI stack. Current
+development-package redistribution restrictions do not reopen that technology
+decision. Dependency terms are handled by choosing an appropriate servicing
+release and honoring its packaging and distribution conditions, not by
+replacing the native Windows architecture.
 
 The current self-contained bundle is for local development and manual
 verification only. Its transitive `Microsoft.WindowsAppSDK.WinUI` 2.2.1 package
 carries Engineering Preview terms that prohibit sharing, publishing,
-distribution, and live use. External testing and production release remain
-blocked until a production-redistributable WinUI version or explicit permission
-is verified. That release gate applies to the concrete binary dependency, not
-to the choice of WinUI 3, and it does not change the MIT license for
-WinDayFlow-owned source code.
+distribution, and live use. Production packaging still requires a
+redistributable WinUI/Windows App SDK servicing release, or explicit permission
+for the selected dependency. That release gate applies to the concrete binary
+dependency, not to the choice of WinUI 3, and it does not change the MIT license
+for WinDayFlow-owned source code.

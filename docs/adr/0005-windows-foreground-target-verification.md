@@ -76,8 +76,9 @@ the old fingerprint and invalidation history.
 ### Stable Windows Observation
 
 On the supported Windows 10 version 1809+ x64 baseline, one call performs this
-fixed-size sequence under the verifier lock. The present implementation does not
-yet impose a wall-clock deadline on the sequence:
+fixed-size sequence under the verifier lock. Each title attempt has its own
+100 ms wall-clock safety deadline; this ADR does not claim one common deadline
+for every other Windows API in the complete sequence:
 
 1. Read the foreground HWND. A successful zero HWND is known `Absent`.
 2. Read the owning TID/PID and resolve `MonitorFromWindow` to an HMONITOR plus
@@ -117,17 +118,26 @@ The identity readers apply these boundaries:
   known `Absent`. Unexpected status, inconsistent sizing, or oversized output
   is `Unknown`.
 - Window-title, image-path, and package-family buffers have fixed maximum sizes.
-  Pooled buffers are cleared before reuse. These character limits do not bound
-  elapsed call time.
+  Pooled image/package buffers are cleared before reuse. The title reader owns a
+  private fixed 32K-character buffer and clears it before and after native use.
 - Publisher-certificate identity remains `Unknown`. A path-only certificate
   lookup cannot prove that a signer is bound to the opened running image.
 
-The current title reader calls `GetWindowTextW` directly. For a window owned by
-the current process, that API can wait on window-procedure work and block the
-verifier indefinitely. Before live activation, title observation must have a
-tested wall-clock deadline, return `Unknown` on timeout, and prevent a delayed
-completion from publishing into a newer observation generation. The timeout
-mechanism must not leak unbounded workers or outlive native handles it uses.
+Production P/Invoke target readers share one lazy process-wide
+`FailStopWindowsCaptureWindowTitleReader` and therefore one dedicated background
+worker for the process. It admits one request only while `Idle`; concurrent
+callers receive `Unknown` rather than building a queue. Every admitted request
+receives a 100 ms monotonic wall-clock deadline.
+
+A request that expires before execution may be removed from `Queued` and return
+the worker to `Idle`. Once native execution is `InFlight`, a timeout permanently
+poisons and fail-stops that process-wide reader. Every later title read in the
+process returns `Unknown`, and no replacement worker is created. If the blocked
+native call eventually returns, its title is discarded: the reader neither
+builds nor retains the string, never completes or publishes the expired result,
+and clears the private 32K buffer. The request contains an HWND but no process
+handle, so the verifier can release its opened process handle as soon as the
+deadline returns `Unknown`.
 
 If the observed executable basename is `ApplicationFrameHost.exe`, the complete
 verification returns `Unknown` and clears the remembered target. Live capture
@@ -171,26 +181,25 @@ coordinator, and native authorization fields that require them.
 
 ### Live-Activation Boundary
 
-This decision satisfies only the stable synchronous-observation portion of the
-ADR 0003 target gate. Live activation remains blocked by all of the following:
+Together with ADR 0007, this decision satisfies the stable synchronous
+observation and bounded-title portions of the ADR 0003 target gate. Live
+activation remains blocked by all of the following:
 
 1. Publisher identity must be verified offline against the opened running image
    and represented by the primary signer leaf certificate DER SHA-256. A path
    observed independently of the process handle is insufficient.
 2. Hosted Windows surfaces must be attributed to one real child application.
    Unresolved or multiple attribution remains `Unknown`.
-3. Window-title observation must have a tested wall-clock deadline, return
-   `Unknown` on timeout, and reject late completion from an invalidated
-   observation.
-4. The WinEvent-driven monitor defined by ADR 0006 must remain integrated with
+3. The WinEvent-driven monitor defined by ADR 0006 must remain integrated with
    this verifier so every relevant event synchronously invalidates the process
    capture latch, observation generation, and target continuity before any
-   asynchronous target parsing or policy recomposition. Its current event set
-   still requires window-location and complete Windows lifecycle coverage.
-5. HMONITOR/device key must map to the actual DXGI output. The writer must
-   revalidate target and display before and after acquisition and carry the same
-   epoch through the native persistence-permit boundary.
-6. Real DXGI/WIC/Media Foundation acquisition, encoding, metadata, temporary
+   asynchronous target parsing or policy recomposition. Qualified window
+   location invalidation is implemented, but display topology, WTS session,
+   power/resume, presentation, and periodic storage signals remain open.
+4. HMONITOR/device key must be natively bound to the actual DXGI output. The
+   writer must revalidate target and display before and after acquisition and
+   enforce generation/permit freshness through every persistence boundary.
+5. Real DXGI/WIC/Media Foundation acquisition, encoding, metadata, temporary
    output, atomic final publication, cleanup, and recovery must use that permit
    end to end.
 
@@ -224,14 +233,20 @@ basename-only executable observation. It also asserts that publisher identity
 is still `Unknown`, preventing a placeholder implementation from being mistaken
 for signer proof.
 
-ADR 0006 deterministic tests now inject WinEvent/worker races and prove the
-synchronous generation foundation. Future activation tests must add real
-Windows location/session/power/display coverage, a blocked title read returning
-`Unknown` within its deadline without late publication or unbounded worker
-growth, unique hosted-app attribution, image-bound signer verification, DXGI
-output mapping, acquisition pre/post revalidation, stale permit rejection,
-atomic publication ordering, disk-full cleanup, restart recovery, and teardown
-across display and process replacement.
+Deterministic title-reader tests cover dedicated-worker execution, successful
+buffer clearing, queued deadline expiry returning to `Idle`, in-flight timeout
+poisoning, process-lifetime `Unknown` after poison, late-result rejection,
+one-request concurrency, bounded teardown, and prompt verifier process-handle
+release after timeout. ADR 0006/0007 tests also cover the exact
+`0x800B..0x800C` hook, object filters, location-event invalidation, and
+generation races during target/title sampling.
+
+Future activation tests must add real Windows
+display-topology/session/power/presentation/storage coverage, unique hosted-app
+attribution, image-bound signer verification, native display binding and DXGI
+output mapping, acquisition pre/post generation/permit enforcement, stale-work
+rejection, atomic publication ordering, disk-full cleanup, restart recovery,
+and teardown across display and process replacement.
 
 ## Provenance
 
@@ -244,8 +259,10 @@ QiDayflow-derived file set or provenance manifest hashes.
 Runtime authorization can now be built on a stable, reusable-target-resistant
 Windows observation rather than a single HWND or PID read. The extra reads and
 serialization make foreground, owner, process, title, and display races explicit
-and fail closed. Buffer size and call count are bounded, but direct title reading
-is not yet time-bounded and therefore remains unsuitable for live activation.
+and fail closed. Title reads now have a 100 ms caller deadline with process-wide
+fail-stop and late-result rejection; an in-flight timeout intentionally gives up
+all later title observation until process restart rather than risking stale
+identity publication or unbounded worker creation.
 
 The output is intentionally narrower than a policy decision and weaker than a
 writer permit. This keeps user-rule evaluation, event invalidation, DXGI output

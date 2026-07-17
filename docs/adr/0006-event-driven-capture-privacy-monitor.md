@@ -110,8 +110,12 @@ cache settings itself.
 
 `WindowsCaptureWinEventSource` owns a dedicated background thread and a Windows
 message queue. It installs narrow `WINEVENT_OUTOFCONTEXT` hooks for foreground,
-desktop switch, top-level window create/destroy, and top-level window name
-change. Object events are accepted only for `OBJID_WINDOW` and `CHILDID_SELF`.
+desktop switch, window-object create/destroy, and one exact
+`0x800B..0x800C` range for object location/name change. Object events are
+accepted only when HWND is nonzero and the callback reports `OBJID_WINDOW` with
+`CHILDID_SELF`. Those predicates do not prove that the window is top-level or
+foreground. In particular, a qualifying `LOCATIONCHANGE` is a conservative
+invalidation signal, not target-identity evidence.
 
 The callback delegate is rooted for the complete hook lifetime. The owner
 thread unregisters hooks in reverse order, drains queued work, and releases the
@@ -129,20 +133,21 @@ cannot advance state after terminal shutdown.
 
 ## Activation Boundary
 
-This decision closes the foreground/desktop/window-event observation-generation
-foundation only. It does not activate capture. At minimum, live integration
-still requires:
+Together with ADR 0007, this decision closes the foreground/desktop/window-event
+observation-generation and conservative window-location invalidation
+foundations. The bounded title-read gate is also closed. None of these decisions
+activates capture. At minimum, live integration still requires:
 
-1. a wall-clock-bounded window-title reader with rejection of late completion;
-2. publisher identity bound to the opened running image and unique hosted-app
+1. publisher identity bound to the opened running image and unique hosted-app
    child attribution;
-3. foreground-window move/location and display-topology invalidation, plus WTS
-   session, power/resume, presentation, and periodic storage signals;
-4. HMONITOR/device-key to DXGI-output mapping and writer-side target/display
-   revalidation before and after acquisition;
-5. a native generation gate that revokes already-held writer authority;
-6. an explicit evidence-Pause versus sticky-session-Stop policy; and
-7. the real DXGI/WIC/Media Foundation acquisition, encoding, temporary output,
+2. display-topology invalidation plus WTS session, power/resume, presentation,
+   and periodic storage signals;
+3. native HMONITOR/device-key binding to the selected DXGI output and
+   writer-side target/display revalidation before and after acquisition;
+4. a native generation/permit gate that revokes or rejects already-held stale
+   writer authority through publication;
+5. an explicit evidence-Pause versus sticky-session-Stop policy; and
+6. the real DXGI/WIC/Media Foundation acquisition, encoding, temporary output,
    atomic publication, cleanup, and recovery path.
 
 `ScreenCapture`, `H264Chunks`, and `EvidenceExtraction` remain disabled. The App
@@ -164,12 +169,16 @@ quiescence monotonicity.
 WinEvent tests cover hook ranges and filters, message ownership, owner-thread
 callback and disposal, reverse unhook, queued late callbacks, callback-root
 lifetime, callback-failure shutdown, partial registration, bounded start/stop,
-and conservative retention when unhook cannot be proven.
+conservative retention when unhook cannot be proven, the exact
+`0x800B..0x800C` range, and rejection of location callbacks without a nonzero
+HWND, `OBJID_WINDOW`, and `CHILDID_SELF`. Monitor tests cover location-event
+storms and a location invalidation racing target/title sampling without stale
+publication.
 
-Future activation tests must add real Windows event smoke coverage, window
-movement across monitors, session and power transitions, bounded title reads,
-signer and hosted-app replacement, DXGI mapping, writer generation checks, and
-atomic artifact recovery.
+Future activation tests must add real Windows display-topology, WTS,
+power/resume, presentation, and storage-signal coverage; signer and hosted-app
+replacement; native display binding and DXGI mapping; writer generation/permit
+checks; and atomic artifact recovery.
 
 ## Provenance
 
@@ -186,6 +195,7 @@ thread, generation phase, forced native update, and teardown state machine add
 complexity, but make the callback-to-publication races testable.
 
 The implementation remains intentionally disconnected. Its current event set
-is not complete Windows lifecycle coverage, and an asynchronous barrier cannot
-replace writer-side native generation enforcement. This ADR must not be used as
-evidence that WinDayFlow records frames or that Phase 1 has exited.
+includes conservative location invalidation but is not complete Windows
+lifecycle coverage, and an asynchronous barrier cannot replace writer-side
+native generation enforcement. This ADR must not be used as evidence that
+WinDayFlow records frames or that Phase 1 has exited.
