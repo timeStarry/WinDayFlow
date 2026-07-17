@@ -17,6 +17,9 @@ public sealed class WindowsCaptureWinEventSourceTests
         Assert.Equal<uint>(0x0020, WindowsCaptureWinEventSource.EventSystemDesktopSwitch);
         Assert.Equal<uint>(0x8000, WindowsCaptureWinEventSource.EventObjectCreate);
         Assert.Equal<uint>(0x8001, WindowsCaptureWinEventSource.EventObjectDestroy);
+        Assert.Equal<uint>(
+            0x800B,
+            WindowsCaptureWinEventSource.EventObjectLocationChange);
         Assert.Equal<uint>(0x800C, WindowsCaptureWinEventSource.EventObjectNameChange);
         Assert.Equal(0, WindowsCaptureWinEventSource.ObjectIdWindow);
         Assert.Equal(0, WindowsCaptureWinEventSource.ChildIdSelf);
@@ -74,7 +77,7 @@ public sealed class WindowsCaptureWinEventSourceTests
                 WindowsCaptureWinEventSource.EventObjectDestroy),
             registration => AssertRegistration(
                 registration,
-                WindowsCaptureWinEventSource.EventObjectNameChange,
+                WindowsCaptureWinEventSource.EventObjectLocationChange,
                 WindowsCaptureWinEventSource.EventObjectNameChange));
 
         source.Dispose();
@@ -97,6 +100,7 @@ public sealed class WindowsCaptureWinEventSourceTests
         api.Raise(WindowsCaptureWinEventSource.EventSystemDesktopSwitch, 0, -4, 9);
         api.Raise(WindowsCaptureWinEventSource.EventObjectCreate, 100, 0, 0);
         api.Raise(WindowsCaptureWinEventSource.EventObjectDestroy, 100, 0, 0);
+        api.Raise(WindowsCaptureWinEventSource.EventObjectLocationChange, 100, 0, 0);
         api.Raise(WindowsCaptureWinEventSource.EventObjectNameChange, 100, 0, 0);
 
         Assert.Equal(
@@ -105,6 +109,7 @@ public sealed class WindowsCaptureWinEventSourceTests
                 WindowsCaptureWinEventChange.DesktopSwitch,
                 WindowsCaptureWinEventChange.ObjectCreated,
                 WindowsCaptureWinEventChange.ObjectDestroyed,
+                WindowsCaptureWinEventChange.ObjectLocationChanged,
                 WindowsCaptureWinEventChange.ObjectNameChanged,
             ],
             changes);
@@ -122,6 +127,9 @@ public sealed class WindowsCaptureWinEventSourceTests
         api.Raise(WindowsCaptureWinEventSource.EventObjectCreate, 100, -4, 0);
         api.Raise(WindowsCaptureWinEventSource.EventObjectCreate, 100, 0, 1);
         api.Raise(WindowsCaptureWinEventSource.EventObjectDestroy, 0, 0, 0);
+        api.Raise(WindowsCaptureWinEventSource.EventObjectLocationChange, 0, 0, 0);
+        api.Raise(WindowsCaptureWinEventSource.EventObjectLocationChange, 100, -4, 0);
+        api.Raise(WindowsCaptureWinEventSource.EventObjectLocationChange, 100, 0, 1);
         api.Raise(WindowsCaptureWinEventSource.EventObjectNameChange, 100, -4, 0);
 
         Assert.Empty(changes);

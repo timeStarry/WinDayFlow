@@ -660,17 +660,23 @@ and after native use.
 The title worker admits only one request while `Idle`. Every request receives a
 100 ms monotonic wall-clock deadline. A request that expires while still
 `Queued` may be removed and return the worker to `Idle`. Once the worker enters
-`InFlight`, a timeout permanently changes the process-wide reader to
-`Poisoned`; every later title read in that process immediately returns
-`Unknown`, and no replacement worker or request queue is created. A native call
-that returns after expiry cannot build, retain, complete, or publish its title;
-after the native call returns control, the private buffer is cleared in
-`finally`. Timeout never races a clear against Windows still writing the buffer.
-This bounds caller wait without treating a late native return as current
-evidence. Publisher-certificate identity remains `Unknown` until an offline
-trust check can bind the primary signer leaf to the opened running image and
-hash its DER bytes with SHA-256. Looking up a certificate from an unbound path
-is not accepted as proof.
+`InFlight`, or after it claims the bounded local `Completing` phase, a timeout
+permanently changes the process-wide reader to `Poisoned`; every later ordinary
+title read in that process immediately returns `Unknown`, and no replacement
+worker or request queue is created. The caller waits on a request-private
+persistent signal outside the reader-state lock, so blocked native or local
+completion work cannot hold the caller or `Dispose` indefinitely. A native call
+that returns after expiry cannot build, retain, complete, or publish its title.
+If local construction began in time but crosses the deadline, its temporary
+value is discarded before commit. After native use, the private buffer is
+cleared in `finally`; timeout never races a clear against Windows still writing
+the buffer. Recoverable failures become `Unknown`, while fatal failures are
+re-thrown to the current caller or retained as a sticky fatal when they arrive
+after timeout. This bounds caller wait without treating a late native return as
+current evidence. Publisher-certificate identity remains `Unknown` until an
+offline trust check can bind the primary signer leaf to the opened running
+image and hash its DER bytes with SHA-256. Looking up a certificate from an
+unbound path is not accepted as proof.
 
 The stable fingerprint is HWND, PID, process creation time, owner TID,
 HMONITOR, and a case-normalized display device key. One locked, process-wide
@@ -1222,8 +1228,10 @@ the user explicitly enables a future telemetry feature.
 - Deterministic title-reader tests cover the dedicated worker, the 100 ms
   deadline contract, queued expiry returning to `Idle`, in-flight expiry
   permanently entering `Poisoned`, process-lifetime `Unknown` after poison,
-  late-result rejection, one-request concurrency, private 32K-buffer clearing,
-  bounded teardown, and verifier process-handle release after timeout.
+  late-result rejection, blocked `Completing`, fatal and recoverable failures,
+  sequential single-worker reuse, one-request concurrency, private 32K-buffer
+  clearing, self-disposal, bounded teardown, and verifier process-handle release
+  after timeout.
 - Deterministic monitor tests cover callback-time invalidation, generation
   advancement under event bursts, forced barrier ordering, stale observation
   rejection during sampling and publication, recoverable FailClosed sampling,

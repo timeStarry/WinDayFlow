@@ -71,8 +71,9 @@ contains:
   liveness, window title, and monitor selection; production title reads share
   one process-wide background worker with a 100 ms wall-clock deadline,
   permanent fail-stop behavior after an in-flight timeout, late-result
-  rejection, and a cleared private 32K-character buffer; the verifier emits a
-  stable numeric target/display anchor plus size-bounded identity observations,
+  rejection, fatal-error preservation, and a cleared private 32K-character
+  buffer; the verifier emits a stable numeric target/display anchor plus
+  size-bounded identity observations,
   rejects unresolved `ApplicationFrameHost.exe` attribution,
   obtains target epochs from a process-wide monotonic source across
   target/display changes, Unknown gaps, and verifier recreation, and redacts

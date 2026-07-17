@@ -9,6 +9,7 @@ internal enum WindowsCaptureWinEventChange
     ObjectCreated = 3,
     ObjectDestroyed = 4,
     ObjectNameChanged = 5,
+    ObjectLocationChanged = 6,
 }
 
 internal enum WindowsCaptureWinEventSourceFault
@@ -37,6 +38,7 @@ internal sealed class WindowsCaptureWinEventSource : IWindowsCaptureEventSource
     internal const uint EventSystemDesktopSwitch = 0x0020;
     internal const uint EventObjectCreate = 0x8000;
     internal const uint EventObjectDestroy = 0x8001;
+    internal const uint EventObjectLocationChange = 0x800B;
     internal const uint EventObjectNameChange = 0x800C;
     internal const int ObjectIdWindow = 0;
     internal const int ChildIdSelf = 0;
@@ -357,7 +359,7 @@ internal sealed class WindowsCaptureWinEventSource : IWindowsCaptureEventSource
                 callback,
                 hooks)
             && TryRegisterHook(
-                EventObjectNameChange,
+                EventObjectLocationChange,
                 EventObjectNameChange,
                 callback,
                 hooks);
@@ -623,6 +625,9 @@ internal sealed class WindowsCaptureWinEventCallbackBridge
                 break;
             case WindowsCaptureWinEventSource.EventObjectDestroy:
                 change = WindowsCaptureWinEventChange.ObjectDestroyed;
+                break;
+            case WindowsCaptureWinEventSource.EventObjectLocationChange:
+                change = WindowsCaptureWinEventChange.ObjectLocationChanged;
                 break;
             case WindowsCaptureWinEventSource.EventObjectNameChange:
                 change = WindowsCaptureWinEventChange.ObjectNameChanged;

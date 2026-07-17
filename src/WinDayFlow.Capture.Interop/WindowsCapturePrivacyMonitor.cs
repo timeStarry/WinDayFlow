@@ -155,6 +155,7 @@ internal enum WindowsCapturePrivacyInvalidationReason : long
     EventSourceFault = 1L << 6,
     MonitorFault = 1L << 7,
     Shutdown = 1L << 8,
+    ObjectLocationChanged = 1L << 9,
 }
 
 public enum WindowsCapturePrivacyMonitorFault
@@ -1109,6 +1110,8 @@ public sealed class WindowsCapturePrivacyMonitor : IAsyncDisposable
                 WindowsCapturePrivacyInvalidationReason.ObjectDestroyed,
             WindowsCaptureWinEventChange.ObjectNameChanged =>
                 WindowsCapturePrivacyInvalidationReason.ObjectNameChanged,
+            WindowsCaptureWinEventChange.ObjectLocationChanged =>
+                WindowsCapturePrivacyInvalidationReason.ObjectLocationChanged,
             _ => throw new ArgumentOutOfRangeException(nameof(change)),
         };
     }

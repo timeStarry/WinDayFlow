@@ -128,7 +128,7 @@ public sealed class WindowsCapturePrivacyMonitorTests
     }
 
     [Fact]
-    public async Task EventBurstCoalescesToOneWorkerSampleOfTheLatestGeneration()
+    public async Task LocationChangeStormInvalidatesEveryEventAndRecoversFromTheLatestGeneration()
     {
         var sink = new FakePrivacySignalSink
         {
@@ -143,7 +143,7 @@ public sealed class WindowsCapturePrivacyMonitorTests
         await sink.BlockedBarrierEntered.Task.WaitAsync(Timeout);
         for (var index = 0; index < 100; index++)
         {
-            source.EmitChange(WindowsCaptureWinEventChange.ObjectNameChanged);
+            source.EmitChange(WindowsCaptureWinEventChange.ObjectLocationChanged);
         }
 
         Assert.Equal(101, sink.PrivacyObservationGeneration);
@@ -154,9 +154,13 @@ public sealed class WindowsCapturePrivacyMonitorTests
         Assert.Equal(101, update.Generation);
         Assert.Equal(1, sampler.SampleCount);
         Assert.Equal(101, sampler.InvalidationCount);
+        Assert.Equal(101, monitor.LastPublishedGeneration);
+        Assert.Equal<ulong>(
+            101,
+            monitor.LastObservation.Signals.Target.TargetEpoch);
         Assert.True(
             monitor.ObservedInvalidationReasons.HasFlag(
-                WindowsCapturePrivacyInvalidationReason.ObjectNameChanged));
+                WindowsCapturePrivacyInvalidationReason.ObjectLocationChanged));
         await monitor.DisposeAsync();
     }
 
@@ -193,6 +197,45 @@ public sealed class WindowsCapturePrivacyMonitorTests
         Assert.Single(sink.Updates);
         Assert.Equal(2, sampler.SampleCount);
         Assert.Same(second.DisplayTarget, monitor.LastObservation.DisplayTarget);
+        await monitor.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task LocationWinEventDuringTargetTitleSamplingNeverAttemptsStalePublication()
+    {
+        var staleSampleStarted = CreateCompletionSource();
+        var releaseStaleSample = CreateCompletionSource();
+        var stale = CreateObservation(21, windowTitle: "stale-title");
+        var latest = CreateObservation(22, windowTitle: "latest-title");
+        var sink = new FakePrivacySignalSink();
+        var sampler = new FakePrivacySampler(async (call, cancellationToken) =>
+        {
+            if (call == 1)
+            {
+                staleSampleStarted.TrySetResult();
+                await releaseStaleSample.Task.WaitAsync(cancellationToken);
+                return stale;
+            }
+
+            return latest;
+        });
+        var source = new FakeEventSource();
+        var monitor = new WindowsCapturePrivacyMonitor(sink, sampler, source);
+
+        await monitor.StartAsync();
+        await staleSampleStarted.Task.WaitAsync(Timeout);
+        source.EmitChange(WindowsCaptureWinEventChange.ObjectLocationChanged);
+
+        Assert.Equal(2, sink.PrivacyObservationGeneration);
+        Assert.Equal(2, sampler.InvalidationCount);
+        releaseStaleSample.TrySetResult();
+
+        var update = await sink.ReadUpdateAsync().WaitAsync(Timeout);
+        Assert.Equal(2, update.Generation);
+        Assert.Equal("latest-title", update.Signals.CaptureIdentity.WindowTitle);
+        Assert.Equal([2L], sink.UpdateAttemptGenerations);
+        Assert.Single(sink.Updates);
+        Assert.Equal(2, sampler.SampleCount);
         await monitor.DisposeAsync();
     }
 
@@ -710,6 +753,8 @@ public sealed class WindowsCapturePrivacyMonitorTests
             Updates
         { get; } = [];
 
+        internal List<long> UpdateAttemptGenerations { get; } = [];
+
         public long PrivacyObservationGeneration =>
             Volatile.Read(ref _generation);
 
@@ -755,6 +800,11 @@ public sealed class WindowsCapturePrivacyMonitorTests
         {
             cancellationToken.ThrowIfCancellationRequested();
             var call = Interlocked.Increment(ref _updateCallCount);
+            lock (_sync)
+            {
+                UpdateAttemptGenerations.Add(privacyObservationGeneration);
+            }
+
             if (call == BlockUpdateCall)
             {
                 BlockedUpdateEntered.TrySetResult();

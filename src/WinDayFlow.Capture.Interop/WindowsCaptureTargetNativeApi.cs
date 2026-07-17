@@ -9,14 +9,23 @@ internal sealed class PInvokeWindowsCaptureTargetNativeApi
 {
     private const uint ProcessQueryLimitedInformation = 0x1000;
     private const uint Synchronize = 0x00100000;
-    private const int MaximumWindowTextCharacters = 32_768;
     private const uint MonitorDefaultToNull = 0;
+
+    private readonly IWindowsCaptureWindowTitleReader _windowTitleReader;
 
     internal const uint TargetProcessDesiredAccess =
         ProcessQueryLimitedInformation | Synchronize;
 
     private PInvokeWindowsCaptureTargetNativeApi()
+        : this(FailStopWindowsCaptureWindowTitleReader.ProcessWide)
     {
+    }
+
+    internal PInvokeWindowsCaptureTargetNativeApi(
+        IWindowsCaptureWindowTitleReader windowTitleReader)
+    {
+        _windowTitleReader = windowTitleReader
+            ?? throw new ArgumentNullException(nameof(windowTitleReader));
     }
 
     internal static PInvokeWindowsCaptureTargetNativeApi Instance { get; } = new();
@@ -118,44 +127,60 @@ internal sealed class PInvokeWindowsCaptureTargetNativeApi
         ulong windowHandle,
         out string value)
     {
-        value = string.Empty;
-        if (windowHandle == 0)
-        {
-            return WindowsCaptureObservationReadState.Unknown;
-        }
-
-        var buffer = ArrayPool<char>.Shared.Rent(MaximumWindowTextCharacters);
-        try
-        {
-            Marshal.SetLastPInvokeError(0);
-            var copied = WindowsCaptureTargetMethods.GetWindowText(
-                ToNativeHandle(windowHandle),
-                buffer,
-                MaximumWindowTextCharacters);
-            if (copied == 0)
-            {
-                return Marshal.GetLastPInvokeError() == 0
-                    ? WindowsCaptureObservationReadState.Absent
-                    : WindowsCaptureObservationReadState.Unknown;
-            }
-
-            if (copied < 0 || copied >= MaximumWindowTextCharacters - 1)
-            {
-                return WindowsCaptureObservationReadState.Unknown;
-            }
-
-            value = new string(buffer, 0, copied);
-            return WindowsCaptureObservationReadState.Present;
-        }
-        finally
-        {
-            ArrayPool<char>.Shared.Return(buffer, clearArray: true);
-        }
+        return _windowTitleReader.ReadWindowTitle(windowHandle, out value);
     }
 
     private static IntPtr ToNativeHandle(ulong windowHandle)
     {
         return new IntPtr(unchecked((long)windowHandle));
+    }
+}
+
+internal sealed class PInvokeWindowsCaptureWindowTextBufferApi
+    : IWindowsCaptureWindowTextBufferApi
+{
+    private PInvokeWindowsCaptureWindowTextBufferApi()
+    {
+    }
+
+    internal static PInvokeWindowsCaptureWindowTextBufferApi Instance { get; } =
+        new();
+
+    public WindowsCaptureWindowTextBufferReadResult ReadWindowText(
+        ulong windowHandle,
+        char[] buffer)
+    {
+        ArgumentNullException.ThrowIfNull(buffer);
+        if (windowHandle == 0
+            || buffer.Length
+                < FailStopWindowsCaptureWindowTitleReader
+                    .MaximumWindowTextCharacters)
+        {
+            return WindowsCaptureWindowTextBufferReadResult.Unknown;
+        }
+
+        Marshal.SetLastPInvokeError(0);
+        var copied = WindowsCaptureTargetMethods.GetWindowText(
+            new IntPtr(unchecked((long)windowHandle)),
+            buffer,
+            FailStopWindowsCaptureWindowTitleReader
+                .MaximumWindowTextCharacters);
+        if (copied == 0)
+        {
+            return Marshal.GetLastPInvokeError() == 0
+                ? WindowsCaptureWindowTextBufferReadResult.Absent
+                : WindowsCaptureWindowTextBufferReadResult.Unknown;
+        }
+
+        if (copied < 0
+            || copied
+                >= FailStopWindowsCaptureWindowTitleReader
+                    .MaximumWindowTextCharacters - 1)
+        {
+            return WindowsCaptureWindowTextBufferReadResult.Unknown;
+        }
+
+        return WindowsCaptureWindowTextBufferReadResult.Present(copied);
     }
 }
 

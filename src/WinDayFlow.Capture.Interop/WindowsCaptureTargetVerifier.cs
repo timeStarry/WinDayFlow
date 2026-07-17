@@ -367,7 +367,7 @@ public sealed class WindowsCaptureTargetVerifier
         }
     }
 
-    private static bool IsRecoverableNativeReadException(Exception exception)
+    internal static bool IsRecoverableNativeReadException(Exception exception)
     {
         return exception is not AccessViolationException
             and not OutOfMemoryException

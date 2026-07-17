@@ -35,21 +35,25 @@ one unique, lazily started, dedicated background window-title worker and one
 private native text buffer. The worker has these states:
 
 ```text
-Idle -> Queued -> InFlight -> Idle
-                    |
-                    +-> Poisoned
+Idle -> Queued -> InFlight -> Completing -> Idle
+                    |           |
+                    +-----------+-> Poisoned
 Any live state -> Stopping
 ```
 
-Only `Idle` admits a request. There is no backlog behind `Queued` or `InFlight`;
-another caller receives `Unknown` immediately. A request carries only its HWND,
-attempt identity, monotonic deadline, and completion state. It does not retain
-the verifier's opened process handle.
+Only `Idle` admits a request. There is no backlog behind `Queued`, `InFlight`,
+or `Completing`; another caller receives `Unknown` immediately. A request
+carries only its HWND, attempt identity, monotonic deadline, result state, and
+private persistent completion signal. It does not retain the verifier's opened
+process handle.
 
 Every admitted request has a 100 ms wall-clock safety deadline measured from a
-monotonic `Stopwatch` timestamp. The deadline controls the caller-visible read,
-not the execution time of `GetWindowTextW`, which Windows does not make
-cancelable through this API.
+monotonic `Stopwatch` timestamp created before admission and worker startup.
+The caller waits on the request-private signal outside the worker-state lock.
+The deadline therefore controls the caller-visible read even while the worker
+is in native code or constructing a result; it does not bound the execution
+time of `GetWindowTextW`, which Windows does not make cancelable through this
+API.
 
 ### Queue Expiry and Permanent Fail-Stop
 
@@ -57,16 +61,27 @@ Expiry depends on whether native execution began:
 
 - If the request times out while `Queued`, it may be removed before execution
   and return the worker to `Idle`. A later request may then be admitted.
-- If the request times out after entering `InFlight`, the reader permanently
-  enters `Poisoned`. Every title read for the rest of that process returns
-  `Unknown` immediately. The implementation never creates a replacement worker
-  or allows new native title work behind the blocked call.
+- If the request times out after entering `InFlight` or `Completing`, the reader
+  permanently enters `Poisoned`. Every ordinary title read for the rest of that
+  process returns `Unknown` immediately. The implementation never creates a
+  replacement worker or allows new native title work behind the blocked call.
 
 When an expired in-flight native call eventually returns, its output is late and
-is discarded. The reader checks request identity, state, and deadline before
-building a managed string and again before committing completion. A late result
-is never retained, completed, returned, or published into a newer observation.
-The worker exits after it regains control from a poisoned call.
+is discarded. The reader atomically claims `Completing` only when request
+identity, state, and deadline are still current, then performs the bounded local
+string construction and buffer clear outside the worker-state lock. A native
+result that arrives after expiry never reaches string construction. If local
+construction began before expiry but crosses the deadline, the caller may
+still expire `Completing`; the temporary process-local value is discarded and
+cannot enter the request, its success completion, a verifier result, or a newer
+observation. Final commit rechecks request identity, `Completing`, reader state,
+and deadline. The worker exits after it regains control from a poisoned call.
+
+Recoverable worker and native-read exceptions become `Unknown`. Fatal runtime
+exceptions keep the ADR 0005 boundary: the worker captures and rethrows the
+original exception to the current caller. A fatal exception that arrives only
+after its caller timed out becomes sticky and is rethrown by the next title
+read; it is never disguised as an ordinary observation failure.
 
 The worker owns one fixed `char[32768]` buffer. It clears that buffer before a
 native read and, after the native call returns control, in `finally` before the
@@ -152,6 +167,10 @@ Deterministic title-reader tests must prove:
 - a late sensitive value cannot build a managed string, complete an expired
   request, or publish, and the 32K buffer is cleared after the native call
   returns;
+- a blocked local value construction cannot hold the caller or `Dispose` past
+  their configured waits, and a construction that crosses expiry cannot commit;
+- fatal native, construction, and post-timeout failures remain fatal rather
+  than being normalized to `Unknown`;
 - concurrent readers cannot form a queue behind admitted work;
 - disposal remains bounded around a blocked native call; and
 - verifier process-handle ownership is released after the title deadline.
@@ -180,10 +199,13 @@ the QiDayflow-derived file set or provenance manifest hashes.
 
 A blocked title call no longer makes its verifier caller wait for native
 completion: once the 100 ms monotonic deadline is observed, the read fails
-closed, subject to normal thread-scheduling latency. A late title cannot become
-current evidence. The cost is intentionally strict: one in-flight timeout
-disables title observation until process restart, and the blocked background
-worker may remain inside Windows until the native call returns.
+closed, subject to one-time worker startup and normal operating-system
+scheduling latency; this is a safety deadline, not a hard real-time guarantee.
+A late title cannot become current evidence. The cost is intentionally strict:
+one in-flight or completing timeout disables ordinary title observation until
+process restart, and the background worker may remain inside Windows or a
+bounded local completion step after the caller has returned. Fatal failures
+remain distinguishable from this ordinary fail-closed result.
 
 Location changes now revoke stale managed observation immediately instead of
 waiting for a poll. Conservative filtering may cause extra re-observation for a

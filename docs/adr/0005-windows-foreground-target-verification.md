@@ -131,13 +131,19 @@ receives a 100 ms monotonic wall-clock deadline.
 
 A request that expires before execution may be removed from `Queued` and return
 the worker to `Idle`. Once native execution is `InFlight`, a timeout permanently
-poisons and fail-stops that process-wide reader. Every later title read in the
-process returns `Unknown`, and no replacement worker is created. If the blocked
-native call eventually returns, its title is discarded: the reader neither
-builds nor retains the string, never completes or publishes the expired result,
-and clears the private 32K buffer. The request contains an HWND but no process
-handle, so the verifier can release its opened process handle as soon as the
-deadline returns `Unknown`.
+poisons and fail-stops that process-wide reader. The same applies if the caller
+expires the lock-free local `Completing` phase. Every later ordinary title read
+in the process returns `Unknown`, and no replacement worker is created. A native
+result that arrives only after expiry never builds a string. If bounded local
+construction began before the deadline but crosses it, the temporary value is
+discarded before request completion or publication. The private 32K buffer is
+cleared after native use without racing Windows, and neither native execution
+nor local construction holds the caller's completion signal or the reader-state
+lock. The request contains an HWND but no process handle, so the verifier can
+release its opened process handle as soon as the deadline returns `Unknown`.
+Recoverable failures remain field-scoped `Unknown`; fatal failures are rethrown
+to the current caller, or retained as a sticky fatal for the next read when they
+arrive only after timeout.
 
 If the observed executable basename is `ApplicationFrameHost.exe`, the complete
 verification returns `Unknown` and clears the remembered target. Live capture
@@ -236,8 +242,9 @@ for signer proof.
 Deterministic title-reader tests cover dedicated-worker execution, successful
 buffer clearing, queued deadline expiry returning to `Idle`, in-flight timeout
 poisoning, process-lifetime `Unknown` after poison, late-result rejection,
-one-request concurrency, bounded teardown, and prompt verifier process-handle
-release after timeout. ADR 0006/0007 tests also cover the exact
+blocked `Completing`, fatal and recoverable failures, single-worker reuse,
+one-request concurrency, self-disposal, bounded teardown, and prompt verifier
+process-handle release after timeout. ADR 0006/0007 tests also cover the exact
 `0x800B..0x800C` hook, object filters, location-event invalidation, and
 generation races during target/title sampling.
 
