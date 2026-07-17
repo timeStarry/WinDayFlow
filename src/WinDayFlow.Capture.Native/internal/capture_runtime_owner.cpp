@@ -24,6 +24,7 @@ bool CaptureRuntimeOwner::Start(CaptureCommandAdmissionPermit permit,
 
   stop_requested_ = false;
   pause_requested_ = false;
+  pause_epoch_ = 0;
   replacement_token_.reset();
   AdvanceControlSequenceUnderLock();
   worker_exited_ = false;
@@ -53,7 +54,10 @@ CaptureRuntimePauseResult CaptureRuntimeOwner::RequestPause() {
         result = CaptureRuntimePauseResult::kAlreadyPaused;
       } else {
         pause_requested_ = true;
-        replacement_token_.reset();
+        // Preserve an unconsumed Resume token across a folded second Pause.
+        if (pause_epoch_ != std::numeric_limits<uint64_t>::max()) {
+          ++pause_epoch_;
+        }
         static_cast<void>(AdvanceOwnerEpochUnderLock());
         AdvanceControlSequenceUnderLock();
         result = CaptureRuntimePauseResult::kPauseRequested;
@@ -86,6 +90,17 @@ bool CaptureRuntimeOwner::Resume(CaptureCommandAdmissionPermit permit) {
   }
   state_changed_.notify_all();
   return true;
+}
+
+void CaptureRuntimeOwner::NotifyAuthorizationChanged() {
+  {
+    std::lock_guard lock(mutex_);
+    if (joined_ || worker_exited_) {
+      return;
+    }
+    AdvanceControlSequenceUnderLock();
+  }
+  state_changed_.notify_all();
 }
 
 CaptureRuntimeStopResult CaptureRuntimeOwner::RequestStop() {
@@ -218,8 +233,9 @@ uint64_t CaptureRuntimeOwner::owner_epoch() const {
 
 CaptureRuntimeControlSnapshot CaptureRuntimeOwner::ControlSnapshotUnderLock()
     const {
-  return CaptureRuntimeControlSnapshot{control_sequence_, stop_requested_,
-                                       pause_requested_, replacement_token_};
+  return CaptureRuntimeControlSnapshot{control_sequence_, pause_epoch_,
+                                       stop_requested_, pause_requested_,
+                                       replacement_token_};
 }
 
 void CaptureRuntimeOwner::WorkerMain(Worker worker,

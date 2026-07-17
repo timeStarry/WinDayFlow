@@ -166,6 +166,12 @@ finalization, privacy Stop discard, access-loss/topology behavior, bounded
 shutdown, stale staging recovery, committed-event replay/idempotency, disk-full
 cleanup, and managed generation ordering.
 
+ADR 0011 subsequently implements the standalone, fake-backed orchestration
+worker, per-stage authority checks, Pause/Resume/Stop partial handling,
+topology rebuild, event linearization, and retryable compensation. C ABI
+ownership, dynamic privacy Pause/Stop policy, durable recovery/replay, and live
+Desktop Duplication evidence remain closed activation gates.
+
 ## Verification
 
 Native tests now cover:
@@ -212,6 +218,6 @@ still require a performance ADR before release.
 Whole-directory rename and event reservation make publication recoverable, but
 crash recovery and replay are not yet implemented. Reparse rejection reduces
 path redirection risk but does not replace creating the product evidence root
-with a reviewed current-user ACL. Most importantly, component tests do not
-replace the pending worker and C ABI lifecycle integration. The UI remains
-disabled until that final boundary is proven.
+with a reviewed current-user ACL. ADR 0011 adds component orchestration, but it
+does not replace C ABI lifecycle integration or live-system proof. The UI
+remains disabled until that final boundary is proven.

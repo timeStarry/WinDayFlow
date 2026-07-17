@@ -146,6 +146,18 @@ uint64_t CaptureEventQueue::PushReserved(
     wdf_capture_state state, wdf_capture_reason reason, wdf_capture_error error,
     std::string detail, int64_t timestamp_unix_ms,
     uint64_t persistence_generation, uint64_t target_epoch) {
+  return PushReservedValidated(reservation, kind, state, reason, error,
+                               std::move(detail), timestamp_unix_ms,
+                               persistence_generation, target_epoch, nullptr,
+                               nullptr);
+}
+
+uint64_t CaptureEventQueue::PushReservedValidated(
+    CaptureEventReservation* reservation, wdf_capture_event_kind kind,
+    wdf_capture_state state, wdf_capture_reason reason, wdf_capture_error error,
+    std::string detail, int64_t timestamp_unix_ms,
+    uint64_t persistence_generation, uint64_t target_epoch,
+    CaptureEventPostAppendValidator validator, void* validator_context) {
   if (reservation == nullptr || !*reservation ||
       reservation->issuer_id_ != instance_id_) {
     return 0;
@@ -171,9 +183,9 @@ uint64_t CaptureEventQueue::PushReserved(
     return 0;
   }
 
-  const uint64_t sequence =
-      AppendUnderLock(kind, state, reason, error, std::move(detail),
-                      timestamp_unix_ms, persistence_generation, target_epoch);
+  const uint64_t sequence = AppendUnderLock(
+      kind, state, reason, error, std::move(detail), timestamp_unix_ms,
+      persistence_generation, target_epoch, validator, validator_context);
   if (sequence == 0) {
     return 0;
   }
@@ -229,7 +241,8 @@ uint64_t CaptureEventQueue::AppendUnderLock(
     wdf_capture_event_kind kind, wdf_capture_state state,
     wdf_capture_reason reason, wdf_capture_error error, std::string detail,
     int64_t timestamp_unix_ms, uint64_t persistence_generation,
-    uint64_t target_epoch) noexcept {
+    uint64_t target_epoch, CaptureEventPostAppendValidator validator,
+    void* validator_context) noexcept {
   if (closed_ || sequence_exhausted_) {
     return 0;
   }
@@ -252,6 +265,13 @@ uint64_t CaptureEventQueue::AppendUnderLock(
     }
     events_.push_back(std::move(event));
   } catch (...) {
+    return 0;
+  }
+
+  // The validator load is the publication linearization point. The event stays
+  // hidden behind mutex_ until that load succeeds.
+  if (validator != nullptr && !validator(validator_context)) {
+    events_.pop_back();
     return 0;
   }
 

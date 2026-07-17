@@ -65,6 +65,7 @@ class CaptureEventReservation {
 };
 
 using CaptureEventAppendHook = void (*)();
+using CaptureEventPostAppendValidator = bool (*)(void* context) noexcept;
 
 class CaptureEventQueue {
  public:
@@ -83,6 +84,12 @@ class CaptureEventQueue {
                         std::string detail, int64_t timestamp_unix_ms,
                         uint64_t persistence_generation = 0,
                         uint64_t target_epoch = 0);
+  uint64_t PushReservedValidated(
+      CaptureEventReservation* reservation, wdf_capture_event_kind kind,
+      wdf_capture_state state, wdf_capture_reason reason,
+      wdf_capture_error error, std::string detail, int64_t timestamp_unix_ms,
+      uint64_t persistence_generation, uint64_t target_epoch,
+      CaptureEventPostAppendValidator validator, void* validator_context);
   bool CancelReservation(CaptureEventReservation* reservation);
 
   CaptureEventReadResult Read(uint32_t timeout_ms, wdf_capture_event_v1* event,
@@ -100,7 +107,9 @@ class CaptureEventQueue {
                            wdf_capture_reason reason, wdf_capture_error error,
                            std::string detail, int64_t timestamp_unix_ms,
                            uint64_t persistence_generation,
-                           uint64_t target_epoch) noexcept;
+                           uint64_t target_epoch,
+                           CaptureEventPostAppendValidator validator = nullptr,
+                           void* validator_context = nullptr) noexcept;
 
   mutable std::mutex mutex_;
   std::condition_variable event_available_;

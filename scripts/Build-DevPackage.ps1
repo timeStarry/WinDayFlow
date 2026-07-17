@@ -89,8 +89,9 @@ try {
     New-Item -ItemType Directory -Path $outputRootPath -Force | Out-Null
 
     Write-Warning (
-        'LOCAL USE ONLY: the current WinUI Engineering Preview terms prohibit ' +
-        'sharing, publishing, distributing, and live use of this development bundle.')
+        'DEVELOPMENT/TEST USE ONLY: the current WinUI Engineering Preview terms ' +
+        'prohibit live use and third-party sharing, publishing, distribution, ' +
+        'leasing, or transfer of this development bundle.')
 
     if ($null -ne $nativeDllPath)
     {
@@ -223,7 +224,7 @@ try {
         FileCount = $packageFiles.Count
         CompiledXamlCount = $compiledXamlCount
         DistributionNoticeCount = $distributionSourceFiles.Count
-        Distribution = 'LOCAL USE ONLY - DO NOT SHARE, PUBLISH, OR DISTRIBUTE'
+        Distribution = 'DEVELOPMENT/TEST USE ONLY - NO LIVE USE OR THIRD-PARTY DISTRIBUTION'
         SizeMiB = [Math]::Round($packageBytes / 1MB, 2)
     }
 }

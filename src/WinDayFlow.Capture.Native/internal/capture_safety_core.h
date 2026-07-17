@@ -190,6 +190,7 @@ class CaptureSafetyCore {
       const CaptureCommandAdmission& admission, CaptureCommand expected_command,
       uint64_t runtime_owner_epoch,
       CaptureCommandAdmissionPermit* permit) const;
+  void InvalidatePendingCommandAdmission() noexcept;
 
   std::optional<PersistenceToken> MintPersistenceToken(
       const CaptureTargetIdentity& observed_target) const;

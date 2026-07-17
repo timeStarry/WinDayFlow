@@ -79,11 +79,12 @@ Windows technology-stack decision.
   artifact when any required file is absent.
 - The current development bundle resolves the transitive
   `Microsoft.WindowsAppSDK.WinUI` 2.2.1 package. Its Engineering Preview terms
-  limit the bundle to local development and testing and prohibit live use,
-  sharing, publishing, and distribution. The directory and ZIP must remain on
-  the build machine. External testing and production release are blocked until
-  a production-redistributable WinUI/Windows App SDK servicing release is
-  selected and its terms are verified, or explicit permission is obtained.
+  limit use to development and testing on Windows and prohibit live use. The
+  licensee may install multiple copies for those purposes, but must not share,
+  publish, distribute, lease, or transfer the component to a third party.
+  Third-party testing and production release are blocked until a
+  production-redistributable WinUI/Windows App SDK servicing release is selected
+  and its terms are verified, or explicit permission is obtained.
 - Resolving that distribution gate must stay within the WinUI 3 and Windows App
   SDK stack, normally by moving to a production-redistributable servicing
   release. Replacing WinUI with a cross-platform UI framework is not a licensing
@@ -302,18 +303,19 @@ through one Windows event owner thread. Its hidden top-level HWND receives
 display-topology, current-session WTS, and suspend/resume notifications, but the
 monitor is also not connected to the App or native owner. Image-bound
 publisher-signer verification, unique hosted-app child attribution,
-presentation notifications, periodic storage refresh, writer-side display
-stage orchestration and generation/permit enforcement, and the C ABI worker remain
+presentation notifications, periodic storage refresh, C ABI worker/state
+ownership, run-ID publication, and the dynamic privacy Pause/Stop policy remain
 activation gates.
 The bounded title-read, conservative window-location invalidation,
 display-scoped authorization, strict DXGI resolver, native target observer, and
-pre/post fingerprinted frame-source gates are closed, but no C ABI worker yet
-composes them with held stage permits. The DXGI/WIC/Media Foundation components
-are not connected to the lifecycle boundary. The native foundation does not reference
-managed UI or domain assemblies. The App project may reference
-concrete adapters for dependency-injection registration; feature code consumes
-their inward-facing contracts. The domain project must not reference WinUI,
-SQLite, HTTP, Windows App SDK, or the native capture implementation.
+pre/post fingerprinted frame-source gates are closed. A standalone worker now
+composes them with held stage permits and the DXGI/WIC/Media Foundation/storage
+components, but it is not connected to the C ABI lifecycle boundary. The native
+foundation does not reference managed UI or domain assemblies. The App
+project may reference concrete adapters for dependency-injection registration;
+feature code consumes their inward-facing contracts. The domain project must
+not reference WinUI, SQLite, HTTP, Windows App SDK, or the native capture
+implementation.
 
 ## 8. Core Domain Model
 
@@ -469,6 +471,13 @@ in-memory H.264 writer, privacy-safe manifest, whole-directory atomic store,
 required-event reservation, authorization-epoch post-check, and runtime token
 mailbox. These components are independently tested but remain disconnected from
 C ABI Start/Resume, so they do not activate capture.
+
+[ADR 0011](adr/0011-authority-checked-native-capture-worker-orchestration.md),
+"Authority-Checked Native Capture Worker Orchestration," composes those
+components behind a fakeable worker backend, enforces fresh target/permit guards
+for each stage, defines Pause epochs and graceful Stop, and makes validated
+required-event insertion the final publication linearization point. The worker
+and real Windows adapter remain behind the closed C ABI capability boundary.
 
 `CaptureStatus` is a stable machine-readable contract, not just display text.
 It carries an unsigned 64-bit `Sequence`, `CaptureReasonCode`, and
@@ -643,14 +652,23 @@ v1 foundation under `WinDayFlow.Capture.Native`. Its implemented boundary has:
   and retains retryable compensation ownership until the committed event is
   acknowledged;
 - queue-instance-bound, move-only required-event reservations whose capacity,
-  sequence, and drop accounting are committed only after a successful append;
+  sequence, and drop accounting are committed only after a successful append,
+  plus a hidden validated append whose final epoch load is the artifact/event
+  publication linearization point;
 - issuer-bound authorization-epoch post-checks for already-held permits and a
   runtime Pause/Resume mailbox that transfers initial and replacement
-  persistence tokens by value, while preventing a new run until all old Stop
-  waiters have drained; and
+  persistence tokens by value, retains merged Pause transitions with a per-run
+  Pause epoch, and wakes promptly on authorization changes, while preventing a
+  new run until all old Stop waiters have drained;
+- a fake-backed `CaptureWorker` and real Windows adapter that acquire a fresh
+  target observation and permit before every sensitive stage, recheck target
+  and epoch afterward, keep one token per chunk, clear owned CPU evidence
+  buffers, finalize authorized partial chunks, and retain retryable compensation
+  when persistence or event publication fails; and
 - explicit nonblocking stop, bounded wait-for-join, and one blocking destroy for
-  each valid handle, coordinated by a single-flight managed owner that applies
-  Block/revoke before stop, join, and exactly-once destroy.
+  each valid handle. Graceful user Stop invalidates an unconsumed command stamp,
+  lets the worker finish and join, and revokes afterward; privacy revoke still
+  closes persistence first so stale work is discarded.
 
 This is a real component-level writer foundation, not a usable recorder. The
 native and managed tests prove target/PID/display reuse rejection, target and
@@ -660,8 +678,10 @@ strict no-fallback DXGI output selection, callback pre/post-commit races, and
 Block-before-Allow acknowledgement. Native component tests additionally prove
 real in-memory H.264 encode/decode, bounded DXGI/WIC geometry, handle-bound
 whole-directory publication and retryable rollback, typed privacy-safe
-manifests, and cross-instance-safe event reservation. They do not prove the
-still-missing C ABI worker and end-to-end live desktop write path.
+manifests, cross-instance-safe event reservation, and deterministic worker
+orchestration across Pause/Resume/Stop, every invalidation stage, topology
+rebuild, event failure, and compensation retry. They do not prove C ABI worker
+ownership or the end-to-end live desktop write path.
 
 The complete live mask requires privacy guard, event queue, target-scoped and
 display-scoped authorization, persistence-generation barrier, deterministic
@@ -689,20 +709,22 @@ image, and hosted windows must be attributed to one real child application.
 Display-topology, current-session WTS, and suspend/resume invalidation now exist;
 presentation notifications and periodic storage refresh remain missing. The
 selected HMONITOR/device key now has both a strict resolver and a frame source
-that revalidates the complete binding before and after acquisition. The safety
-core exposes a callback-epoch post-check for each held phase, but the pending C
-ABI worker must actually compose target observation and a fresh permit around
+that revalidates the complete binding before and after acquisition. The
+standalone worker now composes target observation and a fresh permit around
 acquisition, WIC, H.264, staging, rename, and reserved-event publication.
-Filesystem interruption, disk-full, stale-staging recovery, committed-event
-replay, owner-epoch races, user-Pause partial finalization, privacy-Stop discard,
-and Windows lifecycle tests must then prove that end-to-end path. Until those gates
+Remaining gates are C ABI instance ownership, run-ID-guarded state/error
+publication, explicit resumable-privacy-Pause versus sticky-Stop policy,
+filesystem interruption and disk-full integration, durable compensation across
+object/process loss, stale-staging recovery, committed-event replay, owner-epoch
+races, and consent-gated Windows lifecycle/live-desktop tests. Until those gates
 pass, no live frame or context metadata can be persisted and App DI must
 continue to register `DenyCaptureRuntimeAuthorization` and
 `UnavailableCaptureBackend`.
 
-The safety core, target observer, runtime mailbox, and event reservation are
-original WinDayFlow work. The atomic store, manifest, DXGI frame source, WIC
-scaler, and in-memory H.264 writer are derived from the reviewed QiDayflow
+The safety core, target observer, runtime mailbox, event reservation, worker
+orchestration, and Windows backend adapter are original WinDayFlow work. The
+atomic store, manifest, DXGI frame source, WIC scaler, and in-memory H.264 writer
+are derived from the reviewed QiDayflow
 `capture_service.cpp`; their source headers, exact hashes, pinned revision, and
 MIT notice are recorded in the provenance ledger and manifest.
 
@@ -1300,18 +1322,20 @@ the user explicitly enables a future telemetry feature.
 
 ### Native
 
-- The current native foundation is exercised by thirteen CTest executables:
+- The current native foundation is exercised by fourteen CTest executables:
   `pixel_buffer_tests`, `atomic_chunk_store_tests`, `capture_policy_tests`,
   `capture_event_queue_tests`, `capture_safety_core_tests`,
-  `chunk_manifest_tests`, `dxgi_output_resolver_tests`,
+  `capture_worker_tests`, `chunk_manifest_tests`, `dxgi_output_resolver_tests`,
   `dxgi_desktop_frame_source_tests`,
   `windows_capture_target_observer_tests`, `wic_bgra_scaler_tests`,
   `mf_h264_chunk_writer_tests`, `capture_c_api_tests`, and the C17
   `c_header_compatibility_test`. These tests prove the current ABI, policy,
   queue, C header, pixel/runtime safety, real in-memory H.264 round trip,
   DXGI/WIC bounds, handle-bound transactional storage, typed manifests, and
-  retryable compensation. They intentionally do not capture the user's live
-  desktop and do not prove a C ABI frame-to-artifact worker. The
+  retryable compensation. The worker test adds deterministic per-stage
+  invalidation, Pause/Resume/Stop, topology, event-linearization, and rollback
+  coverage. These tests intentionally do not capture the user's live desktop or
+  prove C ABI ownership of the frame-to-artifact worker. The
   native build script explicitly
   selects an installed Visual Studio generator, filters ambient
   `CMAKE_GENERATOR*` overrides, and retains x64 multi-configuration output.
@@ -1401,8 +1425,8 @@ Phases are release gates, not a claim of strict implementation order. As of
 2026-07-17, the no-capture manual-timeline portions of Phases 2 and 3 plus
 schema v4, consent policy v2, persistent retention/exclusion/session choices,
 and user-authored typed exclusion rules are implemented. Phase 1 also has
-Accepted ADRs 0001 through 0010, verified QiDayflow source provenance, the x64
-C++20 C ABI v1 foundation, thirteen native tests, the display-scoped safety
+Accepted ADRs 0001 through 0011, verified QiDayflow source provenance, the x64
+C++20 C ABI v1 foundation, fourteen native tests, the display-scoped safety
 core, managed asynchronous owner/quiescence contract, owner-bound single-use
 Start/Resume admission, the inactive runtime privacy coordinator, the pure
 exclusion matcher, the on-demand Windows privacy probe, and the synchronous
@@ -1416,14 +1440,17 @@ window-location invalidation close those two activation gates. A hidden
 top-level notification window now adds display-topology, current-session WTS,
 and suspend/resume invalidation with independent session/power holds, while a
 callback-safe native gate prevents old Allow updates from reopening admission
-before the matching Block acknowledgement. The writer-component slice now adds
+before the matching Block acknowledgement. The native writer slice now adds
 strict target/DXGI observation, bounded WIC, real in-memory H.264, privacy-safe
-manifests, and compensating whole-directory publication. Image-bound
+manifests, compensating whole-directory publication, per-stage authority
+guards, Pause epochs, and a deterministic fake-backed orchestration worker with
+a real Windows adapter. Image-bound
 publisher-signer verification, unique child attribution, presentation
-notifications, periodic storage refresh, C ABI worker orchestration and
-held-permit phase enforcement, stale-artifact recovery/replay, consent-gated
-live Desktop Duplication smoke, and the evidence-Pause versus sticky-Stop
-dynamic policy remain open activation gates. `ScreenCapture`, `H264Chunks`,
+notifications, periodic storage refresh, C ABI worker/state ownership,
+run-ID-guarded terminal publication, durable compensation and stale-artifact
+recovery/replay, consent-gated live Desktop Duplication smoke, and the
+evidence-Pause versus sticky-Stop dynamic policy remain open activation gates.
+`ScreenCapture`, `H264Chunks`,
 `EvidenceExtraction`, and managed-adapter runtime activation remain disabled,
 so no phase exit criterion is met.
 
@@ -1561,15 +1588,16 @@ and uninstall checklist on the supported Windows baseline.
 ## 23. Deferred Decisions
 
 These decisions should be resolved through small prototypes or ADRs rather than
-assumption:
+assumptions:
 
 - Which additive fields and capabilities enter compatible C ABI v1 revisions,
   and which compatibility break would justify a v2 ABI and replacement ADR.
 - The exact production-redistributable Windows App SDK and WinUI version and
   servicing channel within the fixed Windows 10 version 1809-or-later baseline;
-  the current WinUI 2.2.1 Engineering Preview dependency is not a candidate for
-  production release. This choice is between WinUI/Windows App SDK servicing
-  releases, not UI technology stacks, and WinDayFlow remains MIT-licensed.
+  the current `Microsoft.WindowsAppSDK.WinUI` 2.2.1 Engineering Preview
+  dependency is not a candidate for production release. This choice is between
+  WinUI/Windows App SDK servicing releases, not UI technology stacks, and
+  WinDayFlow remains MIT-licensed.
 - MSIX-only distribution versus an additional unpackaged installer.
 - Exact local provider process lifecycle and sandboxing.
 - Whether embeddings materially improve retrieval beyond FTS5 and structured

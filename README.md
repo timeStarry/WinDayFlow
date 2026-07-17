@@ -65,14 +65,18 @@ contains:
   runtime owner epoch; capability bit 11 and a dedicated C ABI export now let a
   Windows callback close native command and persistence admission immediately,
   without waiting for an already-held persistence permit;
-- real but not yet C-ABI-connected native writer components: a strict
-  no-fallback HWND/PID/process-creation/display observer, pre/post fingerprinted
-  DXGI Desktop Duplication source with an 8K/126.6 MiB BGRA ceiling, bounded
+- real but not yet C-ABI-connected native writer components and orchestration:
+  a strict no-fallback HWND/PID/process-creation/display observer with a
+  pre/post-fingerprinted DXGI Desktop Duplication source and an 8K/126.6 MiB
+  BGRA ceiling, bounded
   even-dimension WIC scaler, 64 MiB fail-closed in-memory Media Foundation H.264
   writer, typed privacy-safe manifest, handle-identity-bound whole-directory
   chunk store with observable retryable rollback, queue-bound required-event
   reservation, and a Pause/Resume control mailbox that transfers persistence
-  tokens by value;
+  tokens by value; the fake-backed worker now guards every stage with fresh
+  target observation and persistence authority, preserves merged Pause events,
+  finalizes valid partial chunks, compensates stale filesystem output, and uses
+  a validated hidden-event append as the final publication linearization point;
 - a managed P/Invoke adapter with x64 ABI layout checks, safe-handle ownership,
   bounded event polling, privacy-revision updates, complete display-scoped
   safety-capability negotiation, issuer-bound opaque admission stamps,
@@ -122,25 +126,24 @@ Manual activities, consent, privacy settings, and user-authored exclusion rules
 are stored at `%LOCALAPPDATA%\WinDayFlow\Data\windayflow.db` and survive
 application restarts.
 The C-ABI-connected DXGI/WIC/Media Foundation worker and persistence path,
-analysis
-queue and providers, generated Daily and Weekly views, journal editing, and
-timeline-grounded chat are **not integrated yet**. The foreground verifier and
-event monitor are inactive foundations, not a live activation claim:
+analysis queue and providers, generated Daily and Weekly views, journal editing,
+and timeline-grounded chat are **not integrated yet**. The foreground verifier
+and event monitor are inactive foundations, not a live activation claim:
 image-bound publisher-signer verification, unique hosted-app attribution,
 presentation notifications, periodic storage refresh, worker-side stage
-orchestration and generation/permit revalidation, crash recovery/replay, and
-real consent-gated Desktop Duplication smoke remain open gates. The bounded
-title-read, conservative window-location
+orchestration and generation/permit revalidation are implemented, while C ABI
+worker ownership, run-ID-guarded state publication, resumable privacy-policy
+commands, crash recovery/replay, and real consent-gated Desktop Duplication
+smoke remain open gates. The bounded title-read, conservative window-location
 invalidation, display-topology/current-session/power event source,
 display-scoped authorization, callback-time native admission closure, and
-strict no-fallback DXGI output resolver gates are closed. The new native frame
-source revalidates the resolved output before and after acquisition, but no C
-ABI worker yet composes it with the target observer and stage permits. Callback
-closure denies new native permits
-and command admission, but it cannot interrupt a permit already held by a
-writer stage. The following generation-bound Block acknowledgement drains that
-boundary; the pending worker must use the implemented epoch post-check at every
-acquisition, encode, metadata, rename, and committed-event phase.
+strict no-fallback DXGI output resolver gates are closed. The standalone native
+worker composes the frame source with target observation, WIC, H.264, atomic
+storage, fresh per-stage permits, post-operation epoch/target checks, and
+compensating event publication. Callback closure cannot interrupt a Windows or
+codec call already in progress, but it invalidates that stage's post-check; no
+result advances unless the same target and permit remain current. This worker
+is not yet owned or driven by a C ABI capture instance.
 Owner-bound Start/Resume admission is implemented:
 the Application service obtains a single-use opaque stamp, rechecks persisted
 and runtime authorization, and the native owner atomically consumes the stamp
@@ -186,6 +189,10 @@ The [transactional native capture writer-components ADR](docs/adr/0010-transacti
 records strict native target/DXGI observation, bounded WIC and in-memory H.264,
 privacy-safe manifests, whole-directory publication, event reservation, runtime
 token handoff, and the remaining C ABI activation boundary.
+The [authority-checked native worker ADR](docs/adr/0011-authority-checked-native-capture-worker-orchestration.md)
+records per-stage target/permit guards, Pause epochs, graceful Stop ordering,
+validated event linearization, compensation retention, the real Windows
+adapter, and the remaining run-state and live-activation gates.
 
 ## Platform Support
 
@@ -225,7 +232,7 @@ pwsh -File .\scripts\Build-Native.ps1 -Configuration Debug
 
 `Build-Native.ps1` selects an installed Visual Studio generator supported by
 CMake, ignores ambient `CMAKE_GENERATOR*` overrides, preserves x64
-multi-configuration output, builds the C++20 DLL, and runs all thirteen native C
+multi-configuration output, builds the C++20 DLL, and runs all fourteen native C
 and C++ tests with per-test timeouts. Use `-Fresh` to recreate CMake state, or
 `-Generator` to select a specific installed Visual Studio generator.
 
@@ -258,11 +265,13 @@ artifacts/dev/WinDayFlow-dev-x64/
 artifacts/dev/WinDayFlow-dev-x64.zip
 ```
 
-These artifacts are for local development and manual testing on the machine
-where they were built. Do not share, publish, distribute, upload, or deploy the
-directory or ZIP while it contains `Microsoft.WindowsAppSDK.WinUI` 2.2.1. The
-bundle includes [DEV_BUNDLE_LOCAL_ONLY.txt](DEV_BUNDLE_LOCAL_ONLY.txt) as an
-explicit top-level warning.
+These artifacts are only for development and testing on Windows under the
+selected dependency's license and must not be used in a live operating
+environment. The license permits the licensee to install multiple copies for
+those purposes; it prohibits sharing, publishing, distributing, leasing, or
+transferring `Microsoft.WindowsAppSDK.WinUI` 2.2.1 to a third party. The bundle
+includes [DEV_BUNDLE_LOCAL_ONLY.txt](DEV_BUNDLE_LOCAL_ONLY.txt) as an explicit
+top-level warning.
 
 Launch `WinDayFlow.App.exe` from the generated directory. When using the ZIP,
 extract it completely before launching the executable.
@@ -298,10 +307,10 @@ decision. Dependency terms are handled by choosing an appropriate servicing
 release and honoring its packaging and distribution conditions, not by
 replacing the native Windows architecture.
 
-The current self-contained bundle is for local development and manual
-verification only. Its transitive `Microsoft.WindowsAppSDK.WinUI` 2.2.1 package
-carries Engineering Preview terms that prohibit sharing, publishing,
-distribution, and live use. Production packaging still requires a
+The current self-contained bundle is for licensed development and testing only.
+Its transitive `Microsoft.WindowsAppSDK.WinUI` 2.2.1 package carries Engineering
+Preview terms that prohibit live use and third-party sharing, publishing,
+distribution, leasing, or transfer. Production packaging still requires a
 redistributable WinUI/Windows App SDK servicing release, or explicit permission
 for the selected dependency. That release gate applies to the concrete binary
 dependency, not to the choice of WinUI 3, and it does not change the MIT license

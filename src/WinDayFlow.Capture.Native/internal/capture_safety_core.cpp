@@ -346,6 +346,11 @@ CaptureCommandAdmissionResult CaptureSafetyCore::AcquireCommandAdmissionPermit(
   return CaptureCommandAdmissionResult::kOk;
 }
 
+void CaptureSafetyCore::InvalidatePendingCommandAdmission() noexcept {
+  std::lock_guard lock(command_mutex_);
+  issued_command_admission_.reset();
+}
+
 std::optional<PersistenceToken> CaptureSafetyCore::MintPersistenceToken(
     const CaptureTargetIdentity& observed_target) const {
   if (!admission_open()) {

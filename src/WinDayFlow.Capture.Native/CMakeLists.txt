@@ -14,6 +14,7 @@ add_library(windayflow_capture_core STATIC
   internal/capture_policy.cpp
   internal/capture_runtime_owner.cpp
   internal/capture_safety_core.cpp
+  internal/capture_worker.cpp
   internal/chunk_manifest.cpp
   internal/dxgi_desktop_frame_source.cpp
   internal/dxgi_output_resolver.cpp
@@ -21,7 +22,8 @@ add_library(windayflow_capture_core STATIC
   internal/pixel_buffer.cpp
   internal/privacy_guard.cpp
   internal/wic_bgra_scaler.cpp
-  internal/windows_capture_target_observer.cpp)
+  internal/windows_capture_target_observer.cpp
+  internal/windows_capture_worker_backend.cpp)
 
 target_compile_features(windayflow_capture_core PUBLIC cxx_std_20)
 target_include_directories(windayflow_capture_core
@@ -108,6 +110,9 @@ if(BUILD_TESTING)
 
   add_windayflow_native_test(capture_safety_core_tests tests/capture_safety_core_tests.cpp)
   target_link_libraries(capture_safety_core_tests PRIVATE windayflow_capture_core)
+
+  add_windayflow_native_test(capture_worker_tests tests/capture_worker_tests.cpp)
+  target_link_libraries(capture_worker_tests PRIVATE windayflow_capture_core)
 
   add_windayflow_native_test(dxgi_output_resolver_tests tests/dxgi_output_resolver_tests.cpp)
   target_link_libraries(dxgi_output_resolver_tests PRIVATE windayflow_capture_core)

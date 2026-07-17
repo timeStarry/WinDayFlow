@@ -1,5 +1,7 @@
 #include "windayflow_capture.h"
 
+#include <Windows.h>
+
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -183,10 +185,71 @@ bool TestAbiAndArgumentValidation() {
   }
   config = ValidConfig();
   config.output_directory_utf8_length = 0;
-  return Expect(wdf_capture_create(&config, &handle) ==
-                    WDF_CAPTURE_RESULT_INVALID_ARGUMENT &&
-                    handle == 0,
-                "empty output path was accepted");
+  if (!Expect(wdf_capture_create(&config, &handle) ==
+                      WDF_CAPTURE_RESULT_INVALID_ARGUMENT &&
+                  handle == 0,
+              "empty output path was accepted")) {
+    return false;
+  }
+
+  constexpr std::array<char, 8> kEmbeddedNullPath{'D',  ':', '\\', 'd',
+                                                  '\0', 'e', 'v',  'x'};
+  config = ValidConfig();
+  config.output_directory_utf8 = kEmbeddedNullPath.data();
+  config.output_directory_utf8_length =
+      static_cast<uint32_t>(kEmbeddedNullPath.size());
+  if (!Expect(wdf_capture_create(&config, &handle) ==
+                      WDF_CAPTURE_RESULT_INVALID_ARGUMENT &&
+                  handle == 0,
+              "output path with an embedded NUL was accepted")) {
+    return false;
+  }
+
+  constexpr char kRelativePath[] = "relative\\evidence";
+  constexpr std::array<char, 2> kMalformedUtf8{
+      static_cast<char>(0xC3),
+      static_cast<char>(0x28),
+  };
+  constexpr char kUncPath[] = "\\\\server\\share\\evidence";
+  std::string missing_drive_path;
+  for (int drive = 'Z'; drive >= 'A'; --drive) {
+    const std::array<wchar_t, 4> root{
+        static_cast<wchar_t>(drive), L':', L'\\', L'\0'};
+    if (GetDriveTypeW(root.data()) == DRIVE_NO_ROOT_DIR) {
+      missing_drive_path =
+          std::string{static_cast<char>(drive), ':', '\\'} + "evidence";
+      break;
+    }
+  }
+  if (!Expect(!missing_drive_path.empty(),
+              "test host has no missing drive letter")) {
+    return false;
+  }
+
+  const auto RejectOutputPath = [&](const char* path,
+                                    uint32_t path_length,
+                                    const char* message) {
+    config = ValidConfig();
+    config.output_directory_utf8 = path;
+    config.output_directory_utf8_length = path_length;
+    handle = 0;
+    return Expect(wdf_capture_create(&config, &handle) ==
+                          WDF_CAPTURE_RESULT_INVALID_ARGUMENT &&
+                      handle == 0,
+                  message);
+  };
+  return RejectOutputPath(kRelativePath,
+                          sizeof(kRelativePath) - 1U,
+                          "relative output path was accepted") &&
+         RejectOutputPath(kMalformedUtf8.data(),
+                          static_cast<uint32_t>(kMalformedUtf8.size()),
+                          "malformed UTF-8 output path was accepted") &&
+         RejectOutputPath(kUncPath,
+                          sizeof(kUncPath) - 1U,
+                          "UNC output path was accepted") &&
+         RejectOutputPath(missing_drive_path.data(),
+                          static_cast<uint32_t>(missing_drive_path.size()),
+                          "missing-drive output path was accepted");
 }
 
 bool TestTrulyShortVersionedStructures() {

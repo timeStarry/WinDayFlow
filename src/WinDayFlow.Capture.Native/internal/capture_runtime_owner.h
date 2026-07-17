@@ -32,6 +32,7 @@ enum class CaptureRuntimeWaitResult {
 
 struct CaptureRuntimeControlSnapshot {
   uint64_t sequence = 0;
+  uint64_t pause_epoch = 0;
   bool stop_requested = false;
   bool pause_requested = false;
   std::optional<PersistenceToken> replacement_token;
@@ -52,6 +53,7 @@ class CaptureRuntimeOwner {
   bool Start(CaptureCommandAdmissionPermit permit, Worker worker);
   CaptureRuntimePauseResult RequestPause();
   bool Resume(CaptureCommandAdmissionPermit permit);
+  void NotifyAuthorizationChanged();
   CaptureRuntimeStopResult RequestStop();
   CaptureRuntimeWaitResult WaitStopped(uint32_t timeout_ms);
   void Shutdown();
@@ -80,6 +82,7 @@ class CaptureRuntimeOwner {
   bool pause_requested_ = false;
   std::optional<PersistenceToken> replacement_token_;
   uint64_t control_sequence_ = 0;
+  uint64_t pause_epoch_ = 0;
   bool worker_exited_ = true;
   bool join_in_progress_ = false;
   bool joined_ = true;

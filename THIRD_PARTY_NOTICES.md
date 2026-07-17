@@ -107,10 +107,10 @@ InteractiveExperiences 2.0.15, AI 2.2.3, and Widgets 2.0.5.
 `Microsoft.WindowsAppSDK.WinUI` 2.2.1 is currently governed by Engineering
 Preview terms that limit it to development and testing and prohibit use in a
 live operating environment unless Microsoft permits that use under another
-agreement. The terms also prohibit sharing, publishing, or distributing this
-component. Therefore the current bundle is for local use on the build machine
-only and must not be shared, published, distributed, uploaded, or deployed. A
-production release or external test bundle is blocked until WinDayFlow selects
-and verifies a WinUI runtime with production redistribution rights, or obtains
-explicit permission. Shipping these terms in the bundle records the
-restriction; it does not remove or weaken it.
+agreement. The licensee may install and use multiple copies for development and
+testing on Windows, but the terms prohibit sharing, publishing, distributing,
+leasing, or transferring the component to a third party. A production release
+or third-party test bundle is blocked until WinDayFlow selects and verifies a
+WinUI runtime with production redistribution rights, or obtains explicit
+permission. Shipping these terms in the bundle records the restriction; it does
+not remove or weaken it.

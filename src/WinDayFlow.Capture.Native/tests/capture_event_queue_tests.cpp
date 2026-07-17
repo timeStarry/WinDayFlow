@@ -18,11 +18,43 @@ static_assert(!std::is_copy_assignable_v<CaptureEventReservation>);
 static_assert(std::is_move_constructible_v<CaptureEventReservation>);
 
 std::atomic<bool> g_fail_next_append{false};
+std::atomic<bool> g_invalidate_next_append{false};
+std::atomic<bool> g_publication_current{true};
 
 void FailAppendWhenRequested() {
   if (g_fail_next_append.exchange(false)) {
     throw std::bad_alloc();
   }
+}
+
+void InvalidatePublicationWhenRequested() {
+  if (g_invalidate_next_append.exchange(false)) {
+    g_publication_current.store(false);
+  }
+}
+
+bool IsPublicationCurrent(void* context) noexcept {
+  const auto* current = static_cast<const std::atomic<bool>*>(context);
+  return current != nullptr && current->load();
+}
+
+struct CachedValidationContext {
+  std::atomic<bool> current{true};
+  std::atomic<bool> value_read{false};
+  std::atomic<bool> return_validator{false};
+};
+
+bool CachePublicationStateThenWait(void* context) noexcept {
+  auto* validation = static_cast<CachedValidationContext*>(context);
+  if (validation == nullptr) {
+    return false;
+  }
+  const bool current = validation->current.load();
+  validation->value_read.store(true);
+  while (!validation->return_validator.load()) {
+    std::this_thread::yield();
+  }
+  return current;
 }
 
 bool Expect(bool condition, const char* message) {
@@ -313,6 +345,76 @@ bool TestAppendFailurePreservesQueueAndReservation() {
                 "reserved append could not retry after allocation failure");
 }
 
+bool TestPostAppendValidationPreventsVisibility() {
+  using windayflow::capture::CaptureEventQueue;
+  using windayflow::capture::CaptureEventReadResult;
+
+  CaptureEventQueue queue(1, InvalidatePublicationWhenRequested);
+  auto reservation = queue.ReserveRequiredEvent();
+  g_publication_current.store(true);
+  g_invalidate_next_append.store(true);
+  const uint64_t rejected = queue.PushReservedValidated(
+      &reservation, WDF_CAPTURE_EVENT_CHUNK_COMMITTED,
+      WDF_CAPTURE_STATE_RECORDING, WDF_CAPTURE_REASON_NONE,
+      WDF_CAPTURE_ERROR_NONE, "must remain hidden", 1, 2, 3,
+      IsPublicationCurrent, &g_publication_current);
+  const ReadValue empty = ReadOne(&queue);
+  if (!Expect(rejected == 0 && reservation && queue.size() == 0 &&
+                  queue.reserved_size() == 1 &&
+                  empty.result == CaptureEventReadResult::kEmpty,
+              "failed post-append validation exposed or consumed the event")) {
+    return false;
+  }
+
+  g_publication_current.store(true);
+  const uint64_t committed = queue.PushReservedValidated(
+      &reservation, WDF_CAPTURE_EVENT_CHUNK_COMMITTED,
+      WDF_CAPTURE_STATE_RECORDING, WDF_CAPTURE_REASON_NONE,
+      WDF_CAPTURE_ERROR_NONE, "validated", 2, 3, 4, IsPublicationCurrent,
+      &g_publication_current);
+  const ReadValue value = ReadOne(&queue);
+  return Expect(committed == 1 && !reservation && queue.reserved_size() == 0 &&
+                    value.result == CaptureEventReadResult::kSuccess &&
+                    value.event.sequence == 1 &&
+                    value.event.persistence_generation == 3 &&
+                    value.event.target_epoch == 4,
+                "validated retry changed sequence or safety metadata");
+}
+
+bool TestValidationReadIsPublicationLinearizationPoint() {
+  using windayflow::capture::CaptureEventQueue;
+  using windayflow::capture::CaptureEventReadResult;
+
+  CaptureEventQueue queue(1);
+  auto reservation = queue.ReserveRequiredEvent();
+  CachedValidationContext validation;
+  std::atomic<uint64_t> sequence{0};
+  std::thread publisher([&] {
+    sequence.store(queue.PushReservedValidated(
+        &reservation, WDF_CAPTURE_EVENT_CHUNK_COMMITTED,
+        WDF_CAPTURE_STATE_RECORDING, WDF_CAPTURE_REASON_NONE,
+        WDF_CAPTURE_ERROR_NONE, "linearized", 1, 2, 3,
+        CachePublicationStateThenWait, &validation));
+  });
+
+  const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(1);
+  while (!validation.value_read.load() &&
+         std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::yield();
+  }
+  const bool read_before_deadline = validation.value_read.load();
+  validation.current.store(false);
+  validation.return_validator.store(true);
+  publisher.join();
+
+  const ReadValue value = ReadOne(&queue);
+  return Expect(read_before_deadline && sequence.load() == 1 && !reservation &&
+                    value.result == CaptureEventReadResult::kSuccess &&
+                    value.event.sequence == 1,
+                "invalidation after the validator read reordered publication");
+}
+
 bool TestConcurrentReadersConsumeDistinctEvents() {
   windayflow::capture::CaptureEventQueue queue(4);
   queue.Push(WDF_CAPTURE_EVENT_DIAGNOSTIC, WDF_CAPTURE_STATE_UNAVAILABLE,
@@ -384,6 +486,8 @@ int main() {
       !TestReservedPushRejectsNonRequiredEventWithoutConsumption() ||
       !TestReservationIsBoundToQueueAndMoveOnly() ||
       !TestAppendFailurePreservesQueueAndReservation() ||
+      !TestPostAppendValidationPreventsVisibility() ||
+      !TestValidationReadIsPublicationLinearizationPoint() ||
       !TestConcurrentReadersConsumeDistinctEvents() ||
       !TestCloseWakesBoundedReader() ||
       !TestCloseDrainsQueuedEventAndAllowsReservationCancellation()) {
