@@ -435,7 +435,9 @@ public sealed class NativeCapturePrivacyCoordinatorTests
             windowHandle: 0x5678,
             processId: 43,
             processCreationTime100ns: 101,
-            targetEpoch: 2);
+            targetEpoch: 2,
+            displayMonitorHandle: 0x6002,
+            displayDeviceKey: @"\\.\DISPLAY2");
 
         await coordinator.UpdateSignalsAsync(CopySignals(
             firstSignals,
@@ -445,6 +447,38 @@ public sealed class NativeCapturePrivacyCoordinatorTests
         Assert.True(coordinator.LastPersistenceGeneration > previousGeneration);
         Assert.Equal(secondTarget, coordinator.LastAppliedAuthorization.Target);
         Assert.Equal(secondTarget, target.Authorizations[^1].Target);
+    }
+
+    [Fact]
+    public async Task AllowedDisplayChangeFlowsIntoTheAtomicRuntimeAuthorization()
+    {
+        var target = new TestPrivacyTarget();
+        var initial = NativeCapturePrivacyContext.FailClosed(runtimePolicyRevision: 1);
+        using var coordinator = new NativeCapturePrivacyCoordinator(target, initial);
+        var settings = CreateEnabledSettings();
+        var firstSignals = CreateAllowedSignals();
+        await coordinator.UpdateSignalsAsync(firstSignals);
+        await CommitAsync(coordinator, AppSettings.Default, settings);
+        var previousRevision = coordinator.LastAppliedContext.RuntimePolicyRevision;
+        var previousGeneration = coordinator.LastPersistenceGeneration;
+        var changedDisplayTarget = NativeCaptureTargetIdentity.Present(
+            windowHandle: firstSignals.Target.WindowHandle,
+            processId: firstSignals.Target.ProcessId,
+            processCreationTime100ns: firstSignals.Target.ProcessCreationTime100ns,
+            targetEpoch: firstSignals.Target.TargetEpoch + 1,
+            displayMonitorHandle: firstSignals.Target.DisplayMonitorHandle + 1,
+            displayDeviceKey: @"\\.\DISPLAY2");
+
+        await coordinator.UpdateSignalsAsync(CopySignals(
+            firstSignals,
+            target: changedDisplayTarget));
+
+        Assert.Equal(
+            previousRevision + 1,
+            coordinator.LastAppliedContext.RuntimePolicyRevision);
+        Assert.True(coordinator.LastPersistenceGeneration > previousGeneration);
+        Assert.Equal(changedDisplayTarget, coordinator.LastAppliedAuthorization.Target);
+        Assert.Equal(changedDisplayTarget, target.Authorizations[^1].Target);
     }
 
     [Fact]
@@ -462,7 +496,9 @@ public sealed class NativeCapturePrivacyCoordinatorTests
             windowHandle: 0x5678,
             processId: 43,
             processCreationTime100ns: 101,
-            targetEpoch: 2);
+            targetEpoch: 2,
+            displayMonitorHandle: 0x6002,
+            displayDeviceKey: @"\\.\DISPLAY2");
 
         var update = coordinator.UpdateSignalsAsync(CopySignals(
             firstSignals,
@@ -567,7 +603,9 @@ public sealed class NativeCapturePrivacyCoordinatorTests
             windowHandle: 0x5678,
             processId: 43,
             processCreationTime100ns: 101,
-            targetEpoch: 2);
+            targetEpoch: 2,
+            displayMonitorHandle: 0x6002,
+            displayDeviceKey: @"\\.\DISPLAY2");
 
         var staleUpdate = coordinator.TryUpdateSignalsAsync(
             staleGeneration,
@@ -918,7 +956,9 @@ public sealed class NativeCapturePrivacyCoordinatorTests
                 windowHandle: 0x1234,
                 processId: 42,
                 processCreationTime100ns: 100,
-                targetEpoch: 1));
+                targetEpoch: 1,
+                displayMonitorHandle: 0x6001,
+                displayDeviceKey: @"\\.\DISPLAY1"));
     }
 
     private static AppSettings CreateRevokedSettings(AppSettings settings)

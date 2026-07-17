@@ -23,6 +23,12 @@ cancellation without making Pause or Stop depend on an Allow decision.
 
 ## Decision
 
+ADR 0008 later retains this legacy bit-8 capability definition for recognition
+but stops advertising it from a display-scoped DLL. Current owners require the
+bit-10 `DisplayBoundCommandAdmission` capability, whose private issued record
+also retains the display identity. The 64-byte command stamp and exports below
+remain unchanged.
+
 WinDayFlow keeps C ABI major version 1 and adds owner-bound command admission
 for Start and Resume. The contract is implemented and tested in the synthetic
 foundation, but it does not activate screen capture or a real writer.
@@ -150,7 +156,8 @@ The native runtime-owner mask is:
 
 ```text
 PrivacyGuard | EventQueue | TargetScopedAuthorization |
-PersistenceGenerationBarrier | DeterministicStop | CommandAdmission
+PersistenceGenerationBarrier | DeterministicStop |
+DisplayScopedAuthorization | DisplayBoundCommandAdmission
 ```
 
 An older three-capability safety DLL can remain ABI-compatible for probing, but

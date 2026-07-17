@@ -22,6 +22,10 @@ capability negotiation.
 
 ## Decision
 
+ADR 0008 later extends this accepted 112-byte prefix to a 224-byte compatible
+structure and makes a display anchor part of every fully allowed target. The
+original offsets and `reserved[8]` contract below remain unchanged.
+
 WinDayFlow will keep C ABI major version 1 and add a native safety core before
 connecting a real DXGI writer. The safety core is independently testable with
 synthetic work and remains unavailable as a recorder until the real Windows
@@ -164,7 +168,8 @@ complete live recording mask requires all of:
 
 ```text
 PrivacyGuard | EventQueue | TargetScopedAuthorization |
-PersistenceGenerationBarrier | DeterministicStop | CommandAdmission |
+PersistenceGenerationBarrier | DeterministicStop |
+DisplayScopedAuthorization | DisplayBoundCommandAdmission |
 ScreenCapture | H264Chunks
 ```
 
@@ -205,8 +210,9 @@ timeouts, injected failures, concurrency, and idempotence. Tests use explicit
 barriers rather than timing sleeps.
 
 `capture_c_api_tests` covers the additive exports, command authenticity, and
-capability dependencies; the C17 header test covers the 112-byte authorization
-and 64-byte command-admission sizes, offsets, numeric constants, and C
+capability dependencies; the C17 header test covers the legacy 112-byte prefix,
+the ADR 0008 224-byte authorization, and the 64-byte command-admission sizes,
+offsets, numeric constants, and C
 callability. Managed interop tests cover both layouts, complete-mask
 negotiation, owner call order, one-shot stamps, quiescence, timeout/failure
 quarantine, and cancellation semantics. Debug and Release native and managed

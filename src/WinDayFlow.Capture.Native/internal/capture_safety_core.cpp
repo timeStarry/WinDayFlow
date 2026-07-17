@@ -8,12 +8,14 @@
 #include <chrono>
 #include <limits>
 #include <mutex>
+#include <string_view>
 #include <utility>
 
 namespace windayflow::capture {
 namespace {
 
 std::atomic<uint64_t> g_next_instance_epoch{1};
+constexpr size_t kMaximumDisplayDeviceKeyCharacters = 31;
 
 uint64_t AllocateInstanceEpoch() {
   uint64_t current = g_next_instance_epoch.load(std::memory_order_relaxed);
@@ -30,18 +32,57 @@ uint64_t AllocateInstanceEpoch() {
   return 0;
 }
 
+bool IsValidDisplayDeviceKey(std::wstring_view value) {
+  if (value.empty() ||
+      value.size() > kMaximumDisplayDeviceKeyCharacters) {
+    return false;
+  }
+
+  std::array<WORD, kMaximumDisplayDeviceKeyCharacters> character_types{};
+  if (GetStringTypeW(CT_CTYPE1,
+                     value.data(),
+                     static_cast<int>(value.size()),
+                     character_types.data()) == 0) {
+    return false;
+  }
+
+  bool all_whitespace = true;
+  for (size_t index = 0; index < value.size(); ++index) {
+    if (value[index] == L'\0' ||
+        (character_types[index] & C1_CNTRL) != 0) {
+      return false;
+    }
+    all_whitespace =
+        all_whitespace && (character_types[index] & C1_SPACE) != 0;
+  }
+  return !all_whitespace;
+}
+
 bool IsValidTarget(const CaptureTargetIdentity& target) {
   return target.window_handle != 0 && target.process_id != 0 &&
-         target.process_creation_time_100ns != 0 && target.target_epoch != 0;
+         target.process_creation_time_100ns != 0 && target.target_epoch != 0 &&
+         target.display_monitor_handle != 0 &&
+         IsValidDisplayDeviceKey(target.display_device_key);
+}
+
+bool DisplayDeviceKeysEqual(std::wstring_view left, std::wstring_view right) {
+  if (left.size() != right.size() ||
+      left.size() > static_cast<size_t>(std::numeric_limits<int>::max())) {
+    return false;
+  }
+  if (left.empty()) {
+    return true;
+  }
+  return CompareStringOrdinal(left.data(),
+                              static_cast<int>(left.size()),
+                              right.data(),
+                              static_cast<int>(right.size()),
+                              TRUE) == CSTR_EQUAL;
 }
 
 bool HasSameTargetTuple(const CaptureTargetIdentity& left,
                         const CaptureTargetIdentity& right) {
-  return left.window_handle == right.window_handle &&
-         left.process_id == right.process_id &&
-         left.process_creation_time_100ns ==
-             right.process_creation_time_100ns &&
-         left.target_epoch == right.target_epoch;
+  return left == right;
 }
 
 bool IsValidCommand(CaptureCommand command) {
@@ -69,6 +110,17 @@ bool GenerateCommandAdmissionNonce(uint64_t* nonce_low,
 }
 
 }  // namespace
+
+bool CaptureTargetIdentity::operator==(
+    const CaptureTargetIdentity& other) const {
+  return window_handle == other.window_handle &&
+         process_id == other.process_id &&
+         process_creation_time_100ns ==
+             other.process_creation_time_100ns &&
+         target_epoch == other.target_epoch &&
+         display_monitor_handle == other.display_monitor_handle &&
+         DisplayDeviceKeysEqual(display_device_key, other.display_device_key);
+}
 
 bool IsFullyAllowed(const PrivacyContext& context) {
   return EvaluatePrivacyContext(context).allowed;

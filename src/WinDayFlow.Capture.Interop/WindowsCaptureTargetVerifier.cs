@@ -10,7 +10,8 @@ public enum WindowsCaptureDisplayTargetState
 public sealed class WindowsCaptureDisplayTarget
     : IEquatable<WindowsCaptureDisplayTarget>
 {
-    internal const int MaximumDeviceKeyCharacters = 31;
+    internal const int MaximumDeviceKeyCharacters =
+        NativeCaptureTargetIdentity.MaximumDisplayDeviceKeyCharacters;
 
     private WindowsCaptureDisplayTarget(
         WindowsCaptureDisplayTargetState state,
@@ -43,12 +44,10 @@ public sealed class WindowsCaptureDisplayTarget
         string deviceKey)
     {
         ArgumentOutOfRangeException.ThrowIfZero(monitorHandle);
-        ArgumentException.ThrowIfNullOrWhiteSpace(deviceKey);
-        if (deviceKey.Length > MaximumDeviceKeyCharacters
-            || deviceKey.Any(char.IsControl))
+        if (!NativeCaptureTargetIdentity.IsValidDisplayDeviceKey(deviceKey))
         {
             throw new ArgumentException(
-                "A display device key must be bounded and cannot contain control characters.",
+                "A display device key must have valid bounded UTF-8 content and cannot contain control characters.",
                 nameof(deviceKey));
         }
 
@@ -271,7 +270,9 @@ public sealed class WindowsCaptureTargetVerifier
                 stable.WindowHandle,
                 stable.Owner.ProcessId,
                 stable.ProcessCreationTime100ns,
-                targetEpoch),
+                targetEpoch,
+                stable.DisplayTarget.MonitorHandle,
+                stable.DisplayTarget.DeviceKey),
             WindowsCaptureDisplayTarget.Present(
                 stable.DisplayTarget.MonitorHandle,
                 stable.DisplayTarget.DeviceKey),
@@ -493,9 +494,7 @@ internal readonly record struct WindowsCaptureDisplayAnchor(
 {
     internal bool IsValid =>
         MonitorHandle != 0
-        && !string.IsNullOrWhiteSpace(DeviceKey)
-        && DeviceKey.Length <= WindowsCaptureDisplayTarget.MaximumDeviceKeyCharacters
-        && !DeviceKey.Any(char.IsControl);
+        && NativeCaptureTargetIdentity.IsValidDisplayDeviceKey(DeviceKey);
 
     public bool Equals(WindowsCaptureDisplayAnchor other)
     {

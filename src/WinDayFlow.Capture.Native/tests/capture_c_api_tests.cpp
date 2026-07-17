@@ -8,6 +8,7 @@
 #include <cstring>
 #include <iostream>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -61,7 +62,9 @@ wdf_capture_runtime_authorization_v1 RuntimeAuthorization(
     uint64_t target_epoch = 1,
     uint64_t window_handle = 100,
     uint32_t process_id = 200,
-    uint64_t creation_time = 300) {
+    uint64_t creation_time = 300,
+    uint64_t display_monitor_handle = 400,
+    std::string_view display_device_key = "\\\\.\\DISPLAY1") {
   wdf_capture_runtime_authorization_v1 context{};
   context.struct_size = sizeof(context);
   context.abi_version = WDF_CAPTURE_ABI_VERSION;
@@ -79,7 +82,14 @@ wdf_capture_runtime_authorization_v1 RuntimeAuthorization(
     context.target_window_handle = window_handle;
     context.target_process_creation_time_100ns = creation_time;
     context.target_process_id = process_id;
-    context.target_flags = WDF_CAPTURE_TARGET_PRESENT;
+    context.target_flags = WDF_CAPTURE_TARGET_PRESENT |
+                           WDF_CAPTURE_TARGET_DISPLAY_PRESENT;
+    context.target_display_monitor_handle = display_monitor_handle;
+    context.target_display_device_key_utf8_length =
+        static_cast<uint32_t>(display_device_key.size());
+    std::memcpy(context.target_display_device_key_utf8,
+                display_device_key.data(),
+                display_device_key.size());
   }
   return context;
 }
@@ -142,7 +152,13 @@ bool TestAbiAndArgumentValidation() {
                       0 &&
                    (capabilities & WDF_CAPTURE_CAPABILITY_DETERMINISTIC_STOP) !=
                        0 &&
-                   (capabilities & WDF_CAPTURE_CAPABILITY_COMMAND_ADMISSION) !=
+                   (capabilities & WDF_CAPTURE_CAPABILITY_COMMAND_ADMISSION) ==
+                       0 &&
+                   (capabilities &
+                    WDF_CAPTURE_CAPABILITY_DISPLAY_SCOPED_AUTHORIZATION) !=
+                       0 &&
+                   (capabilities &
+                    WDF_CAPTURE_CAPABILITY_DISPLAY_BOUND_COMMAND_ADMISSION) !=
                        0 &&
                    (capabilities & WDF_CAPTURE_CAPABILITY_SCREEN_CAPTURE) == 0 &&
                   (capabilities & WDF_CAPTURE_CAPABILITY_H264_CHUNKS) == 0 &&
@@ -356,6 +372,151 @@ bool TestPrivacyRevisionNeverRegresses() {
   return valid;
 }
 
+bool TestRuntimeAuthorizationDisplayStructureContract() {
+  wdf_capture_config_v1 config = ValidConfig();
+  wdf_capture_handle handle = 0;
+  if (wdf_capture_create(&config, &handle) != WDF_CAPTURE_RESULT_OK) {
+    return Expect(false, "display authorization handle could not be created");
+  }
+
+  uint64_t generation = 99;
+  const auto Reject = [&](wdf_capture_runtime_authorization_v1* value,
+                          const char* message) {
+    generation = 99;
+    return Expect(wdf_capture_update_runtime_authorization(
+                      handle, value, &generation) ==
+                          WDF_CAPTURE_RESULT_INVALID_ARGUMENT &&
+                      generation == 0,
+                  message);
+  };
+
+  wdf_capture_runtime_authorization_v1 invalid =
+      RuntimeAuthorization(WDF_CAPTURE_POLICY_ALLOW, 1);
+  invalid.struct_size =
+      WDF_CAPTURE_RUNTIME_AUTHORIZATION_V1_LEGACY_SIZE + 1U;
+  bool valid = Reject(&invalid, "a partial display tail was accepted");
+
+  invalid = RuntimeAuthorization(WDF_CAPTURE_POLICY_ALLOW, 1);
+  invalid.struct_size = sizeof(invalid) - 1U;
+  valid = Reject(&invalid, "a nearly complete display tail was accepted") &&
+          valid;
+
+  invalid = RuntimeAuthorization(WDF_CAPTURE_POLICY_ALLOW, 1);
+  invalid.struct_size = WDF_CAPTURE_RUNTIME_AUTHORIZATION_V1_LEGACY_SIZE;
+  invalid.target_flags = WDF_CAPTURE_TARGET_PRESENT;
+  valid = Reject(&invalid, "legacy target-only allow was accepted") && valid;
+
+  invalid = RuntimeAuthorization(WDF_CAPTURE_POLICY_ALLOW, 1);
+  invalid.target_flags = WDF_CAPTURE_TARGET_PRESENT;
+  valid = Reject(&invalid, "allow without the display-present flag was accepted") &&
+          valid;
+
+  invalid = RuntimeAuthorization(WDF_CAPTURE_POLICY_ALLOW, 1);
+  invalid.target_display_monitor_handle = 0;
+  valid = Reject(&invalid, "allow without a display monitor was accepted") &&
+          valid;
+
+  invalid = RuntimeAuthorization(WDF_CAPTURE_POLICY_ALLOW, 1);
+  invalid.target_display_device_key_utf8_length = 0;
+  std::memset(invalid.target_display_device_key_utf8,
+              0,
+              sizeof(invalid.target_display_device_key_utf8));
+  valid = Reject(&invalid, "allow without a display key was accepted") && valid;
+
+  invalid = RuntimeAuthorization(WDF_CAPTURE_POLICY_ALLOW, 1);
+  invalid.target_display_device_key_utf8_length = 1;
+  std::memset(invalid.target_display_device_key_utf8,
+              0,
+              sizeof(invalid.target_display_device_key_utf8));
+  invalid.target_display_device_key_utf8[0] = static_cast<char>(0xC0);
+  valid = Reject(&invalid, "invalid display-key UTF-8 was accepted") && valid;
+
+  invalid = RuntimeAuthorization(WDF_CAPTURE_POLICY_ALLOW, 1);
+  invalid.target_display_device_key_utf8_length = 1;
+  std::memset(invalid.target_display_device_key_utf8,
+              0,
+              sizeof(invalid.target_display_device_key_utf8));
+  invalid.target_display_device_key_utf8[0] = '\x01';
+  valid = Reject(&invalid, "control display-key text was accepted") && valid;
+
+  invalid = RuntimeAuthorization(WDF_CAPTURE_POLICY_ALLOW, 1);
+  invalid.target_display_device_key_utf8_length = 3;
+  std::memset(invalid.target_display_device_key_utf8,
+              0,
+              sizeof(invalid.target_display_device_key_utf8));
+  std::memset(invalid.target_display_device_key_utf8, ' ', 3);
+  valid = Reject(&invalid, "whitespace-only display key was accepted") && valid;
+
+  invalid = RuntimeAuthorization(WDF_CAPTURE_POLICY_ALLOW, 1);
+  invalid.target_display_device_key_utf8_length = 3;
+  std::memset(invalid.target_display_device_key_utf8,
+              0,
+              sizeof(invalid.target_display_device_key_utf8));
+  invalid.target_display_device_key_utf8[0] = 'A';
+  invalid.target_display_device_key_utf8[2] = 'B';
+  valid = Reject(&invalid, "embedded display-key NUL was accepted") && valid;
+
+  invalid = RuntimeAuthorization(WDF_CAPTURE_POLICY_ALLOW, 1);
+  invalid.target_display_device_key_utf8
+      [invalid.target_display_device_key_utf8_length] = 'X';
+  valid = Reject(&invalid, "nonzero display-key buffer tail was accepted") &&
+          valid;
+
+  invalid = RuntimeAuthorization(WDF_CAPTURE_POLICY_ALLOW, 1);
+  invalid.target_display_device_key_utf8_length =
+      WDF_CAPTURE_DISPLAY_DEVICE_KEY_UTF8_MAX_LENGTH + 1U;
+  std::memset(invalid.target_display_device_key_utf8,
+              'A',
+              invalid.target_display_device_key_utf8_length);
+  valid = Reject(&invalid, "oversized display key was accepted") && valid;
+
+  invalid = RuntimeAuthorization(WDF_CAPTURE_POLICY_ALLOW, 1);
+  invalid.target_display_reserved = 1;
+  valid = Reject(&invalid, "nonzero display reserved data was accepted") && valid;
+
+  invalid = RuntimeAuthorization(WDF_CAPTURE_POLICY_BLOCK, 1);
+  invalid.target_display_monitor_handle = 400;
+  valid = Reject(&invalid, "restrictive authorization retained display data") &&
+          valid;
+
+  wdf_capture_runtime_authorization_v1 legacy_block =
+      RuntimeAuthorization(WDF_CAPTURE_POLICY_BLOCK, 1);
+  legacy_block.struct_size = WDF_CAPTURE_RUNTIME_AUTHORIZATION_V1_LEGACY_SIZE;
+  generation = 0;
+  valid = Expect(wdf_capture_update_runtime_authorization(
+                     handle, &legacy_block, &generation) ==
+                         WDF_CAPTURE_RESULT_OK &&
+                     generation == 2,
+                 "legacy restrictive authorization was rejected") &&
+          valid;
+
+  wdf_capture_runtime_authorization_v1 current_allow =
+      RuntimeAuthorization(WDF_CAPTURE_POLICY_ALLOW, 2);
+  current_allow.target_display_device_key_utf8_length =
+      WDF_CAPTURE_DISPLAY_DEVICE_KEY_UTF8_MAX_LENGTH;
+  std::memset(current_allow.target_display_device_key_utf8,
+              0,
+              sizeof(current_allow.target_display_device_key_utf8));
+  for (size_t index = 0; index < 31; ++index) {
+    const size_t offset = index * 3;
+    current_allow.target_display_device_key_utf8[offset] =
+        static_cast<char>(0xE0);
+    current_allow.target_display_device_key_utf8[offset + 1] =
+        static_cast<char>(0xA0);
+    current_allow.target_display_device_key_utf8[offset + 2] =
+        static_cast<char>(0x80);
+  }
+  valid = Expect(wdf_capture_update_runtime_authorization(
+                     handle, &current_allow, &generation) ==
+                         WDF_CAPTURE_RESULT_OK &&
+                     generation == 3,
+                 "maximum display key after legacy block was rejected") &&
+          valid;
+
+  wdf_capture_destroy(&handle);
+  return valid;
+}
+
 bool TestRuntimeAuthorizationBarrierContract() {
   wdf_capture_config_v1 config = ValidConfig();
   wdf_capture_handle handle = 0;
@@ -386,6 +547,11 @@ bool TestRuntimeAuthorizationBarrierContract() {
   invalid.target_window_handle = 0;
   invalid.target_process_creation_time_100ns = 0;
   invalid.target_process_id = 0;
+  invalid.target_display_monitor_handle = 0;
+  invalid.target_display_device_key_utf8_length = 0;
+  std::memset(invalid.target_display_device_key_utf8,
+              0,
+              sizeof(invalid.target_display_device_key_utf8));
   const bool allow_without_target_rejected = Expect(
       wdf_capture_update_runtime_authorization(
           handle, &invalid, &generation) ==
@@ -411,8 +577,20 @@ bool TestRuntimeAuthorizationBarrierContract() {
       RuntimeAuthorization(WDF_CAPTURE_POLICY_ALLOW, 3);
   wdf_capture_runtime_authorization_v1 reused_epoch_v2 =
       RuntimeAuthorization(WDF_CAPTURE_POLICY_ALLOW, 2, 1, 101);
+  wdf_capture_runtime_authorization_v1 reused_display_epoch_v2 =
+      RuntimeAuthorization(
+          WDF_CAPTURE_POLICY_ALLOW, 2, 1, 100, 200, 300, 401);
   wdf_capture_runtime_authorization_v1 allow_v2 =
       RuntimeAuthorization(WDF_CAPTURE_POLICY_ALLOW, 2, 2, 101);
+  wdf_capture_runtime_authorization_v1 case_only_allow_v2 =
+      RuntimeAuthorization(WDF_CAPTURE_POLICY_ALLOW,
+                           2,
+                           2,
+                           101,
+                           200,
+                           300,
+                           400,
+                           "\\\\.\\display1");
 
   const bool revision_and_target_rules =
       Expect(wdf_capture_update_runtime_authorization(
@@ -432,6 +610,10 @@ bool TestRuntimeAuthorizationBarrierContract() {
                  WDF_CAPTURE_RESULT_POLICY_REVISION_GAP,
              "runtime revision gap was accepted") &&
       Expect(wdf_capture_update_runtime_authorization(
+                 handle, &reused_display_epoch_v2, &generation) ==
+                 WDF_CAPTURE_RESULT_TARGET_MISMATCH,
+             "display tuple changed without an epoch advance") &&
+      Expect(wdf_capture_update_runtime_authorization(
                  handle, &reused_epoch_v2, &generation) ==
                  WDF_CAPTURE_RESULT_TARGET_MISMATCH,
              "target tuple changed without an epoch advance") &&
@@ -439,6 +621,11 @@ bool TestRuntimeAuthorizationBarrierContract() {
                  handle, &allow_v2, &generation) == WDF_CAPTURE_RESULT_OK &&
                  generation == 3,
              "epoch-advanced target was rejected") &&
+      Expect(wdf_capture_update_runtime_authorization(
+                 handle, &case_only_allow_v2, &generation) ==
+                     WDF_CAPTURE_RESULT_OK &&
+                 generation == 3,
+             "case-only display key change was not idempotent") &&
       Expect(wdf_capture_update_runtime_authorization(
                  handle, &allow_v1, &generation) ==
                  WDF_CAPTURE_RESULT_STALE_POLICY,
@@ -1092,6 +1279,7 @@ int main() {
       !TestTrulyShortVersionedStructures() ||
       !TestLifecycleIsPrivacyGatedAndUnavailable() ||
       !TestPrivacyRevisionNeverRegresses() ||
+      !TestRuntimeAuthorizationDisplayStructureContract() ||
       !TestRuntimeAuthorizationBarrierContract() ||
       !TestCommandAdmissionAuthenticityAndOwnership() ||
       !TestCommandAdmissionInvalidationAndConcurrency() ||

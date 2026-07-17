@@ -132,9 +132,11 @@ internal sealed class NativeCaptureBackend
     public bool SupportsRuntimeAuthorization =>
         (Capabilities & (
             NativeCaptureCapabilities.TargetScopedAuthorization
-            | NativeCaptureCapabilities.PersistenceGenerationBarrier))
+            | NativeCaptureCapabilities.PersistenceGenerationBarrier
+            | NativeCaptureCapabilities.DisplayScopedAuthorization))
         == (NativeCaptureCapabilities.TargetScopedAuthorization
-            | NativeCaptureCapabilities.PersistenceGenerationBarrier);
+            | NativeCaptureCapabilities.PersistenceGenerationBarrier
+            | NativeCaptureCapabilities.DisplayScopedAuthorization);
 
     public bool SupportsCommandAdmission =>
         (Capabilities & NativeCaptureAbiContract.RuntimeOwnerCapabilities)
@@ -857,6 +859,7 @@ internal sealed class NativeCaptureBackend
             TargetProcessId = targetPresent ? target.ProcessId : 0,
             TargetFlags = targetPresent
                 ? NativeCaptureRuntimeAuthorizationV1.TargetPresent
+                    | NativeCaptureRuntimeAuthorizationV1.TargetDisplayPresent
                 : 0,
             ConsentGranted = (int)context.ConsentGranted,
             SessionUnlocked = (int)context.SessionUnlocked,
@@ -866,37 +869,80 @@ internal sealed class NativeCaptureBackend
             ApplicationAllowed = (int)context.ApplicationAllowed,
             WindowAllowed = (int)context.WindowAllowed,
             StorageAvailable = (int)context.StorageAvailable,
+            TargetDisplayMonitorHandle = targetPresent
+                ? target.DisplayMonitorHandle
+                : 0,
         };
-        lock (_persistenceBoundarySync)
+
+        try
         {
-            ThrowForResult(
-                _nativeApi.UpdateRuntimeAuthorization(
-                    _handle,
-                    ref nativeAuthorization,
-                    out var persistenceGeneration),
-                "update_runtime_authorization");
-            if (persistenceGeneration == 0)
+            if (targetPresent)
             {
-                throw new InvalidDataException(
-                    "The native runtime authorization update returned no persistence generation.");
+                byte* displayDeviceKeyBuffer =
+                    nativeAuthorization.TargetDisplayDeviceKeyUtf8;
+                var destination = new Span<byte>(
+                    displayDeviceKeyBuffer,
+                    NativeCaptureAbiContract.DisplayDeviceKeyUtf8Capacity);
+                destination.Clear();
+                var encodedLength = StrictUtf8.GetBytes(
+                    target.DisplayDeviceKey.AsSpan(),
+                    destination);
+                if (encodedLength is <= 0
+                    or > NativeCaptureAbiContract
+                        .DisplayDeviceKeyUtf8MaximumLength)
+                {
+                    throw new InvalidDataException(
+                        "The capture display device key does not satisfy the native UTF-8 ABI bound.");
+                }
+
+                nativeAuthorization.TargetDisplayDeviceKeyUtf8Length =
+                    checked((uint)encodedLength);
             }
 
-            var currentBoundary = Volatile.Read(ref _persistenceBoundary);
-            if (persistenceGeneration < currentBoundary.PersistenceGeneration
-                || (persistenceGeneration == currentBoundary.PersistenceGeneration
-                    && !Equals(currentBoundary.Authorization, authorization)))
+            lock (_persistenceBoundarySync)
             {
-                throw new InvalidDataException(
-                    "The native runtime authorization update returned a regressed or conflicting persistence generation.");
-            }
+                ThrowForResult(
+                    _nativeApi.UpdateRuntimeAuthorization(
+                        _handle,
+                        ref nativeAuthorization,
+                        out var persistenceGeneration),
+                    "update_runtime_authorization");
+                if (persistenceGeneration == 0)
+                {
+                    throw new InvalidDataException(
+                        "The native runtime authorization update returned no persistence generation.");
+                }
 
-            Volatile.Write(
-                ref _persistenceBoundary,
-                new NativePersistenceBoundary(
-                    persistenceGeneration,
-                    targetPresent ? target.TargetEpoch : 0,
-                    authorization));
-            return persistenceGeneration;
+                var currentBoundary = Volatile.Read(ref _persistenceBoundary);
+                if (persistenceGeneration < currentBoundary.PersistenceGeneration
+                    || (persistenceGeneration == currentBoundary.PersistenceGeneration
+                        && !Equals(currentBoundary.Authorization, authorization)))
+                {
+                    throw new InvalidDataException(
+                        "The native runtime authorization update returned a regressed or conflicting persistence generation.");
+                }
+
+                Volatile.Write(
+                    ref _persistenceBoundary,
+                    new NativePersistenceBoundary(
+                        persistenceGeneration,
+                        targetPresent ? target.TargetEpoch : 0,
+                        authorization));
+                return persistenceGeneration;
+            }
+        }
+        finally
+        {
+            byte* displayDeviceKeyBuffer =
+                nativeAuthorization.TargetDisplayDeviceKeyUtf8;
+            new Span<byte>(
+                displayDeviceKeyBuffer,
+                NativeCaptureAbiContract.DisplayDeviceKeyUtf8Capacity)
+                .Clear();
+
+            nativeAuthorization.TargetDisplayDeviceKeyUtf8Length = 0;
+            nativeAuthorization.TargetDisplayMonitorHandle = 0;
+            nativeAuthorization.TargetFlags = 0;
         }
     }
 
@@ -1344,10 +1390,32 @@ internal sealed class NativeCaptureBackend
             return "The native capture runtime safety capabilities require the privacy guard and event queue foundation.";
         }
 
+        if (capabilities.HasFlag(
+                NativeCaptureCapabilities.DisplayScopedAuthorization)
+            && advertisedSafety != safetyTrio)
+        {
+            return "Native display-scoped authorization requires the complete runtime safety set.";
+        }
+
         if (capabilities.HasFlag(NativeCaptureCapabilities.CommandAdmission)
             && advertisedSafety != safetyTrio)
         {
-            return "The native command-admission capability requires the complete runtime safety set.";
+            return "The legacy native command-admission capability requires the complete legacy runtime safety set.";
+        }
+
+        if (capabilities.HasFlag(NativeCaptureCapabilities.CommandAdmission)
+            && capabilities.HasFlag(
+                NativeCaptureCapabilities.DisplayBoundCommandAdmission))
+        {
+            return "The native capture binary advertises both legacy and display-bound command-admission profiles.";
+        }
+
+        if (capabilities.HasFlag(
+                NativeCaptureCapabilities.DisplayBoundCommandAdmission)
+            && (capabilities & NativeCaptureAbiContract.RuntimeOwnerCapabilities)
+                != NativeCaptureAbiContract.RuntimeOwnerCapabilities)
+        {
+            return "Native display-bound command admission requires the complete display-scoped runtime-owner safety set.";
         }
 
         var screenCapture = capabilities.HasFlag(
@@ -1363,7 +1431,7 @@ internal sealed class NativeCaptureBackend
             && (capabilities & NativeCaptureAbiContract.SafeScreenCaptureCapabilities)
                 != NativeCaptureAbiContract.SafeScreenCaptureCapabilities)
         {
-            return "The native screen capture capability requires the complete runtime safety set and H.264 chunk support.";
+            return "The native screen capture capability requires the complete display-scoped runtime safety set and H.264 chunk support.";
         }
 
         return null;
@@ -1393,7 +1461,7 @@ internal sealed class NativeCaptureBackend
         if (!SupportsRuntimeAuthorization)
         {
             throw new NotSupportedException(
-                "The native capture binary does not provide target-scoped runtime authorization and a persistence generation barrier.");
+                "The native capture binary does not provide display-scoped runtime authorization and a persistence generation barrier.");
         }
     }
 

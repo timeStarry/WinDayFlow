@@ -55,16 +55,18 @@ contains:
   with optimistic concurrency checks over the complete settings snapshot;
 - an x64 C++20 native-capture foundation with a versioned C ABI, stable status
   codes, a bounded polled event queue, fail-closed privacy inputs, and an
-  original target-scoped safety core; its additive 112-byte runtime
-  authorization binds Windows target identity and target epoch, while each
+  original target-scoped safety core; its additive 224-byte runtime
+  authorization preserves the legacy 112-byte prefix and binds Windows target
+  identity, target epoch, HMONITOR, and display device key, while each
   native permit adds a native-instance epoch and persistence generation behind
-  tested shared/unique write permits; a native-issued 64-byte, single-use
-  command admission additionally binds Start/Resume to the current native
-  instance, runtime revision, persistence generation, target epoch, and runtime
-  owner epoch;
+  tested shared/unique write permits; a native-issued 64-byte, single-use,
+  display-bound command admission additionally binds Start/Resume to the current
+  native instance, runtime revision, persistence generation, target epoch, and
+  runtime owner epoch;
 - a managed P/Invoke adapter with x64 ABI layout checks, safe-handle ownership,
-  bounded event polling, privacy-revision updates, complete safety-capability
-  negotiation, issuer-bound opaque admission stamps, explicit asynchronous
+  bounded event polling, privacy-revision updates, complete display-scoped
+  safety-capability negotiation, issuer-bound opaque admission stamps,
+  explicit asynchronous
   owner/quiesce behavior, and real-DLL integration tests;
 - a synchronous, fail-closed Windows foreground-target verifier foundation that
   double-checks the foreground HWND, owner TID/PID, process creation time and
@@ -110,12 +112,14 @@ queue and providers, generated Daily and Weekly views, journal editing, and
 timeline-grounded chat are **not integrated yet**. The foreground verifier and
 event monitor are inactive foundations, not a live activation claim:
 image-bound publisher-signer verification, unique hosted-app attribution,
-display-topology/WTS/power/resume/presentation/storage signals, native display
-binding and DXGI output resolution, writer-side generation/permit enforcement,
-and the real DXGI/WIC/Media Foundation writer remain open gates. The bounded
-title-read and conservative window-location invalidation gates are closed; they
-do not prove foreground/top-level identity, bind an HMONITOR to a DXGI output,
-or authorize persistence. The safety core proves the synthetic authorization,
+display-topology/WTS/power/resume/presentation/storage signals, callback-time
+native topology invalidation, writer-side DXGI binding revalidation and
+generation/permit enforcement, and the real DXGI/WIC/Media Foundation writer
+remain open gates. The bounded title-read, conservative window-location
+invalidation, display-scoped authorization, and strict no-fallback DXGI output
+resolver gates are closed; they do not prove foreground/top-level identity or
+that a real writer revalidates the resolved output before and after acquisition.
+The safety core proves the synthetic authorization,
 persistence-permit, and stop/join/destroy boundary; it does not prove that a
 real frame or metadata writer uses that boundary.
 Owner-bound Start/Resume admission is implemented:
@@ -152,6 +156,9 @@ semantics, and remaining native-writer and Windows-lifecycle gates. The
 records the process-wide 100 ms title-worker fail-stop contract, exact
 location/name hook range, conservative object filtering, and the two activation
 gates closed by that implementation.
+The [display-scoped authorization and DXGI output-resolution ADR](docs/adr/0008-display-scoped-authorization-and-dxgi-output-resolution.md)
+records the compatible 224-byte ABI tail, display-bound safety identity,
+capability dependencies, and strict unique-output resolver contract.
 
 ## Platform Support
 
@@ -191,7 +198,7 @@ pwsh -File .\scripts\Build-Native.ps1 -Configuration Debug
 
 `Build-Native.ps1` selects an installed Visual Studio generator supported by
 CMake, ignores ambient `CMAKE_GENERATOR*` overrides, preserves x64
-multi-configuration output, builds the C++20 DLL, and runs all six native C
+multi-configuration output, builds the C++20 DLL, and runs all seven native C
 and C++ tests with per-test timeouts. Use `-Fresh` to recreate CMake state, or
 `-Generator` to select a specific installed Visual Studio generator.
 

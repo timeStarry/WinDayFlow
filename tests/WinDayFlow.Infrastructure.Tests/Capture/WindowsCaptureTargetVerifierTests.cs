@@ -35,6 +35,11 @@ public sealed class WindowsCaptureTargetVerifierTests
             first.DisplayTarget.State);
         Assert.Equal(MonitorHandle, first.DisplayTarget.MonitorHandle);
         Assert.Equal(DisplayDeviceKey, first.DisplayTarget.DeviceKey);
+        Assert.Equal(MonitorHandle, first.Target.DisplayMonitorHandle);
+        Assert.Equal(
+            DisplayDeviceKey,
+            first.Target.DisplayDeviceKey,
+            ignoreCase: true);
         Assert.Equal("editor.exe", first.CaptureIdentity.ExecutableName);
         Assert.Equal(
             "Contoso.Editor_123456789abcd",

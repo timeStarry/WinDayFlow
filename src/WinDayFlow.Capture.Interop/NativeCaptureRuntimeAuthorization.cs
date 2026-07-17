@@ -1,3 +1,5 @@
+using System.Text;
+
 namespace WinDayFlow.Capture.Interop;
 
 public enum NativeCaptureTargetIdentityState
@@ -10,18 +12,29 @@ public enum NativeCaptureTargetIdentityState
 public sealed class NativeCaptureTargetIdentity
     : IEquatable<NativeCaptureTargetIdentity>
 {
+    internal const int MaximumDisplayDeviceKeyCharacters = 31;
+    internal const int MaximumDisplayDeviceKeyUtf8Bytes = 93;
+
+    private static readonly UTF8Encoding StrictUtf8 = new(
+        encoderShouldEmitUTF8Identifier: false,
+        throwOnInvalidBytes: true);
+
     private NativeCaptureTargetIdentity(
         NativeCaptureTargetIdentityState state,
         ulong windowHandle,
         uint processId,
         ulong processCreationTime100ns,
-        ulong targetEpoch)
+        ulong targetEpoch,
+        ulong displayMonitorHandle,
+        string? displayDeviceKey)
     {
         State = state;
         WindowHandle = windowHandle;
         ProcessId = processId;
         ProcessCreationTime100ns = processCreationTime100ns;
         TargetEpoch = targetEpoch;
+        DisplayMonitorHandle = displayMonitorHandle;
+        DisplayDeviceKey = displayDeviceKey;
     }
 
     public static NativeCaptureTargetIdentity Unknown { get; } = new(
@@ -29,14 +42,18 @@ public sealed class NativeCaptureTargetIdentity
         0,
         0,
         0,
-        0);
+        0,
+        0,
+        displayDeviceKey: null);
 
     public static NativeCaptureTargetIdentity Absent { get; } = new(
         NativeCaptureTargetIdentityState.Absent,
         0,
         0,
         0,
-        0);
+        0,
+        0,
+        displayDeviceKey: null);
 
     public NativeCaptureTargetIdentityState State { get; }
 
@@ -48,22 +65,38 @@ public sealed class NativeCaptureTargetIdentity
 
     public ulong TargetEpoch { get; }
 
+    public ulong DisplayMonitorHandle { get; }
+
+    public string? DisplayDeviceKey { get; }
+
     public static NativeCaptureTargetIdentity Present(
         ulong windowHandle,
         uint processId,
         ulong processCreationTime100ns,
-        ulong targetEpoch)
+        ulong targetEpoch,
+        ulong displayMonitorHandle,
+        string displayDeviceKey)
     {
         ArgumentOutOfRangeException.ThrowIfZero(windowHandle);
         ArgumentOutOfRangeException.ThrowIfZero(processId);
         ArgumentOutOfRangeException.ThrowIfZero(processCreationTime100ns);
         ArgumentOutOfRangeException.ThrowIfZero(targetEpoch);
+        ArgumentOutOfRangeException.ThrowIfZero(displayMonitorHandle);
+        if (!IsValidDisplayDeviceKey(displayDeviceKey))
+        {
+            throw new ArgumentException(
+                "A display device key must have valid bounded UTF-8 content and cannot contain control characters.",
+                nameof(displayDeviceKey));
+        }
+
         return new NativeCaptureTargetIdentity(
             NativeCaptureTargetIdentityState.Present,
             windowHandle,
             processId,
             processCreationTime100ns,
-            targetEpoch);
+            targetEpoch,
+            displayMonitorHandle,
+            displayDeviceKey);
     }
 
     public bool Equals(NativeCaptureTargetIdentity? other)
@@ -74,22 +107,54 @@ public sealed class NativeCaptureTargetIdentity
                 && WindowHandle == other.WindowHandle
                 && ProcessId == other.ProcessId
                 && ProcessCreationTime100ns == other.ProcessCreationTime100ns
-                && TargetEpoch == other.TargetEpoch);
+                && TargetEpoch == other.TargetEpoch
+                && DisplayMonitorHandle == other.DisplayMonitorHandle
+                && string.Equals(
+                    DisplayDeviceKey,
+                    other.DisplayDeviceKey,
+                    StringComparison.OrdinalIgnoreCase));
     }
 
     public override bool Equals(object? obj) =>
         obj is NativeCaptureTargetIdentity other && Equals(other);
 
-    public override int GetHashCode() => HashCode.Combine(
-        State,
-        WindowHandle,
-        ProcessId,
-        ProcessCreationTime100ns,
-        TargetEpoch);
+    public override int GetHashCode()
+    {
+        return HashCode.Combine(
+            State,
+            WindowHandle,
+            ProcessId,
+            ProcessCreationTime100ns,
+            TargetEpoch,
+            DisplayMonitorHandle,
+            DisplayDeviceKey is null
+                ? 0
+                : StringComparer.OrdinalIgnoreCase.GetHashCode(DisplayDeviceKey));
+    }
 
     public override string ToString()
     {
         return $"{nameof(NativeCaptureTargetIdentity)} {{ State = {State}, Values = [REDACTED] }}";
+    }
+
+    internal static bool IsValidDisplayDeviceKey(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)
+            || value.Length > MaximumDisplayDeviceKeyCharacters
+            || value.Any(char.IsControl))
+        {
+            return false;
+        }
+
+        try
+        {
+            var byteCount = StrictUtf8.GetByteCount(value);
+            return byteCount is > 0 and <= MaximumDisplayDeviceKeyUtf8Bytes;
+        }
+        catch (EncoderFallbackException)
+        {
+            return false;
+        }
     }
 }
 

@@ -75,6 +75,7 @@ internal unsafe struct NativeCapturePrivacyContextV1
 internal unsafe struct NativeCaptureRuntimeAuthorizationV1
 {
     internal const uint TargetPresent = 1U << 0;
+    internal const uint TargetDisplayPresent = 1U << 1;
 
     public uint StructSize;
     public uint AbiVersion;
@@ -93,6 +94,11 @@ internal unsafe struct NativeCaptureRuntimeAuthorizationV1
     public int WindowAllowed;
     public int StorageAvailable;
     public fixed uint Reserved[8];
+    public ulong TargetDisplayMonitorHandle;
+    public uint TargetDisplayDeviceKeyUtf8Length;
+    public uint TargetDisplayReserved;
+    public fixed byte TargetDisplayDeviceKeyUtf8[
+        NativeCaptureAbiContract.DisplayDeviceKeyUtf8Capacity];
 }
 
 [StructLayout(LayoutKind.Sequential, Pack = 8)]

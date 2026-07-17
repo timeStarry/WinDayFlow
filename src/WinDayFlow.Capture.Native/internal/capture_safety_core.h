@@ -7,6 +7,7 @@
 #include <mutex>
 #include <optional>
 #include <shared_mutex>
+#include <string>
 #include <utility>
 
 #include "privacy_guard.h"
@@ -18,8 +19,10 @@ struct CaptureTargetIdentity {
   uint32_t process_id = 0;
   uint64_t process_creation_time_100ns = 0;
   uint64_t target_epoch = 0;
+  uint64_t display_monitor_handle = 0;
+  std::wstring display_device_key;
 
-  bool operator==(const CaptureTargetIdentity&) const = default;
+  bool operator==(const CaptureTargetIdentity& other) const;
 };
 
 struct RuntimeAuthorization {

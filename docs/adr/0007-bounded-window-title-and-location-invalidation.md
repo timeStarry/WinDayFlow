@@ -143,7 +143,8 @@ It does not activate capture. All of these gates remain open:
 2. Hosted Windows surfaces must be attributed to one unique child application.
 3. Display-topology, WTS session, power/resume, presentation, and periodic
    storage signals must join the invalidation and observation lifecycle.
-4. The HMONITOR/device key must be natively bound to the selected DXGI output.
+4. The real writer must use the strict ADR 0008 HMONITOR/device-key resolver and
+   revalidate the selected output before and after acquisition.
 5. A writer-side generation/permit gate must reject stale authority through
    acquisition, encoding, temporary output, final publication, and event commit.
 6. The real DXGI/WIC/Media Foundation writer, recovery, and cleanup path must use
@@ -210,5 +211,6 @@ remain distinguishable from this ordinary fail-closed result.
 Location changes now revoke stale managed observation immediately instead of
 waiting for a poll. Conservative filtering may cause extra re-observation for a
 non-target window, but avoids treating an event notification as target identity.
-Neither improvement supplies native display binding or writer-side persistence
-authority, so the recorder remains disabled.
+Neither improvement supplies writer-side DXGI revalidation or persistence
+authority, so the recorder remains disabled. ADR 0008 separately supplies the
+display-scoped authorization and strict resolver foundations.

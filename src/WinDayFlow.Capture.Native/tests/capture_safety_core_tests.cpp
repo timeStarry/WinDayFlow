@@ -9,6 +9,8 @@
 #include <iostream>
 #include <limits>
 #include <mutex>
+#include <string>
+#include <string_view>
 #include <stdexcept>
 #include <thread>
 #include <vector>
@@ -25,6 +27,7 @@ using windayflow::capture::CaptureCommandAdmissionResult;
 using windayflow::capture::CaptureSafetyCore;
 using windayflow::capture::CaptureSafetyUpdateResult;
 using windayflow::capture::CaptureTargetIdentity;
+using windayflow::capture::PersistenceToken;
 using windayflow::capture::PrivacyContext;
 using windayflow::capture::RuntimeAuthorization;
 
@@ -80,9 +83,17 @@ PrivacyContext BlockedPrivacy(uint64_t revision) {
 CaptureTargetIdentity Target(uint64_t window_handle,
                              uint32_t process_id,
                              uint64_t creation_time,
-                             uint64_t target_epoch) {
+                             uint64_t target_epoch,
+                             uint64_t display_monitor_handle = 400,
+                             std::wstring_view display_device_key =
+                                 L"\\\\.\\DISPLAY1") {
   return CaptureTargetIdentity{
-      window_handle, process_id, creation_time, target_epoch};
+      window_handle,
+      process_id,
+      creation_time,
+      target_epoch,
+      display_monitor_handle,
+      std::wstring(display_device_key)};
 }
 
 RuntimeAuthorization AllowedAuthorization(
@@ -114,7 +125,38 @@ bool TestTargetTupleAndInstanceEpoch() {
   CaptureSafetyCore core(11, 1);
   const CaptureTargetIdentity target = Target(100, 200, 300, 10);
   uint64_t generation = 0;
+  CaptureTargetIdentity incomplete_display = target;
+  incomplete_display.display_monitor_handle = 0;
   if (!Expect(core.UpdateRuntimeAuthorization(
+                  AllowedAuthorization(1, incomplete_display), &generation) ==
+                  CaptureSafetyUpdateResult::kInvalidArgument &&
+                  generation == 1,
+              "an incomplete display target was authorized") ||
+      !Expect(core.UpdateRuntimeAuthorization(
+                  AllowedAuthorization(
+                      1,
+                      Target(100, 200, 300, 10, 400, L"   ")),
+                  &generation) == CaptureSafetyUpdateResult::kInvalidArgument &&
+                  generation == 1,
+              "a whitespace-only display target was authorized") ||
+      !Expect(core.UpdateRuntimeAuthorization(
+                  AllowedAuthorization(
+                      1,
+                      Target(100, 200, 300, 10, 400,
+                             std::wstring(32, L'A'))),
+                  &generation) == CaptureSafetyUpdateResult::kInvalidArgument &&
+                  generation == 1,
+              "an overlength display target was authorized") ||
+      !Expect(core.UpdateRuntimeAuthorization(
+                  AllowedAuthorization(
+                      1,
+                      Target(100, 200, 300, 10, 400,
+                             std::wstring(
+                                 L"\\\\.\\DIS" L"\x0001" L"PLAY1"))),
+                  &generation) == CaptureSafetyUpdateResult::kInvalidArgument &&
+                  generation == 1,
+              "a control-character display target was authorized") ||
+      !Expect(core.UpdateRuntimeAuthorization(
                   AllowedAuthorization(1, target), &generation) ==
                   CaptureSafetyUpdateResult::kOk &&
                   generation == 2,
@@ -129,11 +171,23 @@ bool TestTargetTupleAndInstanceEpoch() {
     return false;
   }
 
-  const std::array<CaptureTargetIdentity, 4> mismatches{
+  const CaptureTargetIdentity case_only_display_key =
+      Target(100, 200, 300, 10, 400, L"\\\\.\\display1");
+  if (!Expect(core.MintPersistenceToken(case_only_display_key).has_value(),
+              "case-only display key change invalidated the target") ||
+      !Expect(static_cast<bool>(
+                  core.AcquirePersistencePermit(*token, case_only_display_key)),
+              "case-only display key change rejected a permit")) {
+    return false;
+  }
+
+  const std::array<CaptureTargetIdentity, 6> mismatches{
       Target(101, 200, 300, 10),
       Target(100, 201, 300, 10),
       Target(100, 200, 301, 10),
       Target(100, 200, 300, 11),
+      Target(100, 200, 300, 10, 401),
+      Target(100, 200, 300, 10, 400, L"\\\\.\\DISPLAY2"),
   };
   for (const CaptureTargetIdentity& mismatch : mismatches) {
     if (!Expect(!core.MintPersistenceToken(mismatch).has_value(),
@@ -164,7 +218,18 @@ bool TestTargetTupleAndInstanceEpoch() {
     return false;
   }
 
-  const CaptureTargetIdentity next_target = Target(101, 200, 300, 11);
+  const CaptureTargetIdentity reused_display_epoch =
+      Target(100, 200, 300, 10, 401);
+  if (!Expect(core.UpdateRuntimeAuthorization(
+                  AllowedAuthorization(2, reused_display_epoch), &generation) ==
+                  CaptureSafetyUpdateResult::kTargetMismatch &&
+                  generation == 2,
+              "a display tuple changed without an epoch advance")) {
+    return false;
+  }
+
+  const CaptureTargetIdentity next_target =
+      Target(101, 200, 300, 11, 401, L"\\\\.\\DISPLAY2");
   return Expect(core.UpdateRuntimeAuthorization(
                     AllowedAuthorization(2, next_target), &generation) ==
                     CaptureSafetyUpdateResult::kOk &&
@@ -172,6 +237,75 @@ bool TestTargetTupleAndInstanceEpoch() {
                 "an epoch-advanced target was rejected") &&
          Expect(!core.AcquirePersistencePermit(*token, target),
                 "a prior target token survived an authorization update");
+}
+
+bool TestCommandAdmissionRetainsDisplayBinding() {
+  CaptureSafetyCore core(
+      44,
+      1,
+      [](uint64_t* low, uint64_t* high) {
+        *low = 4'401;
+        *high = 4'402;
+        return true;
+      });
+  const CaptureTargetIdentity target_a = Target(100, 200, 300, 10);
+  const CaptureTargetIdentity target_b =
+      Target(100, 200, 300, 11, 401, L"\\\\.\\DISPLAY2");
+  uint64_t generation = 0;
+  if (core.UpdateRuntimeAuthorization(
+          AllowedAuthorization(1, target_a), &generation) !=
+      CaptureSafetyUpdateResult::kOk) {
+    return Expect(false, "display-bound command core could not be authorized");
+  }
+
+  CaptureCommandAdmission stale_admission;
+  if (core.IssueCommandAdmission(CaptureCommand::kStart,
+                                 generation,
+                                 target_a.target_epoch,
+                                 7,
+                                 &stale_admission) !=
+      CaptureCommandAdmissionResult::kOk) {
+    return Expect(false, "display-bound command admission was not issued");
+  }
+  if (!Expect(core.UpdateRuntimeAuthorization(
+                  AllowedAuthorization(2, target_b), &generation) ==
+                  CaptureSafetyUpdateResult::kOk &&
+                  generation == 3,
+              "display-bound target replacement was rejected")) {
+    return false;
+  }
+
+  CaptureCommandAdmissionPermit permit;
+  if (!Expect(core.AcquireCommandAdmissionPermit(
+                  stale_admission,
+                  CaptureCommand::kStart,
+                  7,
+                  &permit) ==
+                  CaptureCommandAdmissionResult::kAdmissionRejected,
+              "a command admission survived a display-bound target change")) {
+    return false;
+  }
+
+  CaptureCommandAdmission current_admission;
+  if (core.IssueCommandAdmission(CaptureCommand::kStart,
+                                 generation,
+                                 target_b.target_epoch,
+                                 7,
+                                 &current_admission) !=
+          CaptureCommandAdmissionResult::kOk ||
+      core.AcquireCommandAdmissionPermit(
+          current_admission,
+          CaptureCommand::kStart,
+          7,
+          &permit) != CaptureCommandAdmissionResult::kOk) {
+    return Expect(false, "current display-bound command was not admitted");
+  }
+
+  const PersistenceToken& token = permit.persistence_token();
+  return Expect(token.target == target_b &&
+                    token.target.display_monitor_handle == 401 &&
+                    token.target.display_device_key == L"\\\\.\\DISPLAY2",
+                "command permit did not retain the complete display target");
 }
 
 bool TestRevisionAndGenerationRules() {
@@ -1018,6 +1152,7 @@ int main() {
       !TestRevisionAndGenerationRules() ||
       !TestPermitLinearizationAndPersistenceStages() ||
       !TestCommandAdmissionAuthenticityAndInvalidation() ||
+      !TestCommandAdmissionRetainsDisplayBinding() ||
       !TestCommandAdmissionLinearization() ||
       !TestRuntimeOwnerTimeoutAndSingleJoin()) {
     return 1;

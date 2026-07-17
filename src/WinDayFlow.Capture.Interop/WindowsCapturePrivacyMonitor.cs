@@ -20,13 +20,19 @@ public sealed record WindowsCapturePrivacyObservation
             NativeCaptureTargetIdentityState.Absent =>
                 displayTarget.State == WindowsCaptureDisplayTargetState.Absent,
             NativeCaptureTargetIdentityState.Present =>
-                displayTarget.State == WindowsCaptureDisplayTargetState.Present,
+                displayTarget.State == WindowsCaptureDisplayTargetState.Present
+                && signals.Target.DisplayMonitorHandle
+                    == displayTarget.MonitorHandle
+                && string.Equals(
+                    signals.Target.DisplayDeviceKey,
+                    displayTarget.DeviceKey,
+                    StringComparison.OrdinalIgnoreCase),
             _ => false,
         };
         if (!statesMatch)
         {
             throw new ArgumentException(
-                "The capture target and display target must describe the same observation state.",
+                "The capture target and display target must describe the same observation.",
                 nameof(displayTarget));
         }
     }

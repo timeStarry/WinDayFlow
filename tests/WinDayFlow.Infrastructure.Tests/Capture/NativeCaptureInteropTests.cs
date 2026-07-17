@@ -1,3 +1,5 @@
+using System.Runtime.InteropServices;
+using System.Text;
 using WinDayFlow.Application.Capture;
 using WinDayFlow.Capture.Interop;
 using Xunit;
@@ -16,10 +18,13 @@ public sealed class NativeCaptureInteropTests
         Assert.Equal(32, layout.ConfigOutputDirectoryOffset);
         Assert.Equal(80, layout.PrivacyContextSize);
         Assert.Equal(40, layout.PrivacyPolicyRevisionOffset);
-        Assert.Equal(112, layout.RuntimeAuthorizationSize);
+        Assert.Equal(224, layout.RuntimeAuthorizationSize);
         Assert.Equal(8, layout.RuntimeAuthorizationRevisionOffset);
         Assert.Equal(16, layout.RuntimeAuthorizationTargetEpochOffset);
         Assert.Equal(48, layout.RuntimeAuthorizationDecisionOffset);
+        Assert.Equal(112, layout.RuntimeAuthorizationDisplayMonitorOffset);
+        Assert.Equal(120, layout.RuntimeAuthorizationDisplayDeviceKeyLengthOffset);
+        Assert.Equal(128, layout.RuntimeAuthorizationDisplayDeviceKeyOffset);
         Assert.Equal(64, layout.CommandAdmissionSize);
         Assert.Equal(16, layout.CommandAdmissionRuntimeRevisionOffset);
         Assert.Equal(24, layout.CommandAdmissionPersistenceGenerationOffset);
@@ -47,6 +52,12 @@ public sealed class NativeCaptureInteropTests
         Assert.Equal(
             1UL << 8,
             (ulong)NativeCaptureCapabilities.CommandAdmission);
+        Assert.Equal(
+            1UL << 9,
+            (ulong)NativeCaptureCapabilities.DisplayScopedAuthorization);
+        Assert.Equal(
+            1UL << 10,
+            (ulong)NativeCaptureCapabilities.DisplayBoundCommandAdmission);
     }
 
     [Fact]
@@ -73,6 +84,12 @@ public sealed class NativeCaptureInteropTests
         | NativeCaptureCapabilities.CommandAdmission))]
     [InlineData((ulong)(NativeCaptureCapabilities.PrivacyGuard
         | NativeCaptureCapabilities.EventQueue
+        | NativeCaptureCapabilities.TargetScopedAuthorization
+        | NativeCaptureCapabilities.PersistenceGenerationBarrier
+        | NativeCaptureCapabilities.DeterministicStop
+        | NativeCaptureCapabilities.DisplayBoundCommandAdmission))]
+    [InlineData((ulong)(NativeCaptureCapabilities.PrivacyGuard
+        | NativeCaptureCapabilities.EventQueue
         | NativeCaptureCapabilities.ScreenCapture
         | NativeCaptureCapabilities.H264Chunks))]
     [InlineData((ulong)(NativeCaptureCapabilities.PrivacyGuard
@@ -94,6 +111,68 @@ public sealed class NativeCaptureInteropTests
             new NativeCaptureConfiguration(Path.GetTempPath()),
             NativeCapturePrivacyContext.FailClosed(runtimePolicyRevision: 1),
             nativeApi));
+    }
+
+    [Fact]
+    public void LegacyCommandAdmissionProfileRemainsProbeCompatibleButCannotCreateNewOwner()
+    {
+        var legacyCapabilities = NativeCaptureAbiContract.RuntimeSafetyCapabilities
+            | NativeCaptureCapabilities.CommandAdmission;
+        using var nativeApi = new FakeNativeCaptureApi
+        {
+            Capabilities = legacyCapabilities,
+        };
+
+        var probe = NativeCaptureBackend.Probe(nativeApi);
+
+        Assert.True(probe.AbiCompatible);
+        Assert.Null(probe.Failure);
+        using var backend = new NativeCaptureBackend(
+            new NativeCaptureConfiguration(Path.GetTempPath()),
+            NativeCapturePrivacyContext.FailClosed(runtimePolicyRevision: 1),
+            nativeApi);
+        Assert.False(backend.SupportsRuntimeAuthorization);
+        Assert.False(backend.SupportsCommandAdmission);
+        Assert.Throws<NotSupportedException>(() =>
+            new NativeCaptureRuntimeOwner(
+                backend,
+                NativeCapturePrivacyContext.FailClosed(runtimePolicyRevision: 1)));
+    }
+
+    [Fact]
+    public void LegacyAndDisplayBoundCommandAdmissionProfilesCannotBeAdvertisedTogether()
+    {
+        using var nativeApi = new FakeNativeCaptureApi
+        {
+            Capabilities = NativeCaptureAbiContract.RuntimeOwnerCapabilities
+                | NativeCaptureCapabilities.CommandAdmission,
+        };
+
+        var probe = NativeCaptureBackend.Probe(nativeApi);
+
+        Assert.True(probe.LibraryLoaded);
+        Assert.False(probe.AbiCompatible);
+        Assert.Contains("both legacy and display-bound", probe.Failure);
+        Assert.Throws<BadImageFormatException>(() => new NativeCaptureBackend(
+            new NativeCaptureConfiguration(Path.GetTempPath()),
+            NativeCapturePrivacyContext.FailClosed(runtimePolicyRevision: 1),
+            nativeApi));
+    }
+
+    [Fact]
+    public async Task OldRuntimeSafetyMaskCannotAcceptDisplayBoundAuthorization()
+    {
+        using var directory = new TemporaryDirectory();
+        using var nativeApi = new FakeNativeCaptureApi
+        {
+            Capabilities = NativeCaptureAbiContract.RuntimeSafetyCapabilities,
+        };
+        using var backend = CreateBackend(directory.Path, nativeApi);
+
+        Assert.False(backend.SupportsRuntimeAuthorization);
+        await Assert.ThrowsAsync<NotSupportedException>(() =>
+            backend.UpdateRuntimeAuthorizationAsync(
+                CreateAllowedRuntimeAuthorization(runtimePolicyRevision: 2)));
     }
 
     [Fact]
@@ -202,8 +281,12 @@ public sealed class NativeCaptureInteropTests
             NativeCaptureCapabilities.PersistenceGenerationBarrier));
         Assert.True(probe.Capabilities.HasFlag(
             NativeCaptureCapabilities.DeterministicStop));
-        Assert.True(probe.Capabilities.HasFlag(
+        Assert.False(probe.Capabilities.HasFlag(
             NativeCaptureCapabilities.CommandAdmission));
+        Assert.True(probe.Capabilities.HasFlag(
+            NativeCaptureCapabilities.DisplayScopedAuthorization));
+        Assert.True(probe.Capabilities.HasFlag(
+            NativeCaptureCapabilities.DisplayBoundCommandAdmission));
         Assert.False(probe.Capabilities.HasFlag(NativeCaptureCapabilities.ScreenCapture));
         Assert.Null(probe.Failure);
     }
@@ -303,7 +386,9 @@ public sealed class NativeCaptureInteropTests
                 windowHandle: 0x5678,
                 processId: 43,
                 processCreationTime100ns: 101,
-                targetEpoch: 2));
+                targetEpoch: 2,
+                displayMonitorHandle: 0x6002,
+                displayDeviceKey: @"\\.\DISPLAY2"));
         var second = await backend.UpdateRuntimeAuthorizationAsync(secondAuthorization);
         var revoked = await backend.RevokeRuntimeAuthorizationAsync();
 
@@ -323,18 +408,77 @@ public sealed class NativeCaptureInteropTests
         var generation = await backend.UpdateRuntimeAuthorizationAsync(authorization);
 
         Assert.True(generation > 0);
-        Assert.Equal<uint>(112, nativeApi.LastAuthorizationStructSize);
+        Assert.Equal<uint>(224, nativeApi.LastAuthorizationStructSize);
         Assert.Equal<ulong>(2, nativeApi.LastAuthorizationRevision);
         Assert.Equal<ulong>(1, nativeApi.LastAuthorizationTargetEpoch);
         Assert.Equal<ulong>(0x1234, nativeApi.LastAuthorizationWindowHandle);
         Assert.Equal<uint>(42, nativeApi.LastAuthorizationProcessId);
         Assert.Equal<ulong>(100, nativeApi.LastAuthorizationProcessCreationTime100ns);
-        Assert.Equal<uint>(1, nativeApi.LastAuthorizationTargetFlags);
+        Assert.Equal<uint>(3, nativeApi.LastAuthorizationTargetFlags);
+        Assert.Equal<ulong>(0x6001, nativeApi.LastAuthorizationDisplayMonitorHandle);
+        Assert.Equal<uint>(12, nativeApi.LastAuthorizationDisplayDeviceKeyUtf8Length);
+        Assert.Equal(
+            @"\\.\DISPLAY1",
+            Encoding.UTF8.GetString(
+                nativeApi.LastAuthorizationDisplayDeviceKeyUtf8,
+                0,
+                checked((int)nativeApi.LastAuthorizationDisplayDeviceKeyUtf8Length)));
+        Assert.All(
+            nativeApi.LastAuthorizationDisplayDeviceKeyUtf8.Skip(
+                checked((int)nativeApi.LastAuthorizationDisplayDeviceKeyUtf8Length)),
+            static value => Assert.Equal(0, value));
         Assert.Equal(
             NativeCapturePolicyDecision.Allow,
             nativeApi.LastAuthorizationConsent);
         Assert.True(await backend.RevokeRuntimeAuthorizationAsync() >= generation);
         Assert.Equal(1, nativeApi.RevokeRuntimeAuthorizationCallCount);
+    }
+
+    [Fact]
+    public void InitialFailClosedAuthorizationClearsTheDisplayAbiTail()
+    {
+        using var directory = new TemporaryDirectory();
+        using var nativeApi = new FakeNativeCaptureApi();
+        using var backend = CreateBackend(directory.Path, nativeApi);
+
+        Assert.Equal<uint>(224, nativeApi.LastAuthorizationStructSize);
+        Assert.Equal<uint>(0, nativeApi.LastAuthorizationTargetFlags);
+        Assert.Equal<ulong>(0, nativeApi.LastAuthorizationDisplayMonitorHandle);
+        Assert.Equal<uint>(0, nativeApi.LastAuthorizationDisplayDeviceKeyUtf8Length);
+        Assert.All(
+            nativeApi.LastAuthorizationDisplayDeviceKeyUtf8,
+            static value => Assert.Equal(0, value));
+    }
+
+    [Fact]
+    public async Task DisplayDeviceKeyUsesStrictBoundedUtf8AndZeroesTheUnusedTail()
+    {
+        using var directory = new TemporaryDirectory();
+        using var nativeApi = new FakeNativeCaptureApi();
+        using var backend = CreateBackend(directory.Path, nativeApi);
+        var displayDeviceKey = new string('\u0800', 31);
+        var authorization = new NativeCaptureRuntimeAuthorization(
+            CreateAllowedRuntimeAuthorization(runtimePolicyRevision: 2).PrivacyContext,
+            NativeCaptureTargetIdentity.Present(
+                windowHandle: 0x1234,
+                processId: 42,
+                processCreationTime100ns: 100,
+                targetEpoch: 1,
+                displayMonitorHandle: 0x6001,
+                displayDeviceKey));
+
+        await backend.UpdateRuntimeAuthorizationAsync(authorization);
+
+        Assert.Equal<uint>(93, nativeApi.LastAuthorizationDisplayDeviceKeyUtf8Length);
+        Assert.Equal(
+            displayDeviceKey,
+            Encoding.UTF8.GetString(
+                nativeApi.LastAuthorizationDisplayDeviceKeyUtf8,
+                0,
+                checked((int)nativeApi.LastAuthorizationDisplayDeviceKeyUtf8Length)));
+        Assert.All(
+            nativeApi.LastAuthorizationDisplayDeviceKeyUtf8.Skip(93),
+            static value => Assert.Equal(0, value));
     }
 
     [Fact]
@@ -536,6 +680,7 @@ public sealed class NativeCaptureInteropTests
         Assert.Equal(CaptureReasonCode.BackendFault, backend.CurrentStatus.Reason);
         Assert.Equal(CaptureErrorCode.NativeFailure, backend.CurrentStatus.ErrorCode);
         Assert.Contains("dropped 2 event", backend.CurrentStatus.Detail, StringComparison.Ordinal);
+        await nativeApi.RequestStopCalled.WaitAsync(TimeSpan.FromSeconds(2));
         Assert.True(nativeApi.RequestStopCallCount > 0);
 
         nativeApi.Enqueue(
@@ -570,6 +715,7 @@ public sealed class NativeCaptureInteropTests
         await WaitUntilAsync(
             () => backend.CurrentStatus.State == CaptureState.Faulted,
             TimeSpan.FromSeconds(2));
+        await nativeApi.RequestStopCalled.WaitAsync(TimeSpan.FromSeconds(2));
         Assert.Equal(0, Volatile.Read(ref published));
         Assert.True(nativeApi.RequestStopCallCount > 0);
     }
@@ -595,6 +741,7 @@ public sealed class NativeCaptureInteropTests
         await WaitUntilAsync(
             () => backend.CurrentStatus.State == CaptureState.Faulted,
             TimeSpan.FromSeconds(2));
+        await nativeApi.RequestStopCalled.WaitAsync(TimeSpan.FromSeconds(2));
         Assert.Equal(0, Volatile.Read(ref published));
         Assert.True(nativeApi.RequestStopCallCount > 0);
     }
@@ -777,7 +924,9 @@ public sealed class NativeCaptureInteropTests
                 windowHandle: 0x1234,
                 processId: 42,
                 processCreationTime100ns: 100,
-                targetEpoch: 1));
+                targetEpoch: 1,
+                displayMonitorHandle: 0x6001,
+                displayDeviceKey: @"\\.\DISPLAY1"));
     }
 
     private static bool RequireNativeBinary(NativeCaptureProbe probe)
@@ -825,6 +974,8 @@ public sealed class NativeCaptureInteropTests
             new(initialState: false);
         private readonly ManualResetEventSlim _releaseRuntimeAuthorizationUpdate =
             new(initialState: false);
+        private readonly TaskCompletionSource _requestStopCalled = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
         private bool _closed;
         private int _getCapabilitiesCallCount;
         private int _destroyCallCount;
@@ -845,7 +996,8 @@ public sealed class NativeCaptureInteropTests
             | NativeCaptureCapabilities.TargetScopedAuthorization
             | NativeCaptureCapabilities.PersistenceGenerationBarrier
             | NativeCaptureCapabilities.DeterministicStop
-            | NativeCaptureCapabilities.CommandAdmission;
+            | NativeCaptureCapabilities.DisplayScopedAuthorization
+            | NativeCaptureCapabilities.DisplayBoundCommandAdmission;
 
         private ulong _persistenceGeneration;
         private ulong _runtimePolicyRevision;
@@ -858,6 +1010,8 @@ public sealed class NativeCaptureInteropTests
         public int DestroyCallCount => Volatile.Read(ref _destroyCallCount);
 
         public int RequestStopCallCount => Volatile.Read(ref _requestStopCallCount);
+
+        public Task RequestStopCalled => _requestStopCalled.Task;
 
         public int RevokeRuntimeAuthorizationCallCount =>
             Volatile.Read(ref _revokeRuntimeAuthorizationCallCount);
@@ -878,6 +1032,13 @@ public sealed class NativeCaptureInteropTests
         public uint LastAuthorizationProcessId { get; private set; }
 
         public uint LastAuthorizationTargetFlags { get; private set; }
+
+        public ulong LastAuthorizationDisplayMonitorHandle { get; private set; }
+
+        public uint LastAuthorizationDisplayDeviceKeyUtf8Length { get; private set; }
+
+        public byte[] LastAuthorizationDisplayDeviceKeyUtf8 { get; private set; } =
+            new byte[NativeCaptureAbiContract.DisplayDeviceKeyUtf8Capacity];
 
         public NativeCapturePolicyDecision LastAuthorizationConsent { get; private set; }
 
@@ -949,6 +1110,21 @@ public sealed class NativeCaptureInteropTests
                 authorization.TargetProcessCreationTime100ns;
             LastAuthorizationProcessId = authorization.TargetProcessId;
             LastAuthorizationTargetFlags = authorization.TargetFlags;
+            LastAuthorizationDisplayMonitorHandle =
+                authorization.TargetDisplayMonitorHandle;
+            LastAuthorizationDisplayDeviceKeyUtf8Length =
+                authorization.TargetDisplayDeviceKeyUtf8Length;
+            var displayDeviceKey = new byte[
+                NativeCaptureAbiContract.DisplayDeviceKeyUtf8Capacity];
+            MemoryMarshal.AsBytes(
+                    MemoryMarshal.CreateReadOnlySpan(ref authorization, 1))
+                .Slice(
+                    NativeCaptureAbiContract.GetManagedLayout()
+                        .RuntimeAuthorizationDisplayDeviceKeyOffset,
+                    NativeCaptureAbiContract.DisplayDeviceKeyUtf8Capacity)
+                .CopyTo(displayDeviceKey);
+
+            LastAuthorizationDisplayDeviceKeyUtf8 = displayDeviceKey;
             LastAuthorizationConsent =
                 (NativeCapturePolicyDecision)authorization.ConsentGranted;
             _runtimePolicyRevision = authorization.RuntimePolicyRevision;
@@ -1067,6 +1243,7 @@ public sealed class NativeCaptureInteropTests
             _ = handle;
             Interlocked.Increment(ref _requestStopCallCount);
             RequestStopSequence = Interlocked.Increment(ref _operationSequence);
+            _requestStopCalled.TrySetResult();
             return NativeCaptureResult.Ok;
         }
 

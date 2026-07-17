@@ -125,7 +125,9 @@ enum {
   WDF_CAPTURE_CAPABILITY_TARGET_SCOPED_AUTHORIZATION = 1ULL << 5,
   WDF_CAPTURE_CAPABILITY_PERSISTENCE_GENERATION_BARRIER = 1ULL << 6,
   WDF_CAPTURE_CAPABILITY_DETERMINISTIC_STOP = 1ULL << 7,
-  WDF_CAPTURE_CAPABILITY_COMMAND_ADMISSION = 1ULL << 8
+  WDF_CAPTURE_CAPABILITY_COMMAND_ADMISSION = 1ULL << 8,
+  WDF_CAPTURE_CAPABILITY_DISPLAY_SCOPED_AUTHORIZATION = 1ULL << 9,
+  WDF_CAPTURE_CAPABILITY_DISPLAY_BOUND_COMMAND_ADMISSION = 1ULL << 10
 };
 
 typedef int32_t wdf_capture_command;
@@ -136,8 +138,13 @@ enum {
 
 typedef uint32_t wdf_capture_target_flags;
 enum {
-  WDF_CAPTURE_TARGET_PRESENT = 1U << 0
+  WDF_CAPTURE_TARGET_PRESENT = 1U << 0,
+  WDF_CAPTURE_TARGET_DISPLAY_PRESENT = 1U << 1
 };
+
+#define WDF_CAPTURE_RUNTIME_AUTHORIZATION_V1_LEGACY_SIZE 112U
+#define WDF_CAPTURE_DISPLAY_DEVICE_KEY_UTF8_CAPACITY 96U
+#define WDF_CAPTURE_DISPLAY_DEVICE_KEY_UTF8_MAX_LENGTH 93U
 
 #if defined(_MSC_VER) || defined(__clang__) || defined(__GNUC__)
 #pragma pack(push, 8)
@@ -190,6 +197,11 @@ typedef struct wdf_capture_runtime_authorization_v1 {
   wdf_capture_policy_decision window_allowed;
   wdf_capture_policy_decision storage_available;
   uint32_t reserved[8];
+  uint64_t target_display_monitor_handle;
+  uint32_t target_display_device_key_utf8_length;
+  uint32_t target_display_reserved;
+  char target_display_device_key_utf8
+      [WDF_CAPTURE_DISPLAY_DEVICE_KEY_UTF8_CAPACITY];
 } wdf_capture_runtime_authorization_v1;
 
 typedef struct wdf_capture_command_admission_v1 {
@@ -244,7 +256,7 @@ static_assert(sizeof(wdf_capture_config_v1) == 80);
 static_assert(offsetof(wdf_capture_config_v1, output_directory_utf8) == 32);
 static_assert(sizeof(wdf_capture_privacy_context_v1) == 80);
 static_assert(offsetof(wdf_capture_privacy_context_v1, policy_revision) == 40);
-static_assert(sizeof(wdf_capture_runtime_authorization_v1) == 112);
+static_assert(sizeof(wdf_capture_runtime_authorization_v1) == 224);
 static_assert(offsetof(wdf_capture_runtime_authorization_v1,
                        runtime_policy_revision) == 8);
 static_assert(offsetof(wdf_capture_runtime_authorization_v1, target_epoch) ==
@@ -260,6 +272,14 @@ static_assert(offsetof(wdf_capture_runtime_authorization_v1, target_flags) ==
 static_assert(offsetof(wdf_capture_runtime_authorization_v1,
                        consent_granted) == 48);
 static_assert(offsetof(wdf_capture_runtime_authorization_v1, reserved) == 80);
+static_assert(offsetof(wdf_capture_runtime_authorization_v1,
+                       target_display_monitor_handle) == 112);
+static_assert(offsetof(wdf_capture_runtime_authorization_v1,
+                       target_display_device_key_utf8_length) == 120);
+static_assert(offsetof(wdf_capture_runtime_authorization_v1,
+                       target_display_reserved) == 124);
+static_assert(offsetof(wdf_capture_runtime_authorization_v1,
+                       target_display_device_key_utf8) == 128);
 static_assert(sizeof(wdf_capture_command_admission_v1) == 64);
 static_assert(offsetof(wdf_capture_command_admission_v1, instance_epoch) == 8);
 static_assert(offsetof(wdf_capture_command_admission_v1,
@@ -284,7 +304,7 @@ _Static_assert(sizeof(wdf_capture_privacy_context_v1) == 80,
                "wdf_capture_privacy_context_v1 ABI layout changed");
 _Static_assert(offsetof(wdf_capture_privacy_context_v1, policy_revision) == 40,
                "wdf_capture_privacy_context_v1 revision offset changed");
-_Static_assert(sizeof(wdf_capture_runtime_authorization_v1) == 112,
+_Static_assert(sizeof(wdf_capture_runtime_authorization_v1) == 224,
                "wdf_capture_runtime_authorization_v1 ABI layout changed");
 _Static_assert(offsetof(wdf_capture_runtime_authorization_v1,
                         runtime_policy_revision) == 8,
@@ -309,6 +329,18 @@ _Static_assert(offsetof(wdf_capture_runtime_authorization_v1,
                "runtime authorization decisions offset changed");
 _Static_assert(offsetof(wdf_capture_runtime_authorization_v1, reserved) == 80,
                "runtime authorization reserved offset changed");
+_Static_assert(offsetof(wdf_capture_runtime_authorization_v1,
+                        target_display_monitor_handle) == 112,
+               "runtime authorization display monitor offset changed");
+_Static_assert(offsetof(wdf_capture_runtime_authorization_v1,
+                        target_display_device_key_utf8_length) == 120,
+               "runtime authorization display key length offset changed");
+_Static_assert(offsetof(wdf_capture_runtime_authorization_v1,
+                        target_display_reserved) == 124,
+               "runtime authorization display reserved offset changed");
+_Static_assert(offsetof(wdf_capture_runtime_authorization_v1,
+                        target_display_device_key_utf8) == 128,
+               "runtime authorization display key offset changed");
 _Static_assert(sizeof(wdf_capture_command_admission_v1) == 64,
                "wdf_capture_command_admission_v1 ABI layout changed");
 _Static_assert(offsetof(wdf_capture_command_admission_v1, instance_epoch) == 8,

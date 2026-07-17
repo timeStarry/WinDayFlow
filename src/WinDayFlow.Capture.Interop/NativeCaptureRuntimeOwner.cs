@@ -42,7 +42,7 @@ public sealed class NativeCaptureRuntimeOwner
         {
             _backend.DisposeSafelyAfterConstructionFailure();
             throw new NotSupportedException(
-                "The native capture runtime owner requires target authorization, a persistence generation barrier, deterministic stop, and command admission support.");
+                "The native capture runtime owner requires display-scoped target authorization, a persistence generation barrier, deterministic stop, and command admission support.");
         }
 
         try

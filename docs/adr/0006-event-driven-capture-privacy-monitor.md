@@ -75,8 +75,16 @@ once explicit invalidation begins, the legacy unbound update API cannot bypass
 the protocol.
 
 The coordinator serializes native updates with its existing apply gate and
-recomposes policy from the latest committed settings at publication time. If
-an older native Allow completes after its observation was invalidated, the
+recomposes policy from the latest committed settings at publication time. Once
+a signal passes its generation/phase check, the coordinator atomically installs
+it and closes managed admission before waiting for the native apply gate. This
+prepublication can only reduce authority; it never opens admission. After the
+gate is acquired, an update proceeds only if that signal is still the latest
+observation, so overlapping updates cannot revive an older value. An already
+admitted command may finish while the managed latch is closed, but no new
+managed admission can be issued.
+
+If an older native Allow completes after its observation was invalidated, the
 coordinator applies a compensating forced FailClosed update before releasing
 the gate. The same compensation rule applies to settings reconciliation and
 post-Stop reconciliation. Quiescence is monotonic: an authorizing settings
@@ -142,8 +150,8 @@ activates capture. At minimum, live integration still requires:
    child attribution;
 2. display-topology invalidation plus WTS session, power/resume, presentation,
    and periodic storage signals;
-3. native HMONITOR/device-key binding to the selected DXGI output and
-   writer-side target/display revalidation before and after acquisition;
+3. writer-side use of the ADR 0008 HMONITOR/device-key resolver and
+   target/display revalidation before and after acquisition;
 4. a native generation/permit gate that revokes or rejects already-held stale
    writer authority through publication;
 5. an explicit evidence-Pause versus sticky-session-Stop policy; and
@@ -177,8 +185,8 @@ publication.
 
 Future activation tests must add real Windows display-topology, WTS,
 power/resume, presentation, and storage-signal coverage; signer and hosted-app
-replacement; native display binding and DXGI mapping; writer generation/permit
-checks; and atomic artifact recovery.
+replacement; writer use and revalidation of native DXGI mapping;
+generation/permit checks; and atomic artifact recovery.
 
 ## Provenance
 

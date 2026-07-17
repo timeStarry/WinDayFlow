@@ -298,12 +298,14 @@ invalidates managed admission and target continuity, applies a generation-bound
 native barrier, and asynchronously re-observes through a dedicated WinEvent
 thread, but it is also not connected to the App or native owner.
 Image-bound publisher-signer verification, unique hosted-app child attribution,
-display-topology/WTS/power/resume/presentation/storage signals, native display
-binding and DXGI output resolution, writer-side generation/permit enforcement,
-and the real writer remain activation gates. The bounded title-read and
-conservative window-location invalidation gates are closed, but neither proves
-foreground identity or display binding. The DXGI/WIC/Media Foundation writer is
-not connected to the safety boundary. The native foundation does not reference
+display-topology/WTS/power/resume/presentation/storage signals, callback-time
+native topology invalidation, writer-side display revalidation and
+generation/permit enforcement, and the real writer remain activation gates.
+The bounded title-read, conservative window-location invalidation,
+display-scoped authorization, and strict DXGI resolver gates are closed, but
+they do not prove foreground identity or a real writer's pre/post-acquisition
+binding. The DXGI/WIC/Media Foundation writer is not connected to the safety
+boundary. The native foundation does not reference
 managed UI or domain assemblies. The App project may reference
 concrete adapters for dependency-injection registration; feature code consumes
 their inward-facing contracts. The domain project must not reference WinUI,
@@ -443,6 +445,12 @@ location invalidation without treating that event as foreground or top-level
 identity proof. It closes those two observation gates without activating
 capture.
 
+[ADR 0008](adr/0008-display-scoped-authorization-and-dxgi-output-resolution.md),
+"Display-Scoped Authorization and DXGI Output Resolution," fixes the compatible
+224-byte authorization tail, complete target/display identity, capability
+dependencies, and strict unique-output resolver. It closes the display contract
+and resolver foundations without claiming that a real writer uses them.
+
 `CaptureStatus` is a stable machine-readable contract, not just display text.
 It carries an unsigned 64-bit `Sequence`, `CaptureReasonCode`, and
 `CaptureErrorCode` in addition to state, timestamp, and optional localized
@@ -482,12 +490,18 @@ capture lifecycle gate. Runtime invalidation carries a separate monotonic
 generation; once observed, the lifecycle service completes one sticky Stop
 boundary even if authorization quickly recovers. Capture.Interop's tested
 coordinator serializes native updates without holding the native gate across a
-settings repository save, reconciles concurrent signals to the latest snapshot,
-assigns a process-local `ulong` runtime policy generation, and never derives it
-from the persisted privacy revision. Once a restrictive Prepare or signal drops
-the process latch, caller cancellation cannot cancel the native block update.
-The additive 112-byte runtime-authorization contract binds that decision to an
-HWND/PID/process-creation-time target tuple and target epoch. The native-issued
+settings repository save. A phase-eligible signal is atomically published and
+closes managed admission before it waits for the native apply gate; only the
+latest still-current signal proceeds to native. Authorizing settings commits
+therefore reconcile observations that arrive during an in-flight native update,
+while an already admitted command may finish after the managed latch closes.
+The coordinator assigns a process-local `ulong` runtime policy generation and
+never derives it from the persisted privacy revision. Once a restrictive
+Prepare or signal drops the process latch, caller cancellation cannot cancel
+the native block update.
+The additive 224-byte runtime-authorization contract preserves its legacy
+112-byte prefix and binds that decision to an HWND/PID/process-creation-time,
+target-epoch, and display-anchor tuple. The native-issued
 permit adds an internal native-instance epoch and persistence generation. The
 safety core validates immutable acquisition snapshots again under a shared
 write permit, while Block or an effective revoke takes the unique side, drains
@@ -563,9 +577,9 @@ v1 foundation under `WinDayFlow.Capture.Native`. Its implemented boundary has:
 - fixed-width numeric enums, opaque handles, and C-compatible POD structures
   whose first fields are `struct_size` and `abi_version`, with caller-owned UTF-8
   buffers and catch-all `noexcept` exports;
-- the additive 112-byte flat runtime-authorization input defined by ADR 0003,
-  containing the monotonic runtime policy revision, target epoch, numeric
-  HWND/PID/process-creation-time tuple, target flags, and eight policy decisions;
+- the additive 224-byte flat runtime-authorization input extended by ADR 0008,
+  preserving the 112-byte ADR 0003 prefix while adding a numeric HMONITOR and
+  fixed UTF-8 display device key to the target tuple;
 - the additive 64-byte command-admission output defined by ADR 0004, containing
   native instance, runtime revision, persistence generation, target epoch,
   authorization epoch, and a cryptographically random 128-bit nonce;
@@ -580,18 +594,25 @@ v1 foundation under `WinDayFlow.Capture.Native`. Its implemented boundary has:
   Block/revoke before stop, join, and exactly-once destroy.
 
 This is a contract and synthetic safety foundation, not a usable recorder. The
-native and managed tests prove target/PID reuse rejection, target and instance
-epochs, persistence-generation invalidation, permit linearization, quiescence,
-timeout/failure quarantine, ABI layout, and capability dependencies. They do
-not prove a real capture write path.
+native and managed tests prove target/PID/display reuse rejection, target and
+instance epochs, persistence-generation invalidation, permit linearization,
+quiescence, timeout/failure quarantine, ABI layout, capability dependencies,
+and strict no-fallback DXGI output selection. They do not prove a real capture
+write path.
 
-The complete live mask requires privacy guard, event queue, target-scoped
-authorization, persistence-generation barrier, deterministic stop, command
-admission, screen capture, and H.264 chunk capabilities. Evidence extraction is
-independent. The foundation currently advertises the first six capabilities;
-`ScreenCapture`, `H264Chunks`, and `EvidenceExtraction` remain deliberately
+The complete live mask requires privacy guard, event queue, target-scoped and
+display-scoped authorization, persistence-generation barrier, deterministic
+stop, display-bound command admission, screen capture, and H.264 chunk
+capabilities. Evidence
+extraction is independent. The foundation currently advertises the first seven
+foundation capabilities; `ScreenCapture`, `H264Chunks`, and
+`EvidenceExtraction` remain deliberately
 disabled, so the live mask is incomplete. Authorized Start/Resume validate and
 consume a command stamp but return `NotImplemented` without creating a worker.
+Legacy command-admission capability bit 8 remains defined but is not advertised
+by a display-scoped DLL. Current owners require display-bound command-admission
+bit 10, so both old-client/new-DLL and new-client/old-DLL combinations fail at
+capability negotiation instead of at the first fully allowed authorization.
 The App continues to use `DenyCaptureRuntimeAuthorization` and
 `UnavailableCaptureBackend`, and the shell recording control remains disabled.
 
@@ -600,13 +621,14 @@ synchronous target observation, the bounded title worker, and conservative
 window-location invalidation. Publisher identity must be bound to the running
 image, and hosted windows must be attributed to one real child application.
 Display-topology, WTS session, power/resume, presentation, and periodic storage
-signals remain missing. The selected HMONITOR/device key must be natively bound
-to a DXGI output, and a writer-side generation/permit gate must reject stale
-authority through acquisition and publication. The real DXGI/WIC/Media
-Foundation pixel and metadata writer must revalidate target and display before
-and after acquisition while carrying the consumed command grant and native
-persistence permit through worker admission, encode, temporary output, final
-rename, and committed-event publication. Atomic filesystem interruption,
+signals remain missing. The selected HMONITOR/device key now has a strict native
+DXGI output resolver, but the writer must re-resolve and revalidate that binding
+before and after acquisition, and a writer-side generation/permit gate must
+reject stale authority through acquisition and publication. The real
+DXGI/WIC/Media Foundation pixel and metadata writer must revalidate target and
+display before and after acquisition while carrying the consumed command grant
+and native persistence permit through worker admission, encode, temporary
+output, final rename, and committed-event publication. Atomic filesystem interruption,
 cleanup, disk-full, recovery, owner-epoch races, and Windows lifecycle tests
 must then prove that end-to-end path. Until those gates
 pass, no live frame or context metadata can be persisted and App DI must
@@ -707,8 +729,9 @@ lifecycle so construction and invalidation linearize with native revocation;
 the shared source prevents epoch reuse but does not itself revoke native work.
 
 The result contains three slices: `NativeCaptureTargetIdentity` for the native
-authorization tuple, a managed-only `WindowsCaptureDisplayTarget`, and a
-`NativeCaptureIdentitySnapshot` for typed rule matching. It is not a complete
+authorization tuple including its display anchor, a consistency-checking
+`WindowsCaptureDisplayTarget`, and a `NativeCaptureIdentitySnapshot` for typed
+rule matching. It is not a complete
 `NativeCapturePrivacySignals` value, does not evaluate user policy, does not
 mint command admission or persistence authority, and does not prove that the
 HMONITOR maps to the DXGI output being acquired. Target, display, and identity
@@ -727,9 +750,8 @@ following are implemented and tested together:
   foundation with display-topology, WTS session, power/resume, presentation,
   and periodic storage signals, followed by explicit evidence-Pause versus
   sticky-session-Stop classification;
-- native HMONITOR/device-key binding to a DXGI output plus writer-side
-  target/display and generation/permit revalidation before and after
-  acquisition; and
+- writer-side use of the native HMONITOR/device-key resolver plus target/display
+  and generation/permit revalidation before and after acquisition; and
 - real acquisition, encoding, temporary output, atomic publication, metadata,
   cleanup, and recovery under the native persistence-permit boundary.
 
@@ -1190,9 +1212,10 @@ the user explicitly enables a future telemetry feature.
 
 ### Native
 
-- The current native foundation is exercised by six CTest executables:
+- The current native foundation is exercised by seven CTest executables:
   `pixel_buffer_tests`, `capture_policy_tests`, `capture_event_queue_tests`,
-  `capture_safety_core_tests`, `capture_c_api_tests`, and the C17
+  `capture_safety_core_tests`, `capture_c_api_tests`,
+  `dxgi_output_resolver_tests`, and the C17
   `c_header_compatibility_test`. These tests prove the current ABI, policy,
   queue, C header, pixel/runtime foundation, and synthetic safety-core
   authorization and quiescence contracts, not a live DXGI-to-artifact write
@@ -1240,7 +1263,7 @@ the user explicitly enables a future telemetry feature.
   generation phase enforcement, quiescence races, and redacted diagnostics.
 - Live-activation tests must later cover hosted-app attribution, image-bound
   signer replacement, display-topology/WTS/power/resume/presentation/storage
-  signals, native display binding and DXGI-output mapping, writer-side
+  signals, writer-side native display resolution and pre/post mapping checks,
   generation/permit enforcement, and stale-work rejection at every native
   persistence boundary.
 
@@ -1283,8 +1306,8 @@ Phases are release gates, not a claim of strict implementation order. As of
 2026-07-17, the no-capture manual-timeline portions of Phases 2 and 3 plus
 schema v4, consent policy v2, persistent retention/exclusion/session choices,
 and user-authored typed exclusion rules are implemented. Phase 1 also has
-Accepted ADRs 0001 through 0007, verified QiDayflow source provenance, the x64
-C++20 C ABI v1 foundation, six native tests, the target-scoped safety core, the
+Accepted ADRs 0001 through 0008, verified QiDayflow source provenance, the x64
+C++20 C ABI v1 foundation, seven native tests, the display-scoped safety core,
 managed asynchronous owner/quiescence contract, owner-bound single-use
 Start/Resume admission, the inactive runtime privacy coordinator, the pure
 exclusion matcher, the on-demand Windows privacy probe, and the synchronous
@@ -1296,8 +1319,9 @@ HWND/TID/PID/process/display observation and process-wide monotonic target
 epochs. The process-wide 100 ms title worker and conservative filtered
 window-location invalidation close those two activation gates. Image-bound
 publisher-signer verification, unique child attribution,
-display-topology/WTS/power/resume/presentation/storage signals, native display
-binding and DXGI resolution, writer-side generation/permit enforcement, the
+display-topology/WTS/power/resume/presentation/storage signals, callback-time
+native topology invalidation, writer-side DXGI revalidation and
+generation/permit enforcement, the
 real DXGI/WIC/Media Foundation acquisition and persistence path, atomic artifact
 publication, and the evidence-Pause versus sticky-Stop dynamic policy remain
 open activation gates. `ScreenCapture`, `H264Chunks`, `EvidenceExtraction`, and

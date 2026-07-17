@@ -202,9 +202,10 @@ activation remains blocked by all of the following:
    asynchronous target parsing or policy recomposition. Qualified window
    location invalidation is implemented, but display topology, WTS session,
    power/resume, presentation, and periodic storage signals remain open.
-4. HMONITOR/device key must be natively bound to the actual DXGI output. The
-   writer must revalidate target and display before and after acquisition and
-   enforce generation/permit freshness through every persistence boundary.
+4. ADR 0008 supplies strict native HMONITOR/device-key resolution. The real
+   writer must use it to revalidate target and display before and after
+   acquisition and enforce generation/permit freshness through every
+   persistence boundary.
 5. Real DXGI/WIC/Media Foundation acquisition, encoding, metadata, temporary
    output, atomic final publication, cleanup, and recovery must use that permit
    end to end.

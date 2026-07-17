@@ -19,6 +19,20 @@ public sealed class NativeCaptureRuntimeOwnerTests
     ];
 
     [Fact]
+    public void OwnerRejectsTheLegacyCommandAdmissionProfile()
+    {
+        var backend = new ScriptedRuntimeBackend
+        {
+            AdvertisedCapabilities =
+                NativeCaptureAbiContract.RuntimeSafetyCapabilities
+                | NativeCaptureCapabilities.CommandAdmission,
+        };
+
+        Assert.Throws<NotSupportedException>(() => CreateOwner(backend));
+        Assert.Equal("ConstructionFailureDispose", Assert.Single(backend.Operations));
+    }
+
+    [Fact]
     public async Task ConcurrentDisposeUsesOneStrictTerminationSequence()
     {
         var backend = new ScriptedRuntimeBackend();
@@ -310,7 +324,7 @@ public sealed class NativeCaptureRuntimeOwnerTests
     }
 
     [Fact]
-    public async Task SignalRevocationLinearizesAfterAnAdmittedCommand()
+    public async Task SignalRevocationClosesManagedAdmissionBeforeWaitingForAnAdmittedCommand()
     {
         var backend = new ScriptedRuntimeBackend();
         var owner = await CreateAuthorizedOwnerAsync(backend);
@@ -325,7 +339,7 @@ public sealed class NativeCaptureRuntimeOwnerTests
 
             var revoke = owner.UpdateSignalsAsync(NativeCapturePrivacySignals.FailClosed);
             await Task.Yield();
-            Assert.True(owner.IsCaptureAuthorized);
+            Assert.False(owner.IsCaptureAuthorized);
             Assert.False(revoke.IsCompleted);
 
             backend.ReleaseStart();
@@ -545,7 +559,9 @@ public sealed class NativeCaptureRuntimeOwnerTests
                 windowHandle: 0x1234 + targetEpoch,
                 processId: checked((uint)(40 + targetEpoch)),
                 processCreationTime100ns: 100 + targetEpoch,
-                targetEpoch));
+                targetEpoch,
+                displayMonitorHandle: 0x6000 + targetEpoch,
+                displayDeviceKey: $@"\\.\DISPLAY{targetEpoch}"));
     }
 
     private sealed class ForgedAdmissionStamp : ICaptureRuntimeAdmissionStamp
@@ -568,8 +584,10 @@ public sealed class NativeCaptureRuntimeOwnerTests
         private ulong _persistenceGeneration;
         private ulong _authorizationEpoch;
 
-        public NativeCaptureCapabilities Capabilities =>
+        public NativeCaptureCapabilities AdvertisedCapabilities { get; init; } =
             NativeCaptureAbiContract.RuntimeOwnerCapabilities;
+
+        public NativeCaptureCapabilities Capabilities => AdvertisedCapabilities;
 
         public CaptureStatus CurrentStatus { get; } = new(
             CaptureState.Unavailable,

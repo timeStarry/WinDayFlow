@@ -2,6 +2,7 @@
 
 #include <Windows.h>
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -46,6 +47,16 @@ constexpr uint32_t kMaximumCaptureHeight = 4'320;
 constexpr uint32_t kMaximumOutputDirectoryBytes = 32'767;
 constexpr uint32_t kMaximumPollTimeoutMs = 60'000;
 constexpr size_t kVersionedStructHeaderSize = sizeof(uint32_t) * 2U;
+constexpr size_t kLegacyRuntimeAuthorizationSize =
+    WDF_CAPTURE_RUNTIME_AUTHORIZATION_V1_LEGACY_SIZE;
+constexpr size_t kCurrentRuntimeAuthorizationSize =
+    sizeof(wdf_capture_runtime_authorization_v1);
+constexpr int kMaximumDisplayDeviceKeyUtf16Characters = 31;
+
+static_assert(kLegacyRuntimeAuthorizationSize ==
+              offsetof(wdf_capture_runtime_authorization_v1,
+                       target_display_monitor_handle));
+static_assert(kCurrentRuntimeAuthorizationSize == 224);
 
 struct CaptureInstance {
   CaptureInstance(CapturePolicy initial_policy,
@@ -178,6 +189,70 @@ bool IsValidUtf8(std::string_view value) {
                              static_cast<int>(value.size()),
                              nullptr,
                              0) > 0;
+}
+
+bool HasOnlyZeroBytes(const char* value, size_t begin, size_t size) {
+  for (size_t index = begin; index < size; ++index) {
+    if (value[index] != 0) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool TryCopyDisplayDeviceKey(const char* source,
+                             uint32_t source_length,
+                             std::wstring* destination) {
+  if (source == nullptr || destination == nullptr || source_length == 0 ||
+      source_length > WDF_CAPTURE_DISPLAY_DEVICE_KEY_UTF8_MAX_LENGTH) {
+    return false;
+  }
+
+  const std::string_view encoded(source, source_length);
+  if (!IsValidUtf8(encoded)) {
+    return false;
+  }
+  const int wide_length = MultiByteToWideChar(CP_UTF8,
+                                               MB_ERR_INVALID_CHARS,
+                                               encoded.data(),
+                                               static_cast<int>(encoded.size()),
+                                               nullptr,
+                                               0);
+  if (wide_length <= 0 ||
+      wide_length > kMaximumDisplayDeviceKeyUtf16Characters) {
+    return false;
+  }
+
+  std::wstring decoded(static_cast<size_t>(wide_length), L'\0');
+  if (MultiByteToWideChar(CP_UTF8,
+                          MB_ERR_INVALID_CHARS,
+                          encoded.data(),
+                          static_cast<int>(encoded.size()),
+                          decoded.data(),
+                          wide_length) != wide_length) {
+    return false;
+  }
+
+  std::array<WORD, kMaximumDisplayDeviceKeyUtf16Characters> character_types{};
+  if (GetStringTypeW(CT_CTYPE1,
+                     decoded.data(),
+                     wide_length,
+                     character_types.data()) == 0) {
+    return false;
+  }
+  bool all_whitespace = true;
+  for (int index = 0; index < wide_length; ++index) {
+    const WORD type = character_types[static_cast<size_t>(index)];
+    if ((type & C1_CNTRL) != 0) {
+      return false;
+    }
+    all_whitespace = all_whitespace && (type & C1_SPACE) != 0;
+  }
+  if (all_whitespace) {
+    return false;
+  }
+  *destination = std::move(decoded);
+  return true;
 }
 
 bool IsWithin(uint32_t value, uint32_t minimum, uint32_t maximum) {
@@ -349,12 +424,21 @@ wdf_capture_result CopyRuntimeAuthorization(
     return WDF_CAPTURE_RESULT_INVALID_ARGUMENT;
   }
   const wdf_capture_result header = ValidateStructHeader(
-      source, sizeof(wdf_capture_runtime_authorization_v1));
+      source, kLegacyRuntimeAuthorizationSize);
   if (header != WDF_CAPTURE_RESULT_OK) {
     return header;
   }
 
-  if ((source->target_flags & ~WDF_CAPTURE_TARGET_PRESENT) != 0) {
+  const bool has_display_tail =
+      source->struct_size >= kCurrentRuntimeAuthorizationSize;
+  if (source->struct_size != kLegacyRuntimeAuthorizationSize &&
+      !has_display_tail) {
+    return WDF_CAPTURE_RESULT_INVALID_ARGUMENT;
+  }
+
+  constexpr wdf_capture_target_flags kKnownTargetFlags =
+      WDF_CAPTURE_TARGET_PRESENT | WDF_CAPTURE_TARGET_DISPLAY_PRESENT;
+  if ((source->target_flags & ~kKnownTargetFlags) != 0) {
     return WDF_CAPTURE_RESULT_INVALID_ARGUMENT;
   }
   for (const uint32_t reserved : source->reserved) {
@@ -379,12 +463,47 @@ wdf_capture_result CopyRuntimeAuthorization(
 
   const bool target_present =
       (source->target_flags & WDF_CAPTURE_TARGET_PRESENT) != 0;
+  const bool display_present =
+      (source->target_flags & WDF_CAPTURE_TARGET_DISPLAY_PRESENT) != 0;
   const bool target_values_present = source->target_epoch != 0 ||
                                      source->target_window_handle != 0 ||
                                      source->target_process_creation_time_100ns !=
                                          0 ||
                                      source->target_process_id != 0;
-  if (target_present != target_values_present) {
+  if (target_present != target_values_present ||
+      target_present != display_present) {
+    return WDF_CAPTURE_RESULT_INVALID_ARGUMENT;
+  }
+
+  std::wstring display_device_key;
+  if (has_display_tail) {
+    if (source->target_display_reserved != 0) {
+      return WDF_CAPTURE_RESULT_INVALID_ARGUMENT;
+    }
+    const bool display_buffer_has_value = !HasOnlyZeroBytes(
+        source->target_display_device_key_utf8,
+        0,
+        WDF_CAPTURE_DISPLAY_DEVICE_KEY_UTF8_CAPACITY);
+    const bool display_values_present =
+        source->target_display_monitor_handle != 0 ||
+        source->target_display_device_key_utf8_length != 0 ||
+        display_buffer_has_value;
+    if (display_present != display_values_present) {
+      return WDF_CAPTURE_RESULT_INVALID_ARGUMENT;
+    }
+    if (display_present &&
+        (source->target_display_monitor_handle == 0 ||
+         !TryCopyDisplayDeviceKey(
+             source->target_display_device_key_utf8,
+             source->target_display_device_key_utf8_length,
+             &display_device_key) ||
+         !HasOnlyZeroBytes(
+             source->target_display_device_key_utf8,
+             source->target_display_device_key_utf8_length,
+             WDF_CAPTURE_DISPLAY_DEVICE_KEY_UTF8_CAPACITY))) {
+      return WDF_CAPTURE_RESULT_INVALID_ARGUMENT;
+    }
+  } else if (display_present) {
     return WDF_CAPTURE_RESULT_INVALID_ARGUMENT;
   }
 
@@ -400,7 +519,9 @@ wdf_capture_result CopyRuntimeAuthorization(
         source->target_window_handle,
         source->target_process_id,
         source->target_process_creation_time_100ns,
-        source->target_epoch};
+        source->target_epoch,
+        source->target_display_monitor_handle,
+        std::move(display_device_key)};
   }
 
   const bool fully_allowed = windayflow::capture::IsFullyAllowed(privacy);
@@ -596,7 +717,8 @@ wdf_capture_get_capabilities(wdf_capture_capabilities* capabilities) noexcept {
                     WDF_CAPTURE_CAPABILITY_TARGET_SCOPED_AUTHORIZATION |
                     WDF_CAPTURE_CAPABILITY_PERSISTENCE_GENERATION_BARRIER |
                     WDF_CAPTURE_CAPABILITY_DETERMINISTIC_STOP |
-                    WDF_CAPTURE_CAPABILITY_COMMAND_ADMISSION;
+                    WDF_CAPTURE_CAPABILITY_DISPLAY_SCOPED_AUTHORIZATION |
+                    WDF_CAPTURE_CAPABILITY_DISPLAY_BOUND_COMMAND_ADMISSION;
     return WDF_CAPTURE_RESULT_OK;
   } catch (...) {
     return WDF_CAPTURE_RESULT_INTERNAL_ERROR;

@@ -13,6 +13,7 @@ add_library(windayflow_capture_core STATIC
   internal/capture_policy.cpp
   internal/capture_runtime_owner.cpp
   internal/capture_safety_core.cpp
+  internal/dxgi_output_resolver.cpp
   internal/pixel_buffer.cpp
   internal/privacy_guard.cpp)
 
@@ -21,7 +22,7 @@ target_include_directories(windayflow_capture_core
   PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/internal)
-target_link_libraries(windayflow_capture_core PUBLIC bcrypt)
+target_link_libraries(windayflow_capture_core PUBLIC bcrypt dxgi)
 
 add_library(windayflow_capture SHARED
   src/capture_c_api.cpp
@@ -90,6 +91,9 @@ if(BUILD_TESTING)
 
   add_windayflow_native_test(capture_safety_core_tests tests/capture_safety_core_tests.cpp)
   target_link_libraries(capture_safety_core_tests PRIVATE windayflow_capture_core)
+
+  add_windayflow_native_test(dxgi_output_resolver_tests tests/dxgi_output_resolver_tests.cpp)
+  target_link_libraries(dxgi_output_resolver_tests PRIVATE windayflow_capture_core)
 
   add_windayflow_native_test(capture_c_api_tests tests/capture_c_api_tests.cpp)
   target_link_libraries(capture_c_api_tests PRIVATE windayflow_capture)

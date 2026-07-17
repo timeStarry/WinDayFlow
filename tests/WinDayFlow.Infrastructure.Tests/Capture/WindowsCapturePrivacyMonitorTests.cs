@@ -33,6 +33,21 @@ public sealed class WindowsCapturePrivacyMonitorTests
         Assert.Throws<ArgumentException>(() => new WindowsCapturePrivacyObservation(
             NativeCapturePrivacySignals.FailClosed,
             observation.DisplayTarget));
+        var otherTarget = CreateVerificationResult(
+            targetEpoch: 8,
+            displayKey: @"\\.\DISPLAY8");
+        Assert.Throws<ArgumentException>(() => new WindowsCapturePrivacyObservation(
+            new NativeCapturePrivacySignals(
+                observation.Signals.SessionUnlocked,
+                observation.Signals.SecureDesktopClear,
+                observation.Signals.RemoteSession,
+                observation.Signals.PresentationMode,
+                observation.Signals.ApplicationAllowed,
+                observation.Signals.WindowAllowed,
+                observation.Signals.StorageAvailable,
+                observation.Signals.CaptureIdentity,
+                otherTarget.Target),
+            observation.DisplayTarget));
     }
 
     [Fact]
@@ -69,6 +84,13 @@ public sealed class WindowsCapturePrivacyMonitorTests
         Assert.Same(target.Target, observation.Signals.Target);
         Assert.Same(target.CaptureIdentity, observation.Signals.CaptureIdentity);
         Assert.Same(target.DisplayTarget, observation.DisplayTarget);
+        Assert.Equal(
+            target.DisplayTarget.MonitorHandle,
+            observation.Signals.Target.DisplayMonitorHandle);
+        Assert.Equal(
+            target.DisplayTarget.DeviceKey,
+            observation.Signals.Target.DisplayDeviceKey,
+            ignoreCase: true);
         Assert.Equal(baseSignals.SessionUnlocked, observation.Signals.SessionUnlocked);
         Assert.Equal(baseSignals.StorageAvailable, observation.Signals.StorageAvailable);
     }
@@ -670,7 +692,9 @@ public sealed class WindowsCapturePrivacyMonitorTests
                 windowHandle: targetEpoch + 100,
                 processId: checked((uint)targetEpoch + 10),
                 processCreationTime100ns: targetEpoch + 1_000,
-                targetEpoch),
+                targetEpoch,
+                displayMonitorHandle: targetEpoch + 200,
+                displayDeviceKey: displayKey),
             WindowsCaptureDisplayTarget.Present(
                 monitorHandle: targetEpoch + 200,
                 displayKey),

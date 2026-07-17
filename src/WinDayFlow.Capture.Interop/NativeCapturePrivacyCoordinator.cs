@@ -529,16 +529,21 @@ public sealed class NativeCapturePrivacyCoordinator
         NativeCapturePrivacySignals signals,
         bool generationBound)
     {
+        if (!TryPublishSignalsForGeneration(
+                privacyObservationGeneration,
+                signals,
+                generationBound))
+        {
+            return false;
+        }
+
         await _applyGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
         try
         {
             ThrowIfUsable();
             if (!IsPrivacyObservationGenerationCurrent(
                     privacyObservationGeneration)
-                || !TrySetSignalsForGenerationUnderGate(
-                    privacyObservationGeneration,
-                    signals,
-                    generationBound))
+                || signals != Volatile.Read(ref _signals))
             {
                 return false;
             }
@@ -583,7 +588,7 @@ public sealed class NativeCapturePrivacyCoordinator
         }
     }
 
-    private bool TrySetSignalsForGenerationUnderGate(
+    private bool TryPublishSignalsForGeneration(
         long privacyObservationGeneration,
         NativeCapturePrivacySignals signals,
         bool generationBound)
