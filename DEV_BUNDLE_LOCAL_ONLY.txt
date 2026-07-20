@@ -1,0 +1,20 @@
+WinDayFlow Development Bundle - Development/Test Use Only
+
+WinDayFlow-owned source code is licensed under the repository-root MIT
+LICENSE. The current binary development bundle also redistributes
+Microsoft.WindowsAppSDK.WinUI 2.2.1 under Microsoft Engineering Preview
+terms.
+
+Those terms allow the licensee to install and use multiple copies to develop
+and test applications on Windows. They prohibit use in a live operating
+environment and prohibit sharing, publishing, distributing, leasing, or
+transferring the component to a third party.
+
+Use this binary bundle only for licensed development and testing. Do not use it
+in a live operating environment or provide it to a third party. A production
+or third-party test build requires a production-redistributable WinUI
+dependency or explicit permission from Microsoft.
+
+This restriction applies to the current binary development bundle. It does
+not replace the MIT terms for WinDayFlow-owned source code, and it does not
+replace any other third-party terms listed in THIRD_PARTY_NOTICES.md.

@@ -1,0 +1,12 @@
+<Page
+    x:Class="WinDayFlow.App.Views.ChatPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:controls="using:WinDayFlow.App.Controls">
+    <Grid Padding="{StaticResource PagePadding}">
+        <controls:EmptyStateControl
+            Description="配置支持文本生成的 AI 提供方后，可基于时间线进行带引用的问答。"
+            Icon="Message"
+            Title="时间线问答不可用" />
+    </Grid>
+</Page>

@@ -1,0 +1,30 @@
+# Build output
+**/bin/
+**/obj/
+artifacts/
+
+# Local SDK and tools
+.dotnet/
+.tools/
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.rsuser
+
+# Test output
+TestResults/
+*.coverage
+*.coveragexml
+
+# Local application data
+*.db
+*.db-shm
+*.db-wal
+*.log
+
+# OS files
+Thumbs.db
+Desktop.ini
+

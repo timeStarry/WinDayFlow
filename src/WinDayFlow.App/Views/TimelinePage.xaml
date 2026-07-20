@@ -1,0 +1,568 @@
+<Page
+    x:Class="WinDayFlow.App.Views.TimelinePage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:controls="using:WinDayFlow.App.Controls"
+    xmlns:presentation="using:WinDayFlow.Presentation.Timeline">
+    <Grid>
+        <SplitView
+            x:Name="DetailSplitView"
+            DisplayMode="Overlay"
+            IsPaneOpen="False"
+            OpenPaneLength="384"
+            PaneClosed="OnDetailPaneClosed"
+            PanePlacement="Right">
+        <SplitView.Pane>
+            <Grid
+                x:Name="DetailPaneRoot"
+                Padding="{StaticResource PanelPadding}"
+                AutomationProperties.Name="活动详情面板"
+                Background="{ThemeResource LayerFillColorAltBrush}">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock
+                        VerticalAlignment="Center"
+                        Style="{StaticResource SectionTitleTextStyle}"
+                        Text="活动详情" />
+                    <Button
+                        Grid.Column="1"
+                        x:Name="EditActivityButton"
+                        Click="OnEditActivity"
+                        AutomationProperties.Name="编辑活动"
+                        ToolTipService.ToolTip="编辑活动">
+                        <SymbolIcon Symbol="Edit" />
+                    </Button>
+                    <Button
+                        Grid.Column="2"
+                        x:Name="DeleteActivityButton"
+                        Click="OnDeleteActivity"
+                        AutomationProperties.Name="删除活动"
+                        ToolTipService.ToolTip="删除活动">
+                        <SymbolIcon Symbol="Delete" />
+                    </Button>
+                    <Button
+                        Grid.Column="3"
+                        Click="OnCloseDetails"
+                        AutomationProperties.Name="关闭活动详情"
+                        ToolTipService.ToolTip="关闭">
+                        <SymbolIcon Symbol="Cancel" />
+                    </Button>
+                </Grid>
+
+                <ScrollViewer Grid.Row="1" Margin="0,20,0,0">
+                    <StackPanel
+                        DataContext="{x:Bind ViewModel.SelectedEntry, Mode=OneWay}"
+                        Spacing="20">
+                        <StackPanel Spacing="4">
+                            <TextBlock
+                                FontSize="20"
+                                FontWeight="SemiBold"
+                                Text="{Binding Title}"
+                                TextWrapping="Wrap" />
+                            <TextBlock
+                                Style="{StaticResource MetadataTextStyle}"
+                                Text="{Binding TimeText}" />
+                        </StackPanel>
+
+                        <StackPanel Spacing="6">
+                            <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}" Text="摘要" />
+                            <TextBlock Text="{Binding Summary}" TextWrapping="Wrap" />
+                        </StackPanel>
+
+                        <Grid ColumnSpacing="16" RowSpacing="12">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+                            <StackPanel Spacing="2">
+                                <TextBlock Style="{StaticResource MetadataTextStyle}" Text="类别" />
+                                <TextBlock Text="{Binding CategoryText}" />
+                            </StackPanel>
+                            <StackPanel Grid.Column="1" Spacing="2">
+                                <TextBlock Style="{StaticResource MetadataTextStyle}" Text="效率" />
+                                <TextBlock Text="{Binding ProductivityText}" />
+                            </StackPanel>
+                            <StackPanel Grid.Row="1" Spacing="2">
+                                <TextBlock Style="{StaticResource MetadataTextStyle}" Text="应用" />
+                                <TextBlock Text="{Binding PrimaryApplicationText}" TextWrapping="Wrap" />
+                            </StackPanel>
+                            <StackPanel Grid.Row="1" Grid.Column="1" Spacing="2">
+                                <TextBlock Style="{StaticResource MetadataTextStyle}" Text="时长" />
+                                <TextBlock Text="{Binding DurationText}" />
+                            </StackPanel>
+                            <StackPanel Grid.Row="2" Spacing="2">
+                                <TextBlock Style="{StaticResource MetadataTextStyle}" Text="来源" />
+                                <TextBlock Text="{Binding OriginText}" />
+                            </StackPanel>
+                            <StackPanel Grid.Row="2" Grid.Column="1" Spacing="2">
+                                <TextBlock Style="{StaticResource MetadataTextStyle}" Text="用户修订" />
+                                <TextBlock Text="{Binding UserEditsText}" TextWrapping="Wrap" />
+                            </StackPanel>
+                        </Grid>
+
+                        <StackPanel Spacing="6">
+                            <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}" Text="标签" />
+                            <TextBlock Text="{Binding TagsText}" TextWrapping="Wrap" />
+                        </StackPanel>
+
+                        <StackPanel
+                            x:Name="AnalyzedEvidenceMetadataPanel"
+                            Spacing="10"
+                            Visibility="Collapsed">
+                            <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}" Text="分析与证据" />
+                            <Grid ColumnSpacing="16" RowSpacing="10">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                </Grid.RowDefinitions>
+                                <StackPanel Spacing="2">
+                                    <TextBlock Style="{StaticResource MetadataTextStyle}" Text="置信度" />
+                                    <TextBlock Text="{Binding ConfidenceText}" />
+                                </StackPanel>
+                                <StackPanel Grid.Column="1" Spacing="2">
+                                    <TextBlock Style="{StaticResource MetadataTextStyle}" Text="分析版本" />
+                                    <TextBlock Text="{Binding AnalysisVersionText}" TextWrapping="Wrap" />
+                                </StackPanel>
+                                <StackPanel Grid.Row="1" Grid.ColumnSpan="2" Spacing="2">
+                                    <TextBlock Style="{StaticResource MetadataTextStyle}" Text="证据片段" />
+                                    <TextBlock
+                                        IsTextSelectionEnabled="True"
+                                        Text="{Binding EvidenceChunkText}"
+                                        TextWrapping="Wrap" />
+                                </StackPanel>
+                                <StackPanel Grid.Row="2" Grid.ColumnSpan="2" Spacing="2">
+                                    <TextBlock Style="{StaticResource MetadataTextStyle}" Text="本地证据路径" />
+                                    <TextBlock
+                                        IsTextSelectionEnabled="True"
+                                        Text="{Binding EvidencePathText}"
+                                        TextWrapping="Wrap" />
+                                </StackPanel>
+                            </Grid>
+                        </StackPanel>
+
+                        <InfoBar
+                            x:Name="ManualEvidenceInfoBar"
+                            IsClosable="False"
+                            IsOpen="True"
+                            Message="此活动由你手工记录，没有关联屏幕截图或录像。"
+                            Severity="Informational"
+                            Title="没有屏幕证据" />
+                        <InfoBar
+                            x:Name="AnalyzedEvidenceInfoBar"
+                            IsClosable="False"
+                            IsOpen="True"
+                            Message="原生捕获内核接入后，可在此查看缩略图、录像和时间定位。"
+                            Severity="Informational"
+                            Title="Evidence 查看尚不可用" />
+                    </StackPanel>
+                </ScrollViewer>
+            </Grid>
+        </SplitView.Pane>
+
+        <Grid
+            MaxWidth="{StaticResource PageContentMaxWidth}"
+            Padding="{StaticResource PagePadding}"
+            HorizontalAlignment="Stretch"
+            RowSpacing="12">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+            </Grid.RowDefinitions>
+
+            <Grid x:Name="TimelineToolbarGrid">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition x:Name="ToolbarSecondaryRow" Height="0" />
+                </Grid.RowDefinitions>
+                <StackPanel x:Name="DateNavigationPanel" Orientation="Horizontal" Spacing="4">
+                    <Button
+                        Command="{x:Bind ViewModel.PreviousDateCommand}"
+                        AutomationProperties.Name="前一天"
+                        ToolTipService.ToolTip="前一天">
+                        <SymbolIcon Symbol="Previous" />
+                    </Button>
+                    <TextBlock
+                        x:Name="SelectedDateLabel"
+                        MinWidth="168"
+                        VerticalAlignment="Center"
+                        Style="{StaticResource BodyStrongTextBlockStyle}"
+                        Text="{x:Bind ViewModel.SelectedDateText, Mode=OneWay}"
+                        TextAlignment="Center" />
+                    <Button
+                        Command="{x:Bind ViewModel.NextDateCommand}"
+                        AutomationProperties.Name="后一天"
+                        ToolTipService.ToolTip="后一天">
+                        <SymbolIcon Symbol="Next" />
+                    </Button>
+                    <Button
+                        Margin="8,0,0,0"
+                        Command="{x:Bind ViewModel.TodayCommand}"
+                        Content="今天" />
+                </StackPanel>
+                <StackPanel
+                    x:Name="TimelineActionPanel"
+                    Grid.Column="1"
+                    Orientation="Horizontal"
+                    Spacing="8">
+                    <Button
+                        x:Name="CreateActivityButton"
+                        Click="OnCreateActivity"
+                        AutomationProperties.Name="新建活动"
+                        ToolTipService.ToolTip="新建活动">
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <SymbolIcon Symbol="Add" />
+                            <TextBlock Text="新建活动" />
+                        </StackPanel>
+                    </Button>
+                    <Button
+                        Command="{x:Bind ViewModel.RefreshCommand}"
+                        AutomationProperties.Name="刷新时间线"
+                        ToolTipService.ToolTip="刷新">
+                        <SymbolIcon Symbol="Refresh" />
+                    </Button>
+                </StackPanel>
+            </Grid>
+
+            <Grid
+                x:Name="FilterGrid"
+                Grid.Row="1"
+                ColumnSpacing="8">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition x:Name="FilterSearchColumn" Width="*" />
+                    <ColumnDefinition x:Name="FilterCategoryColumn" Width="176" />
+                    <ColumnDefinition x:Name="FilterProductivityColumn" Width="152" />
+                    <ColumnDefinition x:Name="FilterClearColumn" Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <Grid.RowDefinitions>
+                    <RowDefinition x:Name="FilterSearchRow" Height="Auto" />
+                    <RowDefinition x:Name="FilterSecondaryRow" Height="0" />
+                    <RowDefinition x:Name="FilterTertiaryRow" Height="0" />
+                </Grid.RowDefinitions>
+                <AutoSuggestBox
+                    x:Name="SearchBox"
+                    AccessKey="F"
+                    AutomationProperties.Name="搜索时间线"
+                    PlaceholderText="搜索标题、摘要、标签或应用"
+                    QueryIcon="Find"
+                    TextChanged="OnSearchTextChanged" />
+                <ComboBox
+                    x:Name="CategoryFilter"
+                    Grid.Column="1"
+                    HorizontalAlignment="Stretch"
+                    AutomationProperties.Name="按类别筛选"
+                    SelectionChanged="OnCategoryFilterChanged">
+                    <ComboBoxItem Content="全部类别" />
+                    <ComboBoxItem Content="专注工作" Tag="FocusedWork" />
+                    <ComboBoxItem Content="沟通" Tag="Communication" />
+                    <ComboBoxItem Content="会议" Tag="Meeting" />
+                    <ComboBoxItem Content="规划" Tag="Planning" />
+                    <ComboBoxItem Content="调研" Tag="Research" />
+                    <ComboBoxItem Content="行政事务" Tag="Administration" />
+                    <ComboBoxItem Content="学习" Tag="Learning" />
+                    <ComboBoxItem Content="休息" Tag="Break" />
+                    <ComboBoxItem Content="个人事务" Tag="Personal" />
+                </ComboBox>
+                <ComboBox
+                    x:Name="ProductivityFilter"
+                    Grid.Column="2"
+                    HorizontalAlignment="Stretch"
+                    AutomationProperties.Name="按效率筛选"
+                    SelectionChanged="OnProductivityFilterChanged">
+                    <ComboBoxItem Content="全部效率" />
+                    <ComboBoxItem Content="专注" Tag="Focused" />
+                    <ComboBoxItem Content="中性" Tag="Neutral" />
+                    <ComboBoxItem Content="分心" Tag="Distracting" />
+                    <ComboBoxItem Content="休息" Tag="Break" />
+                </ComboBox>
+                <Button
+                    x:Name="ClearFiltersButton"
+                    Grid.Column="3"
+                    Command="{x:Bind ViewModel.ClearFiltersCommand}"
+                    AutomationProperties.Name="清除筛选"
+                    ToolTipService.ToolTip="清除筛选">
+                    <SymbolIcon Symbol="Clear" />
+                </Button>
+            </Grid>
+
+            <InfoBar
+                x:Name="MutationInfoBar"
+                Grid.Row="2"
+                IsClosable="True"
+                IsOpen="False"
+                Severity="Error"
+                Title="无法完成操作" />
+
+            <Grid Grid.Row="3">
+                <StackPanel x:Name="LoadingPanel" Spacing="12">
+                    <ProgressBar IsIndeterminate="True" />
+                    <Border Padding="12" Background="{ThemeResource ControlFillColorSecondaryBrush}">
+                        <Grid ColumnSpacing="16">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="96" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <Rectangle Height="16" RadiusX="2" RadiusY="2" Fill="{ThemeResource ControlStrongFillColorDefaultBrush}" />
+                            <StackPanel Grid.Column="1" Spacing="8">
+                                <Rectangle Width="280" Height="16" HorizontalAlignment="Left" RadiusX="2" RadiusY="2" Fill="{ThemeResource ControlStrongFillColorDefaultBrush}" />
+                                <Rectangle Width="420" Height="12" HorizontalAlignment="Left" RadiusX="2" RadiusY="2" Fill="{ThemeResource ControlStrongFillColorDefaultBrush}" />
+                            </StackPanel>
+                        </Grid>
+                    </Border>
+                    <Border Padding="12" Background="{ThemeResource ControlFillColorSecondaryBrush}">
+                        <Grid ColumnSpacing="16">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="96" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <Rectangle Height="16" RadiusX="2" RadiusY="2" Fill="{ThemeResource ControlStrongFillColorDefaultBrush}" />
+                            <StackPanel Grid.Column="1" Spacing="8">
+                                <Rectangle Width="240" Height="16" HorizontalAlignment="Left" RadiusX="2" RadiusY="2" Fill="{ThemeResource ControlStrongFillColorDefaultBrush}" />
+                                <Rectangle Width="360" Height="12" HorizontalAlignment="Left" RadiusX="2" RadiusY="2" Fill="{ThemeResource ControlStrongFillColorDefaultBrush}" />
+                            </StackPanel>
+                        </Grid>
+                    </Border>
+                </StackPanel>
+
+                <StackPanel
+                    x:Name="ErrorPanel"
+                    MaxWidth="520"
+                    HorizontalAlignment="Center"
+                    VerticalAlignment="Center"
+                    Spacing="12">
+                    <InfoBar
+                        x:Name="ErrorInfoBar"
+                        IsClosable="False"
+                        IsOpen="True"
+                        Severity="Error"
+                        Title="时间线加载失败" />
+                    <Button
+                        HorizontalAlignment="Center"
+                        Command="{x:Bind ViewModel.RefreshCommand}"
+                        Content="重试" />
+                </StackPanel>
+
+                <controls:EmptyStateControl
+                    x:Name="EmptyState"
+                    Description="你可以手工新建活动；录制接入后，捕获的活动也会显示在这里。"
+                    Icon="Bullets"
+                    Title="当天没有活动" />
+
+                <ListView
+                    x:Name="TimelineList"
+                    AutomationProperties.Name="时间线活动"
+                    IsItemClickEnabled="True"
+                    ItemsSource="{x:Bind ViewModel.Entries, Mode=OneWay}"
+                    SelectedItem="{x:Bind ViewModel.SelectedEntry, Mode=TwoWay}"
+                    SelectionChanged="OnTimelineSelectionChanged"
+                    SelectionMode="Single">
+                    <ListView.ItemContainerStyle>
+                        <Style BasedOn="{StaticResource DefaultListViewItemStyle}" TargetType="ListViewItem">
+                            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                            <Setter Property="Padding" Value="0" />
+                        </Style>
+                    </ListView.ItemContainerStyle>
+                    <ListView.ItemTemplate>
+                        <DataTemplate x:DataType="presentation:TimelineEntryItemViewModel">
+                            <ContentControl
+                                x:Name="EntryLayoutRoot"
+                                HorizontalContentAlignment="Stretch"
+                                IsTabStop="False"
+                                Loaded="OnEntryLayoutLoaded">
+                                <Border
+                                    Padding="12"
+                                    BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}"
+                                    BorderThickness="0,0,0,1">
+                                    <Grid x:Name="EntryGrid" ColumnSpacing="16">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition x:Name="EntryTimeColumn" Width="104" />
+                                            <ColumnDefinition x:Name="EntryContentColumn" Width="*" />
+                                            <ColumnDefinition x:Name="EntryMetadataColumn" Width="136" />
+                                        </Grid.ColumnDefinitions>
+                                        <Grid.RowDefinitions>
+                                            <RowDefinition Height="Auto" />
+                                            <RowDefinition Height="Auto" />
+                                            <RowDefinition Height="Auto" />
+                                        </Grid.RowDefinitions>
+                                        <StackPanel x:Name="TimeStack" Spacing="2">
+                                            <TextBlock FontWeight="SemiBold" Text="{x:Bind TimeText}" />
+                                            <TextBlock Style="{StaticResource MetadataTextStyle}" Text="{x:Bind DurationText}" />
+                                        </StackPanel>
+                                        <StackPanel x:Name="ContentStack" Grid.Column="1" Spacing="4">
+                                            <TextBlock
+                                                FontWeight="SemiBold"
+                                                MaxLines="1"
+                                                Text="{x:Bind Title}"
+                                                TextTrimming="CharacterEllipsis" />
+                                            <TextBlock
+                                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                                MaxLines="2"
+                                                Text="{x:Bind Summary}"
+                                                TextTrimming="CharacterEllipsis"
+                                                TextWrapping="Wrap" />
+                                            <TextBlock
+                                                Style="{StaticResource MetadataTextStyle}"
+                                                Text="{x:Bind PrimaryApplicationText}"
+                                                TextTrimming="CharacterEllipsis" />
+                                        </StackPanel>
+                                        <StackPanel
+                                            x:Name="MetadataStack"
+                                            Grid.Column="2"
+                                            HorizontalAlignment="Right"
+                                            Spacing="4">
+                                            <TextBlock
+                                                x:Name="CategoryTextBlock"
+                                                Text="{x:Bind CategoryText}"
+                                                TextAlignment="Right" />
+                                            <TextBlock
+                                                x:Name="ProductivityTextBlock"
+                                                Style="{StaticResource MetadataTextStyle}"
+                                                Text="{x:Bind ProductivityText}"
+                                                TextAlignment="Right" />
+                                        </StackPanel>
+                                    </Grid>
+                                </Border>
+                            </ContentControl>
+                        </DataTemplate>
+                    </ListView.ItemTemplate>
+                </ListView>
+            </Grid>
+            </Grid>
+        </SplitView>
+
+        <ContentDialog
+            x:Name="ActivityEditorDialog"
+            AutomationProperties.Name="活动编辑器"
+            DefaultButton="Primary"
+            PrimaryButtonClick="OnActivityEditorPrimaryButtonClick"
+            PrimaryButtonText="保存"
+            SecondaryButtonText="取消">
+            <ScrollViewer
+                MaxHeight="560"
+                HorizontalScrollBarVisibility="Disabled"
+                HorizontalScrollMode="Disabled"
+                VerticalScrollBarVisibility="Auto">
+                <StackPanel x:Name="ActivityEditorForm" MaxWidth="520" Spacing="16">
+                    <InfoBar
+                        x:Name="EditorErrorInfoBar"
+                        AutomationProperties.LiveSetting="Assertive"
+                        IsClosable="False"
+                        IsOpen="False"
+                        Severity="Error"
+                        Title="请检查活动信息" />
+
+                    <TextBox
+                        x:Name="EditorTitleTextBox"
+                        AutomationProperties.Name="活动标题"
+                        Header="标题"
+                        MaxLength="160"
+                        PlaceholderText="例如：整理项目计划" />
+
+                    <TextBox
+                        x:Name="EditorSummaryTextBox"
+                        AcceptsReturn="True"
+                        AutomationProperties.Name="活动摘要"
+                        Header="摘要"
+                        MaxLength="2000"
+                        MinHeight="88"
+                        PlaceholderText="补充这段时间完成的工作"
+                        TextWrapping="Wrap" />
+
+                    <Grid ColumnSpacing="12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <TimePicker
+                            x:Name="EditorStartTimePicker"
+                            AutomationProperties.Name="开始时间"
+                            ClockIdentifier="24HourClock"
+                            Header="开始时间"
+                            MinuteIncrement="5" />
+                        <TimePicker
+                            x:Name="EditorEndTimePicker"
+                            Grid.Column="1"
+                            AutomationProperties.Name="结束时间"
+                            ClockIdentifier="24HourClock"
+                            Header="结束时间"
+                            MinuteIncrement="5" />
+                    </Grid>
+
+                    <Grid ColumnSpacing="12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <ComboBox
+                            x:Name="EditorCategoryPicker"
+                            HorizontalAlignment="Stretch"
+                            AutomationProperties.Name="活动类别"
+                            Header="类别">
+                            <ComboBoxItem Content="未分类" Tag="Unknown" />
+                            <ComboBoxItem Content="专注工作" Tag="FocusedWork" />
+                            <ComboBoxItem Content="沟通" Tag="Communication" />
+                            <ComboBoxItem Content="会议" Tag="Meeting" />
+                            <ComboBoxItem Content="规划" Tag="Planning" />
+                            <ComboBoxItem Content="调研" Tag="Research" />
+                            <ComboBoxItem Content="行政事务" Tag="Administration" />
+                            <ComboBoxItem Content="学习" Tag="Learning" />
+                            <ComboBoxItem Content="休息" Tag="Break" />
+                            <ComboBoxItem Content="个人事务" Tag="Personal" />
+                        </ComboBox>
+                        <ComboBox
+                            x:Name="EditorProductivityPicker"
+                            Grid.Column="1"
+                            HorizontalAlignment="Stretch"
+                            AutomationProperties.Name="活动效率"
+                            Header="效率">
+                            <ComboBoxItem Content="未知" Tag="Unknown" />
+                            <ComboBoxItem Content="专注" Tag="Focused" />
+                            <ComboBoxItem Content="中性" Tag="Neutral" />
+                            <ComboBoxItem Content="分心" Tag="Distracting" />
+                            <ComboBoxItem Content="休息" Tag="Break" />
+                        </ComboBox>
+                    </Grid>
+
+                    <TextBox
+                        x:Name="EditorTagsTextBox"
+                        AutomationProperties.Name="活动标签"
+                        Header="标签"
+                        MaxLength="500"
+                        PlaceholderText="使用逗号分隔，例如：项目, 规划" />
+
+                    <ProgressBar
+                        x:Name="EditorProgressBar"
+                        AutomationProperties.LiveSetting="Polite"
+                        AutomationProperties.Name="正在保存活动"
+                        IsIndeterminate="True"
+                        Visibility="Collapsed" />
+                </StackPanel>
+            </ScrollViewer>
+        </ContentDialog>
+    </Grid>
+</Page>

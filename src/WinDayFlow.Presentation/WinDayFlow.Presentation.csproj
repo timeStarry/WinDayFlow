@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>WinDayFlow.Presentation</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="CommunityToolkit.Mvvm" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\WinDayFlow.Application\WinDayFlow.Application.csproj" />
+    <ProjectReference Include="..\WinDayFlow.Domain\WinDayFlow.Domain.csproj" />
+  </ItemGroup>
+</Project>
