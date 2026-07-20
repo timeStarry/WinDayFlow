@@ -65,7 +65,8 @@ contains:
   runtime owner epoch; capability bit 11 and a dedicated C ABI export now let a
   Windows callback close native command and persistence admission immediately,
   without waiting for an already-held persistence permit;
-- real but not yet C-ABI-connected native writer components and orchestration:
+- real native writer components and orchestration behind a C-ABI-owned disabled
+  controller:
   a strict no-fallback HWND/PID/process-creation/display observer with a
   pre/post-fingerprinted DXGI Desktop Duplication source and an 8K/126.6 MiB
   BGRA ceiling, bounded
@@ -77,6 +78,9 @@ contains:
   target observation and persistence authority, preserves merged Pause events,
   finalizes valid partial chunks, compensates stale filesystem output, and uses
   a validated hidden-event append as the final publication linearization point;
+  the instance controller adds independent run IDs, worker-completed state
+  checkpoints, resumable authorization Pause, single-flight Stop finalization,
+  stale-callback rejection, and reserved STOPPING/STOPPED/ERROR capacity;
 - a managed P/Invoke adapter with x64 ABI layout checks, safe-handle ownership,
   bounded event polling, privacy-revision updates, complete display-scoped
   safety-capability negotiation, issuer-bound opaque admission stamps,
@@ -125,33 +129,35 @@ contains:
 Manual activities, consent, privacy settings, and user-authored exclusion rules
 are stored at `%LOCALAPPDATA%\WinDayFlow\Data\windayflow.db` and survive
 application restarts.
-The C-ABI-connected DXGI/WIC/Media Foundation worker and persistence path,
+The live C-ABI-connected DXGI/WIC/Media Foundation worker and persistence path,
 analysis queue and providers, generated Daily and Weekly views, journal editing,
 and timeline-grounded chat are **not integrated yet**. The foreground verifier
 and event monitor are inactive foundations, not a live activation claim:
 image-bound publisher-signer verification, unique hosted-app attribution,
 presentation notifications, periodic storage refresh, worker-side stage
-orchestration and generation/permit revalidation are implemented, while C ABI
-worker ownership, run-ID-guarded state publication, resumable privacy-policy
-commands, crash recovery/replay, and real consent-gated Desktop Duplication
-smoke remain open gates. The bounded title-read, conservative window-location
+orchestration and generation/permit revalidation, C ABI controller ownership,
+run-ID-guarded state publication, and the native resumable authorization-Pause
+protocol are implemented, while managed pause-versus-sticky-Stop policy,
+crash recovery/replay, and real consent-gated Desktop Duplication smoke remain
+open gates. The bounded title-read, conservative window-location
 invalidation, display-topology/current-session/power event source,
 display-scoped authorization, callback-time native admission closure, and
-strict no-fallback DXGI output resolver gates are closed. The standalone native
+strict no-fallback DXGI output resolver gates are closed. The native
 worker composes the frame source with target observation, WIC, H.264, atomic
 storage, fresh per-stage permits, post-operation epoch/target checks, and
 compensating event publication. Callback closure cannot interrupt a Windows or
 codec call already in progress, but it invalidates that stage's post-check; no
-result advances unless the same target and permit remain current. This worker
-is not yet owned or driven by a C ABI capture instance.
+result advances unless the same target and permit remain current. A C ABI
+capture instance now owns this worker and its backend, but production uses the
+controller's disabled activation mode and never starts the worker.
 Owner-bound Start/Resume admission is implemented:
 the Application service obtains a single-use opaque stamp, rechecks persisted
 and runtime authorization, and the native owner atomically consumes the stamp
 against the current generation and target without retrying a stale command.
 The foundation consumes a valid authorized command but still returns
 `NotImplemented`; it starts no capture worker. Dynamic lock, exclusion, and
-Unknown transitions must also receive an explicit evidence-Pause or sticky
-session-Stop policy; this milestone does not implement that distinction. The
+Unknown transitions enter the native provisional-Pause protocol, but managed
+policy must still choose resumable evidence Pause or sticky session Stop. The
 native foundation deliberately advertises no screen-capture, H.264-chunk, or
 evidence-extraction capability, App DI continues to use the unavailable
 backend, and the development bundle is not yet a functional recorder.
@@ -192,7 +198,11 @@ token handoff, and the remaining C ABI activation boundary.
 The [authority-checked native worker ADR](docs/adr/0011-authority-checked-native-capture-worker-orchestration.md)
 records per-stage target/permit guards, Pause epochs, graceful Stop ordering,
 validated event linearization, compensation retention, the real Windows
-adapter, and the remaining run-state and live-activation gates.
+adapter, and the remaining run-state and live-activation gates. The
+[run-isolated native instance-control ADR](docs/adr/0012-run-isolated-native-capture-instance-control.md)
+records C ABI controller ownership, checkpoint-driven state, provisional
+authorization Pause, run-ID isolation, Stop single flight, and the still-closed
+live capability boundary.
 
 ## Platform Support
 
@@ -232,7 +242,7 @@ pwsh -File .\scripts\Build-Native.ps1 -Configuration Debug
 
 `Build-Native.ps1` selects an installed Visual Studio generator supported by
 CMake, ignores ambient `CMAKE_GENERATOR*` overrides, preserves x64
-multi-configuration output, builds the C++20 DLL, and runs all fourteen native C
+multi-configuration output, builds the C++20 DLL, and runs all fifteen native C
 and C++ tests with per-test timeouts. Use `-Fresh` to recreate CMake state, or
 `-Generator` to select a specific installed Visual Studio generator.
 

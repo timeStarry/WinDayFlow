@@ -291,7 +291,8 @@ bool CaptureWorker::RetryPendingCompensation(uint32_t attempts) noexcept {
 }
 
 void CaptureWorker::Run(CaptureRuntimeOwner& runtime,
-                        PersistenceToken initial_token) noexcept {
+                        PersistenceToken initial_token,
+                        CaptureWorkerCheckpointSink checkpoint_sink) noexcept {
   bool expected = false;
   if (!running_.compare_exchange_strong(expected, true)) {
     return;
@@ -333,12 +334,25 @@ void CaptureWorker::Run(CaptureRuntimeOwner& runtime,
     schedule.Reset(backend_.SteadyNowMilliseconds());
     ChunkState chunk;
     bool topology_available = false;
+    bool ready_for_token = false;
     uint64_t handled_pause_epoch = 0;
     uint64_t observed_control_sequence = runtime.ReadControlSnapshot().sequence;
 
     auto discard_chunk = [&]() noexcept {
       backend_.ResetChunk();
       chunk = {};
+    };
+
+    auto publish_checkpoint = [&](CaptureWorkerCheckpointKind kind,
+                                  uint64_t pause_epoch) noexcept {
+      if (!checkpoint_sink) {
+        return true;
+      }
+      try {
+        return checkpoint_sink(CaptureWorkerCheckpoint{kind, pause_epoch});
+      } catch (...) {
+        return false;
+      }
     };
 
     auto retain_failed_compensation =
@@ -553,6 +567,106 @@ void CaptureWorker::Run(CaptureRuntimeOwner& runtime,
       complete();
     };
 
+    auto exit_stopped = [&]() noexcept {
+      discard_chunk();
+      backend_.ResetAcquisition();
+      topology_available = false;
+      ready_for_token = false;
+      result.reason = CaptureWorkerExitReason::kStopped;
+      result.error = WDF_CAPTURE_ERROR_NONE;
+      complete();
+    };
+
+    auto await_resume = [&](CaptureRuntimeControlSnapshot control) {
+      for (;;) {
+        observed_control_sequence = control.sequence;
+        if (control.stop_requested) {
+          exit_stopped();
+          return false;
+        }
+        if (!control.pause_requested) {
+          if (!control.replacement_token.has_value()) {
+            fail(WorkerStepResult::kInternalFailure);
+            return false;
+          }
+          token = *control.replacement_token;
+          ready_for_token = false;
+          schedule.Reset(backend_.SteadyNowMilliseconds());
+          return true;
+        }
+
+        if (control.pause_epoch != handled_pause_epoch) {
+          handled_pause_epoch = control.pause_epoch;
+          if (!publish_checkpoint(CaptureWorkerCheckpointKind::kPaused,
+                                  handled_pause_epoch)) {
+            fail(WorkerStepResult::kEventFailure);
+            return false;
+          }
+        }
+
+        const std::optional<CaptureRuntimeControlSnapshot> changed =
+            runtime.WaitForControlChange(observed_control_sequence,
+                                         kMaximumWorkerWaitMs);
+        if (changed.has_value()) {
+          control = *changed;
+        }
+      }
+    };
+
+    auto enter_pause = [&](CaptureRuntimeControlSnapshot control,
+                           bool finalize_authorized_chunk) {
+      if (finalize_authorized_chunk) {
+        const WorkerStepResult paused =
+            finalize_chunk(ChunkFinalizationReason::kPause);
+        if (paused == WorkerStepResult::kAuthorizationLost) {
+          control = runtime.ReadControlSnapshot();
+          observed_control_sequence = control.sequence;
+          if (control.stop_requested) {
+            exit_stopped();
+            return false;
+          }
+          if (control.pause_epoch == handled_pause_epoch) {
+            fail(WorkerStepResult::kAuthorizationLost);
+            return false;
+          }
+        } else if (paused != WorkerStepResult::kOk) {
+          fail(paused);
+          return false;
+        }
+      } else {
+        discard_chunk();
+      }
+
+      backend_.ResetAcquisition();
+      topology_available = false;
+      ready_for_token = false;
+      handled_pause_epoch = control.pause_epoch;
+      if (!publish_checkpoint(CaptureWorkerCheckpointKind::kPaused,
+                              handled_pause_epoch)) {
+        fail(WorkerStepResult::kEventFailure);
+        return false;
+      }
+      return await_resume(std::move(control));
+    };
+
+    auto handle_authorization_loss = [&]() {
+      CaptureRuntimeControlSnapshot latest = runtime.ReadControlSnapshot();
+      observed_control_sequence = latest.sequence;
+      if (latest.stop_requested) {
+        // A closed gate cannot authorize a partial-chunk finalization. Stop
+        // therefore owns cleanup only on this path.
+        exit_stopped();
+        return false;
+      }
+      if (latest.pause_epoch != handled_pause_epoch) {
+        // The old token cannot contribute evidence after the gate closes. A
+        // provisional Pause keeps the thread alive for an admitted fresh token.
+        return enter_pause(std::move(latest), false);
+      }
+      fail(WorkerStepResult::kAuthorizationLost);
+      return false;
+    };
+
     for (;;) {
       CaptureRuntimeControlSnapshot control = runtime.ReadControlSnapshot();
       observed_control_sequence = control.sequence;
@@ -560,67 +674,28 @@ void CaptureWorker::Run(CaptureRuntimeOwner& runtime,
       if (control.stop_requested) {
         const WorkerStepResult stopped =
             finalize_chunk(ChunkFinalizationReason::kStop);
+        if (stopped == WorkerStepResult::kAuthorizationLost) {
+          static_cast<void>(handle_authorization_loss());
+          return;
+        }
         if (stopped != WorkerStepResult::kOk) {
           fail(stopped);
           return;
         }
-        result.reason = CaptureWorkerExitReason::kStopped;
-        result.error = WDF_CAPTURE_ERROR_NONE;
-        complete();
+        exit_stopped();
         return;
       }
 
       if (control.pause_epoch != handled_pause_epoch) {
-        const WorkerStepResult paused =
-            finalize_chunk(ChunkFinalizationReason::kPause);
-        if (paused != WorkerStepResult::kOk &&
-            paused != WorkerStepResult::kAuthorizationLost) {
-          fail(paused);
+        if (!enter_pause(std::move(control), true)) {
           return;
         }
-        backend_.ResetAcquisition();
-        topology_available = false;
-        handled_pause_epoch = control.pause_epoch;
-        // A folded Resume still advances the token while the latest state is
-        // paused.
-        if (control.replacement_token.has_value()) {
-          token = *control.replacement_token;
-        } else if (!control.pause_requested) {
-          fail(WorkerStepResult::kInternalFailure);
-          return;
-        }
-        if (!control.pause_requested) {
-          schedule.Reset(backend_.SteadyNowMilliseconds());
-          continue;
-        }
+        continue;
       }
 
       if (control.pause_requested) {
-        for (;;) {
-          const std::optional<CaptureRuntimeControlSnapshot> changed =
-              runtime.WaitForControlChange(observed_control_sequence,
-                                           kMaximumWorkerWaitMs);
-          if (!changed.has_value()) {
-            continue;
-          }
-          control = *changed;
-          observed_control_sequence = control.sequence;
-          if (control.stop_requested) {
-            result.reason = CaptureWorkerExitReason::kStopped;
-            result.error = WDF_CAPTURE_ERROR_NONE;
-            complete();
-            return;
-          }
-          if (control.pause_requested) {
-            continue;
-          }
-          if (!control.replacement_token.has_value()) {
-            fail(WorkerStepResult::kInternalFailure);
-            return;
-          }
-          token = *control.replacement_token;
-          schedule.Reset(backend_.SteadyNowMilliseconds());
-          break;
+        if (!await_resume(std::move(control))) {
+          return;
         }
         continue;
       }
@@ -628,8 +703,10 @@ void CaptureWorker::Run(CaptureRuntimeOwner& runtime,
       const AuthorizedStageResult current = ExecuteAuthorizedStage(
           token, []() noexcept { return CaptureWorkerBackendResult::kOk; });
       if (!current.authorized) {
-        fail(WorkerStepResult::kAuthorizationLost);
-        return;
+        if (!handle_authorization_loss()) {
+          return;
+        }
+        continue;
       }
 
       if (!topology_available) {
@@ -638,8 +715,10 @@ void CaptureWorker::Run(CaptureRuntimeOwner& runtime,
               return backend_.InitializeAcquisition(token.target);
             });
         if (!initialized.authorized) {
-          fail(WorkerStepResult::kAuthorizationLost);
-          return;
+          if (!handle_authorization_loss()) {
+            return;
+          }
+          continue;
         }
         if (initialized.backend_result ==
             CaptureWorkerBackendResult::kRebuildRequired) {
@@ -653,6 +732,12 @@ void CaptureWorker::Run(CaptureRuntimeOwner& runtime,
           return;
         }
         topology_available = true;
+        if (!ready_for_token &&
+            !publish_checkpoint(CaptureWorkerCheckpointKind::kReady, 0)) {
+          fail(WorkerStepResult::kEventFailure);
+          return;
+        }
+        ready_for_token = true;
         schedule.Reset(backend_.SteadyNowMilliseconds());
       }
 
@@ -662,6 +747,12 @@ void CaptureWorker::Run(CaptureRuntimeOwner& runtime,
               static_cast<int64_t>(configuration_.policy.chunk_duration_ms)) {
         const WorkerStepResult finalized =
             finalize_chunk(ChunkFinalizationReason::kRegular);
+        if (finalized == WorkerStepResult::kAuthorizationLost) {
+          if (!handle_authorization_loss()) {
+            return;
+          }
+          continue;
+        }
         if (finalized != WorkerStepResult::kOk) {
           fail(finalized);
           return;
@@ -685,16 +776,27 @@ void CaptureWorker::Run(CaptureRuntimeOwner& runtime,
                                          &acquired_frame);
           });
       if (!acquired.authorized) {
-        fail(WorkerStepResult::kAuthorizationLost);
-        return;
+        SecureClear(&acquired_frame);
+        if (!handle_authorization_loss()) {
+          return;
+        }
+        continue;
       }
       if (acquired.backend_result == CaptureWorkerBackendResult::kTimeout) {
+        SecureClear(&acquired_frame);
         continue;
       }
       if (acquired.backend_result ==
           CaptureWorkerBackendResult::kRebuildRequired) {
+        SecureClear(&acquired_frame);
         const WorkerStepResult interrupted =
             finalize_chunk(ChunkFinalizationReason::kRegular);
+        if (interrupted == WorkerStepResult::kAuthorizationLost) {
+          if (!handle_authorization_loss()) {
+            return;
+          }
+          continue;
+        }
         if (interrupted != WorkerStepResult::kOk) {
           fail(interrupted);
           return;
@@ -706,6 +808,7 @@ void CaptureWorker::Run(CaptureRuntimeOwner& runtime,
         continue;
       }
       if (acquired.backend_result != CaptureWorkerBackendResult::kOk) {
+        SecureClear(&acquired_frame);
         fail(MapBackendFailure(acquired.backend_result));
         return;
       }
@@ -720,11 +823,15 @@ void CaptureWorker::Run(CaptureRuntimeOwner& runtime,
           });
       SecureClear(&acquired_frame);
       if (!transformed.authorized) {
-        fail(WorkerStepResult::kAuthorizationLost);
-        return;
+        SecureClear(&transformed_frame);
+        if (!handle_authorization_loss()) {
+          return;
+        }
+        continue;
       }
       if (transformed.backend_result != CaptureWorkerBackendResult::kOk ||
           !IsValidBgraFrame(transformed_frame)) {
+        SecureClear(&transformed_frame);
         fail(transformed.backend_result == CaptureWorkerBackendResult::kOk
                  ? WorkerStepResult::kDeviceFailure
                  : MapBackendFailure(transformed.backend_result));
@@ -735,7 +842,15 @@ void CaptureWorker::Run(CaptureRuntimeOwner& runtime,
                                    chunk.height != transformed_frame.height)) {
         const WorkerStepResult resized =
             finalize_chunk(ChunkFinalizationReason::kRegular);
+        if (resized == WorkerStepResult::kAuthorizationLost) {
+          SecureClear(&transformed_frame);
+          if (!handle_authorization_loss()) {
+            return;
+          }
+          continue;
+        }
         if (resized != WorkerStepResult::kOk) {
+          SecureClear(&transformed_frame);
           fail(resized);
           return;
         }
@@ -773,10 +888,14 @@ void CaptureWorker::Run(CaptureRuntimeOwner& runtime,
               return backend_.BeginChunk(writer_configuration);
             });
         if (!begun.authorized) {
-          fail(WorkerStepResult::kAuthorizationLost);
-          return;
+          SecureClear(&transformed_frame);
+          if (!handle_authorization_loss()) {
+            return;
+          }
+          continue;
         }
         if (begun.backend_result != CaptureWorkerBackendResult::kOk) {
+          SecureClear(&transformed_frame);
           fail(MapBackendFailure(begun.backend_result));
           return;
         }
@@ -788,8 +907,10 @@ void CaptureWorker::Run(CaptureRuntimeOwner& runtime,
           });
       SecureClear(&transformed_frame);
       if (!encoded.authorized) {
-        fail(WorkerStepResult::kAuthorizationLost);
-        return;
+        if (!handle_authorization_loss()) {
+          return;
+        }
+        continue;
       }
       if (encoded.backend_result != CaptureWorkerBackendResult::kOk) {
         fail(MapBackendFailure(encoded.backend_result));

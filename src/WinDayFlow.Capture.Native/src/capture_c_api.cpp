@@ -4,7 +4,6 @@
 
 #include <array>
 #include <atomic>
-#include <chrono>
 #include <condition_variable>
 #include <cstring>
 #include <limits>
@@ -15,25 +14,20 @@
 #include <unordered_map>
 #include <utility>
 
-#include "capture_event_queue.h"
+#include "capture_instance_controller.h"
 #include "capture_policy.h"
-#include "capture_runtime_owner.h"
-#include "capture_safety_core.h"
 #include "privacy_guard.h"
 #include "windows_capture_worker_backend.h"
 
 namespace {
 
-using windayflow::capture::CaptureEventQueue;
+using windayflow::capture::CaptureActivationMode;
 using windayflow::capture::CaptureEventReadResult;
+using windayflow::capture::CaptureInstanceController;
+using windayflow::capture::CaptureInstanceControllerConfiguration;
 using windayflow::capture::CapturePolicy;
 using windayflow::capture::CaptureCommand;
 using windayflow::capture::CaptureCommandAdmission;
-using windayflow::capture::CaptureCommandAdmissionPermit;
-using windayflow::capture::CaptureCommandAdmissionResult;
-using windayflow::capture::CaptureRuntimeWaitResult;
-using windayflow::capture::CaptureSafetyCore;
-using windayflow::capture::CaptureSafetyUpdateTicket;
 using windayflow::capture::CaptureSafetyUpdateResult;
 using windayflow::capture::CaptureTargetIdentity;
 using windayflow::capture::PrivacyContext;
@@ -60,34 +54,17 @@ static_assert(kLegacyRuntimeAuthorizationSize ==
 static_assert(kCurrentRuntimeAuthorizationSize == 224);
 
 struct CaptureInstance {
-  CaptureInstance(CapturePolicy initial_policy,
-                  size_t event_queue_capacity,
-                  uint32_t maximum_capture_width,
-                  uint32_t maximum_capture_height,
-                  std::wstring output_directory)
-      : events(event_queue_capacity),
-        policy(initial_policy),
-        max_width(maximum_capture_width),
-        max_height(maximum_capture_height),
-        output_directory_utf16(std::move(output_directory)) {}
+  CaptureInstance(CaptureInstanceControllerConfiguration configuration,
+                  std::unique_ptr<windayflow::capture::CaptureWorkerBackend>
+                      backend)
+      : controller(std::move(configuration), std::move(backend)) {}
 
   std::mutex lifetime_mutex;
   std::condition_variable no_active_calls;
   uint32_t active_calls = 0;
   bool destroying = false;
 
-  std::mutex state_mutex;
-  CaptureEventQueue events;
-  CapturePolicy policy;
-  CaptureSafetyCore safety;
-  windayflow::capture::CaptureRuntimeOwner runtime;
-  PrivacyContext privacy;
-  uint32_t max_width = 0;
-  uint32_t max_height = 0;
-  std::wstring output_directory_utf16;
-  wdf_capture_state state = WDF_CAPTURE_STATE_UNAVAILABLE;
-  wdf_capture_reason pending_stop_reason = WDF_CAPTURE_REASON_USER_STOPPED;
-  bool stop_requested_for_join = false;
+  CaptureInstanceController controller;
 };
 
 class InstanceLease {
@@ -137,12 +114,6 @@ std::mutex g_registry_mutex;
 std::unordered_map<wdf_capture_handle, std::shared_ptr<CaptureInstance>>
     g_instances;
 std::atomic<wdf_capture_handle> g_next_handle{1};
-
-int64_t CurrentUnixMilliseconds() {
-  return std::chrono::duration_cast<std::chrono::milliseconds>(
-             std::chrono::system_clock::now().time_since_epoch())
-      .count();
-}
 
 wdf_capture_handle AllocateHandle() {
   wdf_capture_handle current = g_next_handle.load(std::memory_order_relaxed);
@@ -361,26 +332,6 @@ wdf_capture_result MapSafetyUpdateResult(CaptureSafetyUpdateResult result) {
   }
 }
 
-wdf_capture_result MapCommandAdmissionResult(
-    CaptureCommandAdmissionResult result) {
-  switch (result) {
-    case CaptureCommandAdmissionResult::kOk:
-      return WDF_CAPTURE_RESULT_OK;
-    case CaptureCommandAdmissionResult::kInvalidArgument:
-      return WDF_CAPTURE_RESULT_INVALID_ARGUMENT;
-    case CaptureCommandAdmissionResult::kPolicyBlocked:
-      return WDF_CAPTURE_RESULT_POLICY_BLOCKED;
-    case CaptureCommandAdmissionResult::kAdmissionRejected:
-      return WDF_CAPTURE_RESULT_ADMISSION_REJECTED;
-    case CaptureCommandAdmissionResult::kGenerationExhausted:
-      return WDF_CAPTURE_RESULT_GENERATION_EXHAUSTED;
-    case CaptureCommandAdmissionResult::kInternalError:
-      return WDF_CAPTURE_RESULT_INTERNAL_ERROR;
-    default:
-      return WDF_CAPTURE_RESULT_INTERNAL_ERROR;
-  }
-}
-
 bool TryCopyCommand(wdf_capture_command source, CaptureCommand* destination) {
   if (destination == nullptr) {
     return false;
@@ -575,104 +526,12 @@ InstanceLease AcquireInstance(wdf_capture_handle handle) {
   return InstanceLease(std::move(instance));
 }
 
-bool PublishState(CaptureInstance& instance,
-                  wdf_capture_state state,
-                  wdf_capture_reason reason,
-                  std::string detail) {
-  const auto safety_snapshot = instance.safety.observable_snapshot();
-  instance.state = state;
-  const uint64_t sequence =
-      instance.events.Push(WDF_CAPTURE_EVENT_STATE_CHANGED,
-                           state,
-                           reason,
-                           WDF_CAPTURE_ERROR_NONE,
-                           std::move(detail),
-                           CurrentUnixMilliseconds(),
-                           safety_snapshot.persistence_generation,
-                           safety_snapshot.target_epoch);
-  if (sequence == 0) {
-    instance.state = WDF_CAPTURE_STATE_FAULTED;
-    return false;
-  }
-  return true;
-}
-
-wdf_capture_result RequestStopCore(CaptureInstance& instance,
-                                   wdf_capture_reason reason) {
-  std::lock_guard lock(instance.state_mutex);
-  instance.safety.InvalidatePendingCommandAdmission();
-  instance.runtime.RequestStop();
-  instance.stop_requested_for_join = true;
-
-  if (instance.state == WDF_CAPTURE_STATE_STOPPED ||
-      instance.state == WDF_CAPTURE_STATE_STOPPING) {
-    return WDF_CAPTURE_RESULT_OK;
-  }
-  instance.pending_stop_reason = reason;
-  if (!PublishState(instance,
-                    WDF_CAPTURE_STATE_STOPPING,
-                    reason,
-                    "Capture stop requested; waiting for native worker shutdown.")) {
-    return WDF_CAPTURE_RESULT_INTERNAL_ERROR;
-  }
-  return WDF_CAPTURE_RESULT_OK;
-}
-
-wdf_capture_result WaitStoppedCore(CaptureInstance& instance,
-                                   uint32_t timeout_ms) {
-  const auto started = std::chrono::steady_clock::now();
-  const CaptureRuntimeWaitResult wait_result =
-      instance.runtime.WaitStopped(timeout_ms);
-  if (wait_result == CaptureRuntimeWaitResult::kTimeout) {
-    return WDF_CAPTURE_RESULT_TIMEOUT;
-  }
-
-  const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-      std::chrono::steady_clock::now() - started);
-  const uint64_t elapsed_ms =
-      elapsed.count() <= 0 ? 0 : static_cast<uint64_t>(elapsed.count());
-  const uint32_t remaining_ms =
-      elapsed_ms >= timeout_ms
-          ? 0
-          : timeout_ms - static_cast<uint32_t>(elapsed_ms);
-  uint64_t persistence_generation = 0;
-  if (!instance.safety.FinalizeRevoke(remaining_ms, &persistence_generation)) {
-    return WDF_CAPTURE_RESULT_TIMEOUT;
-  }
-  static_cast<void>(persistence_generation);
-
-  std::lock_guard lock(instance.state_mutex);
-  instance.privacy = instance.safety.privacy_context();
-  if (instance.state != WDF_CAPTURE_STATE_STOPPED) {
-    if (!PublishState(instance,
-                      WDF_CAPTURE_STATE_STOPPED,
-                      instance.pending_stop_reason,
-                      "Capture worker stopped and joined.")) {
-      instance.stop_requested_for_join = false;
-      return WDF_CAPTURE_RESULT_INTERNAL_ERROR;
-    }
-  }
-  instance.stop_requested_for_join = false;
-  return wait_result == CaptureRuntimeWaitResult::kWorkerFailed
-             ? WDF_CAPTURE_RESULT_INTERNAL_ERROR
-             : WDF_CAPTURE_RESULT_OK;
-}
-
 wdf_capture_result LegacyStartOrResume(wdf_capture_handle handle) {
   InstanceLease lease = AcquireInstance(handle);
   if (!lease) {
     return WDF_CAPTURE_RESULT_INVALID_ARGUMENT;
   }
   return WDF_CAPTURE_RESULT_ADMISSION_REQUIRED;
-}
-
-bool IsCommandStateValid(wdf_capture_state state, CaptureCommand command) {
-  if (command == CaptureCommand::kResume) {
-    return state == WDF_CAPTURE_STATE_PAUSED ||
-           state == WDF_CAPTURE_STATE_BLOCKED_BY_CONSENT;
-  }
-  return state == WDF_CAPTURE_STATE_STOPPED ||
-         state == WDF_CAPTURE_STATE_UNAVAILABLE;
 }
 
 wdf_capture_result StartOrResumeAuthorized(
@@ -689,31 +548,9 @@ wdf_capture_result StartOrResumeAuthorized(
   if (!lease) {
     return WDF_CAPTURE_RESULT_INVALID_ARGUMENT;
   }
-  CaptureInstance* const instance = lease.get();
-  std::lock_guard lock(instance->state_mutex);
-  const uint64_t owner_epoch = instance->runtime.owner_epoch();
-  if (owner_epoch == 0) {
-    return WDF_CAPTURE_RESULT_GENERATION_EXHAUSTED;
-  }
-  CaptureCommandAdmissionPermit permit;
-  const CaptureCommandAdmissionResult admission_result =
-      instance->safety.AcquireCommandAdmissionPermit(
-          value, command, owner_epoch, &permit);
-  if (admission_result != CaptureCommandAdmissionResult::kOk) {
-    return MapCommandAdmissionResult(admission_result);
-  }
-  if (!IsCommandStateValid(instance->state, command)) {
-    return WDF_CAPTURE_RESULT_INVALID_STATE;
-  }
-
-  if (!PublishState(
-          *instance,
-          WDF_CAPTURE_STATE_UNAVAILABLE,
-          WDF_CAPTURE_REASON_BACKEND_UNAVAILABLE,
-          "The native capture engine is not connected in this foundation build.")) {
-    return WDF_CAPTURE_RESULT_INTERNAL_ERROR;
-  }
-  return WDF_CAPTURE_RESULT_NOT_IMPLEMENTED;
+  return command == CaptureCommand::kStart
+             ? lease.get()->controller.StartAuthorized(value)
+             : lease.get()->controller.ResumeAuthorized(value);
 }
 
 }  // namespace
@@ -763,19 +600,19 @@ extern "C" wdf_capture_result WDF_CAPTURE_CALL wdf_capture_create(
         config->context_interval_ms,
         config->chunk_duration_ms,
     };
-    auto instance = std::make_shared<CaptureInstance>(
-        policy,
-        config->event_queue_capacity,
-        config->max_width,
-        config->max_height,
+    CaptureInstanceControllerConfiguration controller_configuration;
+    controller_configuration.activation_mode = CaptureActivationMode::kDisabled;
+    controller_configuration.event_queue_capacity = config->event_queue_capacity;
+    controller_configuration.worker.policy = policy;
+    controller_configuration.worker.maximum_width = config->max_width;
+    controller_configuration.worker.maximum_height = config->max_height;
+    auto backend = windayflow::capture::CreateWindowsCaptureWorkerBackend(
         std::move(output_directory_utf16));
-    if (!PublishState(
-            *instance,
-            WDF_CAPTURE_STATE_UNAVAILABLE,
-            WDF_CAPTURE_REASON_BACKEND_UNAVAILABLE,
-            "Native capture foundation loaded; live capture remains disabled.")) {
+    if (backend == nullptr) {
       return WDF_CAPTURE_RESULT_INTERNAL_ERROR;
     }
+    auto instance = std::make_shared<CaptureInstance>(
+        std::move(controller_configuration), std::move(backend));
 
     const wdf_capture_handle raw_handle = AllocateHandle();
     if (raw_handle == 0) {
@@ -811,33 +648,12 @@ wdf_capture_update_privacy_context(
     if (!lease) {
       return WDF_CAPTURE_RESULT_INVALID_ARGUMENT;
     }
-    CaptureInstance* const instance = lease.get();
-    CaptureSafetyUpdateTicket ticket;
-    {
-      std::lock_guard lock(instance->state_mutex);
-      if (instance->state == WDF_CAPTURE_STATE_STOPPING) {
-        return WDF_CAPTURE_RESULT_INVALID_STATE;
-      }
-      ticket = instance->safety.BeginAuthorizationUpdate();
-    }
-    instance->runtime.NotifyAuthorizationChanged();
     uint64_t persistence_generation = 0;
     const CaptureSafetyUpdateResult update_result =
-        instance->safety.CompleteLegacyPrivacyContext(
-            ticket, value, &persistence_generation);
+        lease.get()->controller.UpdatePrivacyContext(
+            value, &persistence_generation);
     static_cast<void>(persistence_generation);
-    if (update_result != CaptureSafetyUpdateResult::kOk) {
-      return MapSafetyUpdateResult(update_result);
-    }
-    {
-      std::lock_guard lock(instance->state_mutex);
-      if (instance->state == WDF_CAPTURE_STATE_STOPPING) {
-        instance->safety.BeginRevoke();
-        return WDF_CAPTURE_RESULT_INVALID_STATE;
-      }
-      instance->privacy = instance->safety.privacy_context();
-    }
-    return WDF_CAPTURE_RESULT_OK;
+    return MapSafetyUpdateResult(update_result);
   } catch (...) {
     return WDF_CAPTURE_RESULT_INTERNAL_ERROR;
   }
@@ -865,27 +681,9 @@ wdf_capture_update_runtime_authorization(
       return WDF_CAPTURE_RESULT_INVALID_ARGUMENT;
     }
 
-    CaptureInstance* const instance = lease.get();
-    CaptureSafetyUpdateTicket ticket;
-    {
-      std::lock_guard lock(instance->state_mutex);
-      if (instance->state == WDF_CAPTURE_STATE_STOPPING) {
-        return WDF_CAPTURE_RESULT_INVALID_STATE;
-      }
-      ticket = instance->safety.BeginAuthorizationUpdate();
-    }
-    instance->runtime.NotifyAuthorizationChanged();
     const CaptureSafetyUpdateResult update_result =
-        instance->safety.CompleteRuntimeAuthorization(
-            ticket, value, persistence_generation);
-    if (update_result == CaptureSafetyUpdateResult::kOk) {
-      std::lock_guard lock(instance->state_mutex);
-      if (instance->state == WDF_CAPTURE_STATE_STOPPING) {
-        instance->safety.BeginRevoke();
-        return WDF_CAPTURE_RESULT_INVALID_STATE;
-      }
-      instance->privacy = instance->safety.privacy_context();
-    }
+        lease.get()->controller.UpdateRuntimeAuthorization(
+            value, persistence_generation);
     return MapSafetyUpdateResult(update_result);
   } catch (...) {
     return WDF_CAPTURE_RESULT_INTERNAL_ERROR;
@@ -906,14 +704,8 @@ wdf_capture_invalidate_runtime_authorization(
       return WDF_CAPTURE_RESULT_INVALID_ARGUMENT;
     }
 
-    const uint64_t closed_epoch =
-        lease.get()->safety.InvalidateAuthorizationAdmission();
-    lease.get()->runtime.NotifyAuthorizationChanged();
-    if (closed_epoch == 0) {
-      return WDF_CAPTURE_RESULT_GENERATION_EXHAUSTED;
-    }
-    *authorization_epoch = closed_epoch;
-    return WDF_CAPTURE_RESULT_OK;
+    return lease.get()->controller.InvalidateRuntimeAuthorization(
+        authorization_epoch);
   } catch (...) {
     return WDF_CAPTURE_RESULT_INTERNAL_ERROR;
   }
@@ -933,14 +725,9 @@ wdf_capture_revoke_runtime_authorization(
       return WDF_CAPTURE_RESULT_INVALID_ARGUMENT;
     }
 
-    CaptureInstance* const instance = lease.get();
     const CaptureSafetyUpdateResult revoke_result =
-        instance->safety.Revoke(persistence_generation);
-    instance->runtime.NotifyAuthorizationChanged();
-    {
-      std::lock_guard lock(instance->state_mutex);
-      instance->privacy = instance->safety.privacy_context();
-    }
+        lease.get()->controller.RevokeRuntimeAuthorization(
+            persistence_generation);
     return MapSafetyUpdateResult(revoke_result);
   } catch (...) {
     return WDF_CAPTURE_RESULT_INTERNAL_ERROR;
@@ -974,28 +761,13 @@ wdf_capture_issue_command_admission(
     if (!lease) {
       return WDF_CAPTURE_RESULT_INVALID_ARGUMENT;
     }
-    CaptureInstance* const instance = lease.get();
-    std::lock_guard lock(instance->state_mutex);
-    if (!IsCommandStateValid(instance->state, value)) {
-      return WDF_CAPTURE_RESULT_INVALID_STATE;
-    }
-
-    const uint64_t owner_epoch = instance->runtime.owner_epoch();
-    if (owner_epoch == 0) {
-      return WDF_CAPTURE_RESULT_GENERATION_EXHAUSTED;
-    }
     CaptureCommandAdmission issued;
-    const CaptureCommandAdmissionResult result =
-        instance->safety.IssueCommandAdmission(
-            value,
-            expected_persistence_generation,
-            expected_target_epoch,
-            owner_epoch,
-            &issued);
-    if (result == CaptureCommandAdmissionResult::kOk) {
+    const wdf_capture_result result = lease.get()->controller.IssueAdmission(
+        value, expected_persistence_generation, expected_target_epoch, &issued);
+    if (result == WDF_CAPTURE_RESULT_OK) {
       WriteCommandAdmission(issued, admission);
     }
-    return MapCommandAdmissionResult(result);
+    return result;
   } catch (...) {
     return WDF_CAPTURE_RESULT_INTERNAL_ERROR;
   }
@@ -1029,19 +801,7 @@ wdf_capture_pause(wdf_capture_handle handle) noexcept {
     if (!lease) {
       return WDF_CAPTURE_RESULT_INVALID_ARGUMENT;
     }
-    CaptureInstance* const instance = lease.get();
-    std::lock_guard lock(instance->state_mutex);
-    if (instance->state != WDF_CAPTURE_STATE_RECORDING &&
-        instance->state != WDF_CAPTURE_STATE_STARTING &&
-        instance->state != WDF_CAPTURE_STATE_RESUMING) {
-      return WDF_CAPTURE_RESULT_INVALID_STATE;
-    }
-    return PublishState(*instance,
-                        WDF_CAPTURE_STATE_PAUSED,
-                        WDF_CAPTURE_REASON_USER_PAUSED,
-                        "Capture paused by the user.")
-               ? WDF_CAPTURE_RESULT_OK
-               : WDF_CAPTURE_RESULT_INTERNAL_ERROR;
+    return lease.get()->controller.Pause();
   } catch (...) {
     return WDF_CAPTURE_RESULT_INTERNAL_ERROR;
   }
@@ -1075,8 +835,8 @@ wdf_capture_request_stop(wdf_capture_handle handle) noexcept {
     if (!lease) {
       return WDF_CAPTURE_RESULT_INVALID_ARGUMENT;
     }
-    return RequestStopCore(
-        *lease.get(), WDF_CAPTURE_REASON_USER_STOPPED);
+    return lease.get()->controller.RequestStop(
+        WDF_CAPTURE_REASON_USER_STOPPED);
   } catch (...) {
     return WDF_CAPTURE_RESULT_INTERNAL_ERROR;
   }
@@ -1090,19 +850,7 @@ extern "C" wdf_capture_result WDF_CAPTURE_CALL wdf_capture_wait_stopped(
     if (!lease) {
       return WDF_CAPTURE_RESULT_INVALID_ARGUMENT;
     }
-    CaptureInstance* const instance = lease.get();
-    {
-      std::lock_guard lock(instance->state_mutex);
-      if (!instance->stop_requested_for_join &&
-          (instance->state == WDF_CAPTURE_STATE_STOPPED ||
-           instance->state == WDF_CAPTURE_STATE_UNAVAILABLE)) {
-        return WDF_CAPTURE_RESULT_OK;
-      }
-      if (!instance->stop_requested_for_join) {
-        return WDF_CAPTURE_RESULT_INVALID_STATE;
-      }
-    }
-    return WaitStoppedCore(*instance, timeout_ms);
+    return lease.get()->controller.WaitStopped(timeout_ms);
   } catch (...) {
     return WDF_CAPTURE_RESULT_INTERNAL_ERROR;
   }
@@ -1132,11 +880,11 @@ extern "C" wdf_capture_result WDF_CAPTURE_CALL wdf_capture_poll_event(
     }
 
     const CaptureEventReadResult result =
-        lease.get()->events.Read(timeout_ms,
-                                 event,
-                                 detail_utf8,
-                                 detail_utf8_capacity,
-                                 detail_utf8_required);
+        lease.get()->controller.Poll(timeout_ms,
+                                     event,
+                                     detail_utf8,
+                                     detail_utf8_capacity,
+                                     detail_utf8_required);
     switch (result) {
       case CaptureEventReadResult::kEmpty:
         return WDF_CAPTURE_RESULT_NO_EVENT;
@@ -1182,25 +930,7 @@ wdf_capture_destroy(wdf_capture_handle* handle) noexcept {
       g_instances.erase(match);
     }
 
-    static_cast<void>(RequestStopCore(
-        *instance, WDF_CAPTURE_REASON_SHUTDOWN));
-    instance->runtime.Shutdown();
-    uint64_t persistence_generation = 0;
-    static_cast<void>(instance->safety.Revoke(&persistence_generation));
-    static_cast<void>(persistence_generation);
-    {
-      std::lock_guard state_lock(instance->state_mutex);
-      instance->privacy = instance->safety.privacy_context();
-      if (instance->state != WDF_CAPTURE_STATE_STOPPED) {
-        static_cast<void>(PublishState(
-            *instance,
-            WDF_CAPTURE_STATE_STOPPED,
-            instance->pending_stop_reason,
-            "Capture worker stopped and joined during destruction."));
-      }
-      instance->stop_requested_for_join = false;
-    }
-    instance->events.Close();
+    instance->controller.Shutdown();
     {
       std::unique_lock lifetime_lock(instance->lifetime_mutex);
       instance->no_active_calls.wait(

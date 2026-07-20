@@ -41,6 +41,7 @@ struct CaptureRuntimeControlSnapshot {
 class CaptureRuntimeOwner {
  public:
   using Worker = std::function<void(CaptureRuntimeOwner&, PersistenceToken)>;
+  using WorkerCompletion = std::function<void()>;
   using WaitStoppedExitHook = std::function<void()>;
 
   explicit CaptureRuntimeOwner(WaitStoppedExitHook wait_stopped_exit_hook = {})
@@ -50,7 +51,8 @@ class CaptureRuntimeOwner {
   CaptureRuntimeOwner(const CaptureRuntimeOwner&) = delete;
   CaptureRuntimeOwner& operator=(const CaptureRuntimeOwner&) = delete;
 
-  bool Start(CaptureCommandAdmissionPermit permit, Worker worker);
+  bool Start(CaptureCommandAdmissionPermit permit, Worker worker,
+             WorkerCompletion completion = {});
   CaptureRuntimePauseResult RequestPause();
   bool Resume(CaptureCommandAdmissionPermit permit);
   void NotifyAuthorizationChanged();
@@ -69,7 +71,8 @@ class CaptureRuntimeOwner {
 
  private:
   CaptureRuntimeControlSnapshot ControlSnapshotUnderLock() const;
-  void WorkerMain(Worker worker, PersistenceToken initial_token) noexcept;
+  void WorkerMain(Worker worker, PersistenceToken initial_token,
+                  WorkerCompletion completion) noexcept;
   CaptureRuntimeWaitResult FinishWaitStoppedUnderLock(
       std::unique_lock<std::mutex>& lock, CaptureRuntimeWaitResult result);
   bool AdvanceOwnerEpochUnderLock();

@@ -4,7 +4,7 @@ Status: Architecture and product design baseline
 Project: WinDayFlow  
 Repository: https://github.com/timeStarry/WinDayFlow  
 Developer: timeStarry <timestarry@qq.com>  
-Last updated: 2026-07-17
+Last updated: 2026-07-20
 
 ## 1. Purpose
 
@@ -303,15 +303,15 @@ through one Windows event owner thread. Its hidden top-level HWND receives
 display-topology, current-session WTS, and suspend/resume notifications, but the
 monitor is also not connected to the App or native owner. Image-bound
 publisher-signer verification, unique hosted-app child attribution,
-presentation notifications, periodic storage refresh, C ABI worker/state
-ownership, run-ID publication, and the dynamic privacy Pause/Stop policy remain
-activation gates.
+presentation notifications, periodic storage refresh, App/native live
+composition, and the dynamic privacy Pause/Stop policy remain activation gates.
 The bounded title-read, conservative window-location invalidation,
 display-scoped authorization, strict DXGI resolver, native target observer, and
-pre/post fingerprinted frame-source gates are closed. A standalone worker now
-composes them with held stage permits and the DXGI/WIC/Media Foundation/storage
-components, but it is not connected to the C ABI lifecycle boundary. The native
-foundation does not reference managed UI or domain assemblies. The App
+pre/post fingerprinted frame-source gates are closed. A C-ABI-owned controller
+now composes the worker with held stage permits and the DXGI/WIC/Media
+Foundation/storage components, but production keeps that controller in disabled
+activation mode. The native foundation does not reference managed UI or domain
+assemblies. The App
 project may reference concrete adapters for dependency-injection registration;
 feature code consumes their inward-facing contracts. The domain project must
 not reference WinUI, SQLite, HTTP, Windows App SDK, or the native capture
@@ -478,6 +478,14 @@ components behind a fakeable worker backend, enforces fresh target/permit guards
 for each stage, defines Pause epochs and graceful Stop, and makes validated
 required-event insertion the final publication linearization point. The worker
 and real Windows adapter remain behind the closed C ABI capability boundary.
+
+[ADR 0012](adr/0012-run-isolated-native-capture-instance-control.md),
+"Run-Isolated Native Capture Instance Control," makes one controller own native
+authorization, admission, lifecycle state, worker/backend, event delivery, and
+runtime shutdown. It adds run-ID-guarded checkpoints, provisional authorization
+Pause, single-flight Stop finalization, and required terminal-event capacity.
+The production C ABI uses its disabled mode, so this ownership change does not
+advertise or start live capture.
 
 `CaptureStatus` is a stable machine-readable contract, not just display text.
 It carries an unsigned 64-bit `Sequence`, `CaptureReasonCode`, and
@@ -680,8 +688,9 @@ real in-memory H.264 encode/decode, bounded DXGI/WIC geometry, handle-bound
 whole-directory publication and retryable rollback, typed privacy-safe
 manifests, cross-instance-safe event reservation, and deterministic worker
 orchestration across Pause/Resume/Stop, every invalidation stage, topology
-rebuild, event failure, and compensation retry. They do not prove C ABI worker
-ownership or the end-to-end live desktop write path.
+rebuild, event failure, compensation retry, C ABI controller ownership,
+run-ID-guarded publication, and Stop single flight. They do not prove the
+end-to-end live desktop write path.
 
 The complete live mask requires privacy guard, event queue, target-scoped and
 display-scoped authorization, persistence-generation barrier, deterministic
@@ -710,15 +719,14 @@ Display-topology, current-session WTS, and suspend/resume invalidation now exist
 presentation notifications and periodic storage refresh remain missing. The
 selected HMONITOR/device key now has both a strict resolver and a frame source
 that revalidates the complete binding before and after acquisition. The
-standalone worker now composes target observation and a fresh permit around
-acquisition, WIC, H.264, staging, rename, and reserved-event publication.
-Remaining gates are C ABI instance ownership, run-ID-guarded state/error
-publication, explicit resumable-privacy-Pause versus sticky-Stop policy,
-filesystem interruption and disk-full integration, durable compensation across
-object/process loss, stale-staging recovery, committed-event replay, owner-epoch
-races, and consent-gated Windows lifecycle/live-desktop tests. Until those gates
-pass, no live frame or context metadata can be persisted and App DI must
-continue to register `DenyCaptureRuntimeAuthorization` and
+controller-owned worker now composes target observation and a fresh permit
+around acquisition, WIC, H.264, staging, rename, and reserved-event publication.
+Remaining gates are the managed resumable-privacy-Pause versus sticky-Stop
+policy, filesystem interruption and disk-full integration, durable compensation
+across object/process loss, stale-staging recovery, committed-event replay,
+owner-epoch races, and consent-gated Windows lifecycle/live-desktop tests. Until
+those gates pass, no live frame or context metadata can be persisted and App DI
+must continue to register `DenyCaptureRuntimeAuthorization` and
 `UnavailableCaptureBackend`.
 
 The safety core, target observer, runtime mailbox, event reservation, worker
@@ -1322,9 +1330,10 @@ the user explicitly enables a future telemetry feature.
 
 ### Native
 
-- The current native foundation is exercised by fourteen CTest executables:
+- The current native foundation is exercised by fifteen CTest executables:
   `pixel_buffer_tests`, `atomic_chunk_store_tests`, `capture_policy_tests`,
-  `capture_event_queue_tests`, `capture_safety_core_tests`,
+  `capture_event_queue_tests`, `capture_instance_controller_tests`,
+  `capture_safety_core_tests`,
   `capture_worker_tests`, `chunk_manifest_tests`, `dxgi_output_resolver_tests`,
   `dxgi_desktop_frame_source_tests`,
   `windows_capture_target_observer_tests`, `wic_bgra_scaler_tests`,
@@ -1334,9 +1343,12 @@ the user explicitly enables a future telemetry feature.
   DXGI/WIC bounds, handle-bound transactional storage, typed manifests, and
   retryable compensation. The worker test adds deterministic per-stage
   invalidation, Pause/Resume/Stop, topology, event-linearization, and rollback
-  coverage. These tests intentionally do not capture the user's live desktop or
-  prove C ABI ownership of the frame-to-artifact worker. The
-  native build script explicitly
+  coverage. The controller test adds run-ID, checkpoint, Stop single-flight,
+  stale deferred-Stop rejection, atomic terminal-result sharing and exception
+  takeover, saturated synthetic-Stop revoke, latest Pause-reason folding,
+  terminal-capacity, and destructor-join coverage. These tests intentionally do
+  not capture the user's live desktop or prove a live production C ABI worker
+  run. The native build script explicitly
   selects an installed Visual Studio generator, filters ambient
   `CMAKE_GENERATOR*` overrides, and retains x64 multi-configuration output.
 - Pixel-buffer and scaling correctness.
@@ -1422,11 +1434,11 @@ the user explicitly enables a future telemetry feature.
 ## 21. Delivery Plan
 
 Phases are release gates, not a claim of strict implementation order. As of
-2026-07-17, the no-capture manual-timeline portions of Phases 2 and 3 plus
+2026-07-20, the no-capture manual-timeline portions of Phases 2 and 3 plus
 schema v4, consent policy v2, persistent retention/exclusion/session choices,
 and user-authored typed exclusion rules are implemented. Phase 1 also has
-Accepted ADRs 0001 through 0011, verified QiDayflow source provenance, the x64
-C++20 C ABI v1 foundation, fourteen native tests, the display-scoped safety
+Accepted ADRs 0001 through 0012, verified QiDayflow source provenance, the x64
+C++20 C ABI v1 foundation, fifteen native tests, the display-scoped safety
 core, managed asynchronous owner/quiescence contract, owner-bound single-use
 Start/Resume admission, the inactive runtime privacy coordinator, the pure
 exclusion matcher, the on-demand Windows privacy probe, and the synchronous
@@ -1444,12 +1456,14 @@ before the matching Block acknowledgement. The native writer slice now adds
 strict target/DXGI observation, bounded WIC, real in-memory H.264, privacy-safe
 manifests, compensating whole-directory publication, per-stage authority
 guards, Pause epochs, and a deterministic fake-backed orchestration worker with
-a real Windows adapter. Image-bound
+a real Windows adapter. A C-ABI-owned instance controller now adds independent
+run IDs, checkpoint-driven state, resumable authorization replacement,
+single-flight Stop/revoke, stale-callback rejection, and reserved terminal-event
+delivery while production remains in disabled activation mode. Image-bound
 publisher-signer verification, unique child attribution, presentation
-notifications, periodic storage refresh, C ABI worker/state ownership,
-run-ID-guarded terminal publication, durable compensation and stale-artifact
-recovery/replay, consent-gated live Desktop Duplication smoke, and the
-evidence-Pause versus sticky-Stop dynamic policy remain open activation gates.
+notifications, periodic storage refresh, durable compensation and stale-artifact
+recovery/replay, consent-gated live Desktop Duplication smoke, and the managed
+evidence-Pause versus sticky-Stop policy remain open activation gates.
 `ScreenCapture`, `H264Chunks`,
 `EvidenceExtraction`, and managed-adapter runtime activation remain disabled,
 so no phase exit criterion is met.

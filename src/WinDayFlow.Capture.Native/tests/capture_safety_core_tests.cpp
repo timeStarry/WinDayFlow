@@ -1735,6 +1735,58 @@ bool TestRuntimeOwnerControlMailbox() {
                 "shutdown joined the mailbox worker more than once");
 }
 
+bool TestRuntimeOwnerCompletionRunsAfterExitPublication() {
+  CaptureRuntimeOwner owner;
+  CaptureSafetyCore safety(75, 1);
+  const CaptureTargetIdentity target = Target(100, 200, 300, 10);
+  uint64_t generation = 0;
+  if (!Expect(safety.UpdateRuntimeAuthorization(AllowedAuthorization(1, target),
+                                                &generation) ==
+                  CaptureSafetyUpdateResult::kOk,
+              "completion-timing authorization failed")) {
+    return false;
+  }
+
+  CaptureCommandAdmissionPermit permit;
+  Gate release_worker;
+  Gate completion_started;
+  Gate release_completion;
+  std::atomic<CaptureRuntimePauseResult> pause_from_completion{
+      CaptureRuntimePauseResult::kPauseRequested};
+  std::atomic<uint32_t> completion_calls{0};
+  if (!Expect(AcquireOwnerPermit(safety, owner, target, CaptureCommand::kStart,
+                                 &permit),
+              "completion-timing permit failed") ||
+      !Expect(owner.Start(
+                  std::move(permit),
+                  [&](CaptureRuntimeOwner&, PersistenceToken) {
+                    release_worker.Wait();
+                  },
+                  [&] {
+                    pause_from_completion.store(owner.RequestPause(),
+                                                std::memory_order_release);
+                    completion_calls.fetch_add(1, std::memory_order_relaxed);
+                    completion_started.Open();
+                    release_completion.Wait();
+                  }),
+              "completion-timing worker failed to start")) {
+    return false;
+  }
+
+  release_worker.Open();
+  completion_started.Wait();
+  const bool published_before_callback =
+      Expect(pause_from_completion.load(std::memory_order_acquire) ==
+                 CaptureRuntimePauseResult::kNotRunning,
+             "completion ran before worker exit was published");
+  release_completion.Open();
+  return published_before_callback &&
+         Expect(owner.WaitStopped(5'000) == CaptureRuntimeWaitResult::kStopped,
+                "completion-timing worker did not join") &&
+         Expect(completion_calls.load(std::memory_order_relaxed) == 1,
+                "completion was not invoked exactly once");
+}
+
 }  // namespace
 
 int main() {
@@ -1747,6 +1799,7 @@ int main() {
       !TestCommandAdmissionLinearization() ||
       !TestRuntimeOwnerWaiterDrainBeforeRestart() ||
       !TestRuntimeOwnerExitHookFailurePreservesLifecycleResult() ||
+      !TestRuntimeOwnerCompletionRunsAfterExitPublication() ||
       !TestRuntimeOwnerControlMailbox() ||
       !TestRuntimeOwnerTimeoutAndSingleJoin()) {
     return 1;

@@ -847,6 +847,7 @@ internal sealed class NativeCaptureBackend
         bool start,
         CancellationToken cancellationToken)
     {
+        EnsureScreenCaptureCapability();
         EnsureCommandAdmissionCapability();
         ValidateCommandAdmission(admission);
         await EnterLifecycleAsync(cancellationToken).ConfigureAwait(false);

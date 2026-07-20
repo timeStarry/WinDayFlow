@@ -35,6 +35,9 @@ using windayflow::capture::CaptureTargetIdentity;
 using windayflow::capture::CaptureWorker;
 using windayflow::capture::CaptureWorkerBackend;
 using windayflow::capture::CaptureWorkerBackendResult;
+using windayflow::capture::CaptureWorkerCheckpoint;
+using windayflow::capture::CaptureWorkerCheckpointKind;
+using windayflow::capture::CaptureWorkerCheckpointSink;
 using windayflow::capture::CaptureWorkerConfiguration;
 using windayflow::capture::CaptureWorkerExitReason;
 using windayflow::capture::CaptureWorkerPublication;
@@ -65,6 +68,12 @@ PrivacyContext AllowedPrivacy(uint64_t revision) {
   context.window_allowed = WDF_CAPTURE_POLICY_ALLOW;
   context.storage_available = WDF_CAPTURE_POLICY_ALLOW;
   context.policy_revision = revision;
+  return context;
+}
+
+PrivacyContext BlockedPrivacy(uint64_t revision) {
+  PrivacyContext context = AllowedPrivacy(revision);
+  context.application_allowed = WDF_CAPTURE_POLICY_BLOCK;
   return context;
 }
 
@@ -132,6 +141,35 @@ class WorkerSignals final {
  private:
   std::mutex mutex_;
   std::condition_variable changed_;
+};
+
+class CheckpointLog final {
+ public:
+  bool Push(const CaptureWorkerCheckpoint& checkpoint) {
+    {
+      std::lock_guard lock(mutex_);
+      checkpoints_.push_back(checkpoint);
+    }
+    changed_.notify_all();
+    return true;
+  }
+
+  bool WaitForSize(size_t size) {
+    std::unique_lock lock(mutex_);
+    return changed_.wait_for(
+        lock, std::chrono::milliseconds(kTestTimeoutMs),
+        [this, size] { return checkpoints_.size() >= size; });
+  }
+
+  std::vector<CaptureWorkerCheckpoint> Values() const {
+    std::lock_guard lock(mutex_);
+    return checkpoints_;
+  }
+
+ private:
+  mutable std::mutex mutex_;
+  std::condition_variable changed_;
+  std::vector<CaptureWorkerCheckpoint> checkpoints_;
 };
 
 struct FakePublicationState {
@@ -329,7 +367,8 @@ class FakeBackend final : public CaptureWorkerBackend {
     state->identifier = "committed/" + std::string(artifact_id) + ".mp4";
     state->safety = &safety_;
     state->signals = &signals_;
-    state->invalidate_on_commit = fault_stage == FaultStage::kCommit;
+    state->invalidate_on_commit = fault_stage == FaultStage::kCommit &&
+                                  !invalidation_fired_.exchange(true);
     state->rollback_failures_remaining.store(rollback_failures_before_success);
     state->always_fail_rollback.store(always_fail_rollback);
     *publication = std::make_unique<FakePublication>(state);
@@ -418,6 +457,8 @@ class FakeBackend final : public CaptureWorkerBackend {
   }
 
   FaultStage fault_stage = FaultStage::kNone;
+  CaptureRuntimeOwner* provisional_pause_runtime = nullptr;
+  bool request_provisional_pause_on_invalidation = false;
   uint32_t rebuild_initializations = 0;
   uint32_t missing_observation_call = 0;
   uint32_t rollback_failures_before_success = 0;
@@ -444,6 +485,10 @@ class FakeBackend final : public CaptureWorkerBackend {
  private:
   void InvalidateAt(FaultStage stage) noexcept {
     if (fault_stage == stage && !invalidation_fired_.exchange(true)) {
+      if (request_provisional_pause_on_invalidation &&
+          provisional_pause_runtime != nullptr) {
+        static_cast<void>(provisional_pause_runtime->RequestPause());
+      }
       static_cast<void>(safety_.InvalidateAuthorizationAdmission());
     }
   }
@@ -493,16 +538,25 @@ class WorkerFixture final {
            CaptureSafetyUpdateResult::kOk;
   }
 
-  bool Start() {
+  bool Block(uint64_t revision) {
+    return safety.UpdateRuntimeAuthorization(
+               RuntimeAuthorization{BlockedPrivacy(revision), std::nullopt},
+               &generation) == CaptureSafetyUpdateResult::kOk;
+  }
+
+  bool Start(CaptureWorkerCheckpointSink checkpoint_sink = {}) {
     CaptureCommandAdmissionPermit permit;
     if (!AcquireOwnerPermit(safety, runtime, target, CaptureCommand::kStart,
                             &permit)) {
       return false;
     }
-    return runtime.Start(std::move(permit), [this](CaptureRuntimeOwner& owner,
-                                                   PersistenceToken token) {
-      worker.Run(owner, std::move(token));
-    });
+    backend.provisional_pause_runtime = &runtime;
+    return runtime.Start(
+        std::move(permit),
+        [this, checkpoint_sink = std::move(checkpoint_sink)](
+            CaptureRuntimeOwner& owner, PersistenceToken token) mutable {
+          worker.Run(owner, std::move(token), std::move(checkpoint_sink));
+        });
   }
 
   bool Resume() {
@@ -585,6 +639,183 @@ bool StopAfterFirstFrame(WorkerFixture& fixture) {
              CaptureRuntimeStopResult::kStopRequested &&
          fixture.runtime.WaitStopped(kTestTimeoutMs) ==
              CaptureRuntimeWaitResult::kStopped;
+}
+
+bool TestCheckpointOrderAndCleanup() {
+  WorkerFixture fixture;
+  CheckpointLog checkpoints;
+  std::atomic<bool> ready_after_initialize{false};
+  std::atomic<bool> paused_after_cleanup{false};
+  CaptureWorkerCheckpointSink sink = [&](const CaptureWorkerCheckpoint& value) {
+    if (value.kind == CaptureWorkerCheckpointKind::kReady) {
+      ready_after_initialize.store(
+          fixture.backend.initialize_calls.load(std::memory_order_acquire) > 0,
+          std::memory_order_release);
+    } else {
+      paused_after_cleanup.store(fixture.backend.reset_acquisition_calls.load(
+                                     std::memory_order_acquire) > 0 &&
+                                     fixture.backend.reset_chunk_calls.load(
+                                         std::memory_order_acquire) > 0,
+                                 std::memory_order_release);
+    }
+    return checkpoints.Push(value);
+  };
+
+  if (!Expect(fixture.Authorize(1) && fixture.Start(std::move(sink)),
+              "checkpoint worker could not start") ||
+      !Expect(checkpoints.WaitForSize(1), "ready checkpoint was not emitted") ||
+      !Expect(fixture.runtime.RequestPause() ==
+                  CaptureRuntimePauseResult::kPauseRequested,
+              "checkpoint pause was not accepted") ||
+      !Expect(checkpoints.WaitForSize(2),
+              "paused checkpoint was not emitted") ||
+      !Expect(fixture.Authorize(2) && fixture.Resume(),
+              "checkpoint worker could not resume") ||
+      !Expect(checkpoints.WaitForSize(3),
+              "resumed ready checkpoint was not emitted") ||
+      !Expect(fixture.runtime.RequestStop() ==
+                      CaptureRuntimeStopResult::kStopRequested &&
+                  fixture.runtime.WaitStopped(kTestTimeoutMs) ==
+                      CaptureRuntimeWaitResult::kStopped,
+              "checkpoint worker did not stop")) {
+    return false;
+  }
+
+  const std::vector<CaptureWorkerCheckpoint> values = checkpoints.Values();
+  return Expect(values.size() == 3 &&
+                    values[0] ==
+                        CaptureWorkerCheckpoint{
+                            CaptureWorkerCheckpointKind::kReady, 0} &&
+                    values[1] ==
+                        CaptureWorkerCheckpoint{
+                            CaptureWorkerCheckpointKind::kPaused, 1} &&
+                    values[2] ==
+                        CaptureWorkerCheckpoint{
+                            CaptureWorkerCheckpointKind::kReady, 0},
+                "checkpoint order was not Ready, Paused(1), Ready") &&
+         Expect(ready_after_initialize.load(std::memory_order_acquire),
+                "ready checkpoint preceded acquisition initialization") &&
+         Expect(paused_after_cleanup.load(std::memory_order_acquire),
+                "paused checkpoint preceded chunk/acquisition cleanup");
+}
+
+bool TestReadyCheckpointRunsAfterPermitRelease() {
+  WorkerFixture fixture;
+  std::atomic<bool> permit_released{false};
+  CaptureWorkerCheckpointSink sink = [&](const CaptureWorkerCheckpoint& value) {
+    if (value.kind == CaptureWorkerCheckpointKind::kReady) {
+      uint64_t generation = 0;
+      permit_released.store(fixture.safety.FinalizeRevoke(0, &generation),
+                            std::memory_order_release);
+    }
+    return true;
+  };
+  if (!Expect(fixture.Authorize(1) && fixture.Start(std::move(sink)),
+              "permit-release checkpoint worker could not start") ||
+      !Expect(fixture.runtime.WaitStopped(kTestTimeoutMs) ==
+                  CaptureRuntimeWaitResult::kStopped,
+              "permit-release checkpoint worker did not exit")) {
+    return false;
+  }
+  return Expect(permit_released.load(std::memory_order_acquire),
+                "ready checkpoint ran while a persistence permit was held") &&
+         Expect(fixture.worker.last_result().reason ==
+                    CaptureWorkerExitReason::kAuthorizationLost,
+                "checkpoint revocation did not stop stale authorization");
+}
+
+bool TestProvisionalPauseRecoversAuthorizationLossAtCriticalStages() {
+  constexpr std::array<FaultStage, 4> stages{
+      FaultStage::kInitialize,
+      FaultStage::kAcquire,
+      FaultStage::kFinalize,
+      FaultStage::kCommit,
+  };
+
+  for (const FaultStage stage : stages) {
+    WorkerFixture fixture;
+    CheckpointLog checkpoints;
+    fixture.backend.fault_stage = stage;
+    const bool late_stage =
+        stage == FaultStage::kFinalize || stage == FaultStage::kCommit;
+    fixture.backend.request_provisional_pause_on_invalidation = !late_stage;
+    CaptureWorkerCheckpointSink sink =
+        [&](const CaptureWorkerCheckpoint& value) {
+          return checkpoints.Push(value);
+        };
+    if (!Expect(fixture.Authorize(1) && fixture.Start(std::move(sink)),
+                "provisional-pause worker could not start")) {
+      return false;
+    }
+
+    if (late_stage &&
+        !Expect(fixture.backend.WaitForEncodeCount(1) &&
+                    fixture.runtime.RequestPause() ==
+                        CaptureRuntimePauseResult::kPauseRequested,
+                "late-stage provisional pause was not requested")) {
+      return false;
+    }
+
+    const size_t paused_checkpoint_count =
+        stage == FaultStage::kInitialize ? 1U : 2U;
+    if (!Expect(checkpoints.WaitForSize(paused_checkpoint_count),
+                "authorization loss did not reach a paused checkpoint")) {
+      return false;
+    }
+    const std::vector<CaptureWorkerCheckpoint> paused_values =
+        checkpoints.Values();
+    if (!Expect(
+            paused_values[paused_checkpoint_count - 1U].kind ==
+                    CaptureWorkerCheckpointKind::kPaused &&
+                paused_values[paused_checkpoint_count - 1U].pause_epoch == 1,
+            "authorization loss emitted the wrong pause checkpoint") ||
+        !Expect(
+            fixture.runtime.RequestPause() ==
+                CaptureRuntimePauseResult::kAlreadyPaused,
+            "authorization loss terminated the provisionally paused worker") ||
+        !Expect(fixture.events.size() == 0,
+                "stale authorization published a committed event") ||
+        !Expect(fixture.Block(2) && fixture.Authorize(3) && fixture.Resume(),
+                "provisional-pause worker did not accept a fresh token") ||
+        !Expect(checkpoints.WaitForSize(paused_checkpoint_count + 1U),
+                "fresh token did not emit a ready checkpoint")) {
+      return false;
+    }
+
+    const uint32_t expected_encode_count = late_stage ? 2U : 1U;
+    if (!Expect(fixture.backend.WaitForEncodeCount(expected_encode_count) &&
+                    fixture.runtime.RequestStop() ==
+                        CaptureRuntimeStopResult::kStopRequested &&
+                    fixture.runtime.WaitStopped(kTestTimeoutMs) ==
+                        CaptureRuntimeWaitResult::kStopped,
+                "resumed provisional-pause worker did not stop")) {
+      return false;
+    }
+
+    const auto result = fixture.worker.last_result();
+    const ReadEvent committed = ReadOne(fixture.events);
+    const auto publications = fixture.backend.PublicationRecords();
+    uint32_t acknowledgements = 0;
+    for (const auto& publication : publications) {
+      acknowledgements += publication->acknowledge_calls.load();
+    }
+    if (result.reason != CaptureWorkerExitReason::kStopped ||
+        result.committed_chunks != 1) {
+      std::cerr << "provisional pause stage " << static_cast<int>(stage)
+                << " exited with reason " << static_cast<int>(result.reason)
+                << " and committed " << result.committed_chunks << " chunks\n";
+      return false;
+    }
+    if (!Expect(
+            committed.result == CaptureEventReadResult::kSuccess &&
+                committed.event.persistence_generation == fixture.generation,
+            "fresh generation did not own the committed event") ||
+        !Expect(acknowledgements == 1,
+                "stale generation was acknowledged during provisional pause")) {
+      return false;
+    }
+  }
+  return true;
 }
 
 bool TestStopCommitsValidPartialChunk() {
@@ -868,7 +1099,14 @@ bool TestCallbackInvalidationAtEveryStage() {
 
     const auto result = fixture.worker.last_result();
     const auto publications = fixture.backend.PublicationRecords();
-    if (!Expect(result.reason == CaptureWorkerExitReason::kAuthorizationLost &&
+    const bool stop_was_already_requested = stage == FaultStage::kFinalize ||
+                                            stage == FaultStage::kPrepare ||
+                                            stage == FaultStage::kCommit;
+    const CaptureWorkerExitReason expected_reason =
+        stop_was_already_requested
+            ? CaptureWorkerExitReason::kStopped
+            : CaptureWorkerExitReason::kAuthorizationLost;
+    if (!Expect(result.reason == expected_reason &&
                     result.committed_chunks == 0 &&
                     fixture.events.size() == 0 &&
                     fixture.events.reserved_size() == 0,
@@ -928,7 +1166,7 @@ bool TestEventAppendInvalidationStaysInvisible() {
 
   const auto publications = fixture.backend.PublicationRecords();
   const auto result = fixture.worker.last_result();
-  return Expect(result.reason == CaptureWorkerExitReason::kAuthorizationLost &&
+  return Expect(result.reason == CaptureWorkerExitReason::kStopped &&
                     result.committed_chunks == 0,
                 "event append invalidation returned the wrong result") &&
          Expect(fixture.events.size() == 0 &&
@@ -1128,7 +1366,10 @@ bool TestTopologyRebuildRecovers() {
 }  // namespace
 
 int main() {
-  if (!TestStopCommitsValidPartialChunk() ||
+  if (!TestCheckpointOrderAndCleanup() ||
+      !TestReadyCheckpointRunsAfterPermitRelease() ||
+      !TestProvisionalPauseRecoversAuthorizationLossAtCriticalStages() ||
+      !TestStopCommitsValidPartialChunk() ||
       !TestPauseResumeUsesFreshGeneration() ||
       !TestImmediateResumeStillFinalizesPauseExactlyOnce() ||
       !TestMergedResumeDiscardsSupersededGeneration() ||

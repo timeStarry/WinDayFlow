@@ -11,6 +11,7 @@ include(CTest)
 add_library(windayflow_capture_core STATIC
   internal/atomic_chunk_store.cpp
   internal/capture_event_queue.cpp
+  internal/capture_instance_controller.cpp
   internal/capture_policy.cpp
   internal/capture_runtime_owner.cpp
   internal/capture_safety_core.cpp
@@ -102,6 +103,11 @@ if(BUILD_TESTING)
 
   add_windayflow_native_test(capture_event_queue_tests tests/capture_event_queue_tests.cpp)
   target_link_libraries(capture_event_queue_tests PRIVATE windayflow_capture_core)
+
+  add_windayflow_native_test(capture_instance_controller_tests
+    tests/capture_instance_controller_tests.cpp)
+  target_link_libraries(capture_instance_controller_tests PRIVATE
+    windayflow_capture_core)
 
   add_windayflow_native_test(chunk_manifest_tests
     tests/chunk_manifest_tests.cpp)

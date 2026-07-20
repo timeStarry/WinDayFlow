@@ -9,7 +9,7 @@ namespace windayflow::capture {
 CaptureRuntimeOwner::~CaptureRuntimeOwner() { Shutdown(); }
 
 bool CaptureRuntimeOwner::Start(CaptureCommandAdmissionPermit permit,
-                                Worker worker) {
+                                Worker worker, WorkerCompletion completion) {
   if (!permit || permit.command() != CaptureCommand::kStart || !worker) {
     return false;
   }
@@ -33,8 +33,10 @@ bool CaptureRuntimeOwner::Start(CaptureCommandAdmissionPermit permit,
   worker_failed_ = false;
   try {
     worker_ = std::thread([this, worker = std::move(worker),
-                           initial_token = std::move(initial_token)]() mutable {
-      WorkerMain(std::move(worker), std::move(initial_token));
+                           initial_token = std::move(initial_token),
+                           completion = std::move(completion)]() mutable {
+      WorkerMain(std::move(worker), std::move(initial_token),
+                 std::move(completion));
     });
   } catch (...) {
     stop_requested_ = false;
@@ -239,7 +241,8 @@ CaptureRuntimeControlSnapshot CaptureRuntimeOwner::ControlSnapshotUnderLock()
 }
 
 void CaptureRuntimeOwner::WorkerMain(Worker worker,
-                                     PersistenceToken initial_token) noexcept {
+                                     PersistenceToken initial_token,
+                                     WorkerCompletion completion) noexcept {
   bool failed = false;
   try {
     worker(*this, std::move(initial_token));
@@ -254,6 +257,18 @@ void CaptureRuntimeOwner::WorkerMain(Worker worker,
     static_cast<void>(AdvanceOwnerEpochUnderLock());
   }
   state_changed_.notify_all();
+
+  if (completion) {
+    try {
+      completion();
+    } catch (...) {
+      {
+        std::lock_guard lock(mutex_);
+        worker_failed_ = true;
+      }
+      state_changed_.notify_all();
+    }
+  }
 }
 
 CaptureRuntimeWaitResult CaptureRuntimeOwner::FinishWaitStoppedUnderLock(

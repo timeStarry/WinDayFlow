@@ -1297,8 +1297,10 @@ bool TestCallbackInvalidationDestroyRace() {
     if (!Expect(destroy_result == WDF_CAPTURE_RESULT_OK && handle == 0,
                 "destroy failed during callback invalidation race") ||
         !Expect((observed == WDF_CAPTURE_RESULT_OK && observed_epoch != 0 &&
-                 (observed_epoch & 1U) == 0) ||
+                (observed_epoch & 1U) == 0) ||
                     (observed == WDF_CAPTURE_RESULT_INVALID_ARGUMENT &&
+                     observed_epoch == 0) ||
+                    (observed == WDF_CAPTURE_RESULT_INVALID_STATE &&
                      observed_epoch == 0),
                 "callback invalidation returned an invalid destroy-race result")) {
       return false;

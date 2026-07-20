@@ -5,6 +5,9 @@
 - Decision owners: WinDayFlow maintainers
 - Scope: `WinDayFlow.Capture.Native` worker orchestration, Windows component
   composition, chunk-publication linearization, and pre-activation lifecycle
+- Follow-up: [ADR 0012](0012-run-isolated-native-capture-instance-control.md)
+  supersedes this ADR's open C ABI ownership, run-state, and recoverable
+  authorization-loss items while retaining the closed live capability boundary.
 
 ## Context
 
@@ -121,19 +124,20 @@ compensate instead of finalizing stale evidence.
 
 ### Capability Boundary
 
-The C ABI still does not construct this worker. Authorized Start/Resume still
-returns `NOT_IMPLEMENTED`; `ScreenCapture`, `H264Chunks`, and
-`EvidenceExtraction` remain disabled; App composition still uses
-`DenyCaptureRuntimeAuthorization` and `UnavailableCaptureBackend`.
+ADR 0012 now places this worker behind a C-ABI-owned controller with run-ID
+guards and provisional authorization Pause. Production constructs that
+controller in disabled activation mode, so authorized Start/Resume still return
+`NOT_IMPLEMENTED`; `ScreenCapture`, `H264Chunks`, and `EvidenceExtraction`
+remain disabled; App composition still uses `DenyCaptureRuntimeAuthorization`
+and `UnavailableCaptureBackend`.
 
-Before activation, the C ABI needs a run-ID-guarded state/error sink so an old
-`WaitStopped` caller cannot publish STOPPED into a newer run. It also needs an
-explicit dynamic-policy command that distinguishes resumable authorization
-Pause from sticky privacy Stop. The current standalone worker safely exits with
-`AuthorizationLost`; it does not yet claim the product-level blocked-and-resume
-experience. Crash recovery/replay, evidence-root ACL creation, stale staging,
-disk-full integration, consent-gated live Desktop Duplication, and managed
-generation ordering also remain release gates.
+Before activation, managed policy still needs to distinguish resumable evidence
+Pause from sticky privacy Stop. The native controller protocol can pause and
+replace authorization without carrying old evidence forward, but it does not
+yet claim the product-level blocked-and-resume experience. Crash recovery/replay,
+evidence-root ACL creation, stale staging, disk-full integration, consent-gated
+live Desktop Duplication, and managed generation ordering also remain release
+gates.
 
 ## Verification
 

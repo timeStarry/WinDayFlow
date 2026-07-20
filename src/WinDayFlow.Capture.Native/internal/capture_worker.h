@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -118,6 +119,21 @@ struct CaptureWorkerRunResult {
   bool operator==(const CaptureWorkerRunResult&) const = default;
 };
 
+enum class CaptureWorkerCheckpointKind {
+  kReady,
+  kPaused,
+};
+
+struct CaptureWorkerCheckpoint {
+  CaptureWorkerCheckpointKind kind = CaptureWorkerCheckpointKind::kReady;
+  uint64_t pause_epoch = 0;
+
+  bool operator==(const CaptureWorkerCheckpoint&) const = default;
+};
+
+using CaptureWorkerCheckpointSink =
+    std::function<bool(const CaptureWorkerCheckpoint&)>;
+
 class CaptureWorker final {
  public:
   CaptureWorker(CaptureSafetyCore& safety, CaptureEventQueue& events,
@@ -128,8 +144,8 @@ class CaptureWorker final {
   CaptureWorker(const CaptureWorker&) = delete;
   CaptureWorker& operator=(const CaptureWorker&) = delete;
 
-  void Run(CaptureRuntimeOwner& runtime,
-           PersistenceToken initial_token) noexcept;
+  void Run(CaptureRuntimeOwner& runtime, PersistenceToken initial_token,
+           CaptureWorkerCheckpointSink checkpoint_sink = {}) noexcept;
   CaptureWorkerRunResult last_result() const;
   bool RetryPendingCompensation(uint32_t attempts) noexcept;
 

@@ -214,6 +214,39 @@ public sealed class NativeCaptureInteropTests
     }
 
     [Fact]
+    public async Task ClosedLiveCaptureCapabilitiesBlockAuthorizedLifecycleBeforeNativeCall()
+    {
+        using var directory = new TemporaryDirectory();
+        using var nativeApi = new FakeNativeCaptureApi
+        {
+            Capabilities = NativeCaptureAbiContract.RuntimeOwnerCapabilities,
+        };
+        using var backend = CreateBackend(directory.Path, nativeApi);
+        var authorization = CreateAllowedRuntimeAuthorization(runtimePolicyRevision: 2);
+        var persistenceGeneration = await backend
+            .UpdateRuntimeAuthorizationAsync(authorization);
+        var startAdmission = await backend.TryIssueCommandAdmissionAsync(
+            CaptureAdmissionOperation.Start,
+            authorization.RuntimePolicyRevision,
+            persistenceGeneration,
+            authorization.Target.TargetEpoch);
+        var resumeAdmission = await backend.TryIssueCommandAdmissionAsync(
+            CaptureAdmissionOperation.Resume,
+            authorization.RuntimePolicyRevision,
+            persistenceGeneration,
+            authorization.Target.TargetEpoch);
+
+        Assert.NotNull(startAdmission);
+        Assert.NotNull(resumeAdmission);
+        await Assert.ThrowsAsync<NotSupportedException>(
+            () => backend.StartAuthorizedAsync(startAdmission.Value));
+        await Assert.ThrowsAsync<NotSupportedException>(
+            () => backend.ResumeAuthorizedAsync(resumeAdmission.Value));
+        Assert.Equal(0, nativeApi.StartAuthorizedCallCount);
+        Assert.Equal(0, nativeApi.ResumeAuthorizedCallCount);
+    }
+
+    [Fact]
     public void NativeLibraryResolutionIsPinnedToTheApplicationDirectory()
     {
         var expected = Path.GetFullPath(Path.Combine(
@@ -1260,6 +1293,8 @@ public sealed class NativeCaptureInteropTests
         private int _revokeRuntimeAuthorizationCallCount;
         private int _invalidateRuntimeAuthorizationCallCount;
         private int _updateRuntimeAuthorizationCallCount;
+        private int _startAuthorizedCallCount;
+        private int _resumeAuthorizedCallCount;
         private int _operationSequence;
         private int _signalNextPoll;
         private int _blockNextRuntimeAuthorizationUpdate;
@@ -1291,6 +1326,12 @@ public sealed class NativeCaptureInteropTests
         public int DestroyCallCount => Volatile.Read(ref _destroyCallCount);
 
         public int RequestStopCallCount => Volatile.Read(ref _requestStopCallCount);
+
+        public int StartAuthorizedCallCount =>
+            Volatile.Read(ref _startAuthorizedCallCount);
+
+        public int ResumeAuthorizedCallCount =>
+            Volatile.Read(ref _resumeAuthorizedCallCount);
 
         public Task RequestStopCalled => _requestStopCalled.Task;
 
@@ -1519,6 +1560,7 @@ public sealed class NativeCaptureInteropTests
         {
             _ = handle;
             _ = admission;
+            Interlocked.Increment(ref _startAuthorizedCallCount);
             return NativeCaptureResult.Ok;
         }
 
@@ -1528,6 +1570,7 @@ public sealed class NativeCaptureInteropTests
         {
             _ = handle;
             _ = admission;
+            Interlocked.Increment(ref _resumeAuthorizedCallCount);
             return NativeCaptureResult.Ok;
         }
 
