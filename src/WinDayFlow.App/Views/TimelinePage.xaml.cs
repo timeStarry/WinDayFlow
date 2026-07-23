@@ -311,18 +311,40 @@ public sealed partial class TimelinePage : Page
 
     private void UpdateVisualState()
     {
+        var showTimelineContent = !ViewModel.IsLoading && !ViewModel.HasError;
+        var showUnprocessedStatus = showTimelineContent
+            && (ViewModel.HasUnprocessedIntervals
+                || ViewModel.HasUnprocessedIntervalLoadError);
+
         LoadingPanel.Visibility = ViewModel.IsLoading ? Visibility.Visible : Visibility.Collapsed;
         ErrorPanel.Visibility = ViewModel.HasError ? Visibility.Visible : Visibility.Collapsed;
         EmptyState.Visibility = ViewModel.IsEmpty ? Visibility.Visible : Visibility.Collapsed;
-        TimelineList.Visibility = !ViewModel.IsLoading && !ViewModel.HasError && !ViewModel.IsEmpty
+        TimelineList.Visibility = showTimelineContent && !ViewModel.IsEmpty
             ? Visibility.Visible
             : Visibility.Collapsed;
+        UnprocessedStatusBand.Visibility = showUnprocessedStatus
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+        UnprocessedStatusList.Visibility = showUnprocessedStatus
+            && ViewModel.HasUnprocessedIntervals
+                ? Visibility.Visible
+                : Visibility.Collapsed;
+        UnprocessedStatusError.Visibility = showUnprocessedStatus
+            && ViewModel.HasUnprocessedIntervalLoadError
+                ? Visibility.Visible
+                : Visibility.Collapsed;
 
         ErrorInfoBar.Message = ViewModel.ErrorMessage;
-        EmptyState.Title = ViewModel.HasActiveFilters ? "没有匹配的活动" : "当天没有活动";
+        EmptyState.Title = ViewModel.HasActiveFilters
+            ? "没有匹配的活动"
+            : ViewModel.HasUnprocessedIntervals
+                ? "尚无已分析活动"
+                : "当天没有活动";
         EmptyState.Description = ViewModel.HasActiveFilters
             ? "调整或清除筛选条件后再试。"
-            : "你可以手工新建活动；录制接入后，捕获的活动也会显示在这里。";
+            : ViewModel.HasUnprocessedIntervals
+                ? "录制内容尚未生成可查看的时间线活动。"
+                : "你可以手工新建活动；录制内容分析完成后也会显示在这里。";
 
         CreateActivityButton.IsEnabled = !ViewModel.IsSaving;
         UpdateDetailState();

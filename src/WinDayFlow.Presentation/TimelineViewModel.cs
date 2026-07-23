@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using WinDayFlow.Application.Analysis;
 using WinDayFlow.Application.Timeline;
 using WinDayFlow.Domain;
 
@@ -9,11 +10,13 @@ namespace WinDayFlow.Presentation.Timeline;
 public sealed partial class TimelineViewModel : ObservableObject, IDisposable
 {
     private const string LoadErrorText = "无法加载时间线，请稍后重试。";
+    private const string IntervalLoadErrorText = "暂时无法读取录制处理状态。";
     private const string SaveErrorText = "无法保存活动，请检查内容后重试。";
     private const string DeleteErrorText = "无法删除活动，请刷新时间线后重试。";
 
     private readonly TimelineQueryService _queryService;
     private readonly TimelineCommandService? _commandService;
+    private readonly IUnprocessedIntervalRepository? _unprocessedIntervalRepository;
     private readonly TimeProvider _timeProvider;
     private readonly SemaphoreSlim _mutationGate = new(1, 1);
     private readonly CancellationTokenSource _lifetimeCancellation = new();
@@ -64,6 +67,16 @@ public sealed partial class TimelineViewModel : ObservableObject, IDisposable
 
     public TimelineViewModel(
         TimelineQueryService queryService,
+        IUnprocessedIntervalRepository unprocessedIntervalRepository,
+        TimeProvider? timeProvider = null)
+        : this(queryService, timeProvider)
+    {
+        _unprocessedIntervalRepository = unprocessedIntervalRepository
+            ?? throw new ArgumentNullException(nameof(unprocessedIntervalRepository));
+    }
+
+    public TimelineViewModel(
+        TimelineQueryService queryService,
         TimelineCommandService commandService,
         TimeProvider? timeProvider = null)
         : this(queryService, timeProvider)
@@ -72,7 +85,27 @@ public sealed partial class TimelineViewModel : ObservableObject, IDisposable
             ?? throw new ArgumentNullException(nameof(commandService));
     }
 
+    public TimelineViewModel(
+        TimelineQueryService queryService,
+        TimelineCommandService commandService,
+        IUnprocessedIntervalRepository unprocessedIntervalRepository,
+        TimeProvider? timeProvider = null)
+        : this(queryService, commandService, timeProvider)
+    {
+        _unprocessedIntervalRepository = unprocessedIntervalRepository
+            ?? throw new ArgumentNullException(nameof(unprocessedIntervalRepository));
+    }
+
     public ObservableCollection<TimelineEntryItemViewModel> Entries { get; } = [];
+
+    public ObservableCollection<UnprocessedIntervalItemViewModel> UnprocessedIntervals { get; } = [];
+
+    public bool HasUnprocessedIntervals => UnprocessedIntervals.Count > 0;
+
+    public bool HasUnprocessedIntervalLoadError =>
+        UnprocessedIntervalLoadErrorMessage.Length > 0;
+
+    public string UnprocessedIntervalLoadErrorMessage { get; private set; } = string.Empty;
 
     public DateOnly SelectedDate
     {
@@ -353,6 +386,8 @@ public sealed partial class TimelineViewModel : ObservableObject, IDisposable
             SelectedDate = date;
             _dayEntries = [];
             ReplaceEntries([]);
+            ReplaceUnprocessedIntervals([]);
+            SetUnprocessedIntervalLoadError(string.Empty);
         }
 
         IsLoading = true;
@@ -361,14 +396,45 @@ public sealed partial class TimelineViewModel : ObservableObject, IDisposable
 
         try
         {
-            var entries = await _queryService.GetForDayAsync(date, currentCancellation.Token);
+            var entriesTask = CaptureLoadResultAsync(
+                _queryService.GetForDayAsync(date, currentCancellation.Token));
+            var intervalsTask = LoadUnprocessedIntervalsAsync(
+                date,
+                currentCancellation.Token);
+
+            await Task.WhenAll(entriesTask, intervalsTask).ConfigureAwait(true);
+            currentCancellation.Token.ThrowIfCancellationRequested();
             if (requestVersion != Volatile.Read(ref _loadVersion))
             {
                 return;
             }
 
-            _dayEntries = entries;
-            ApplyFilters();
+            var entriesResult = await entriesTask.ConfigureAwait(true);
+            if (entriesResult.Error is null)
+            {
+                _dayEntries = entriesResult.Value;
+                ApplyFilters();
+            }
+            else
+            {
+                _dayEntries = [];
+                ReplaceEntries([]);
+                HasError = true;
+                ErrorMessage = LoadErrorText;
+            }
+
+            var intervalsResult = await intervalsTask.ConfigureAwait(true);
+            if (intervalsResult.Error is null)
+            {
+                ReplaceUnprocessedIntervals(intervalsResult.Value);
+                SetUnprocessedIntervalLoadError(string.Empty);
+            }
+            else
+            {
+                ReplaceUnprocessedIntervals([]);
+                SetUnprocessedIntervalLoadError(IntervalLoadErrorText);
+            }
+
             IsInitialized = true;
         }
         catch (OperationCanceledException) when (currentCancellation.IsCancellationRequested)
@@ -432,6 +498,99 @@ public sealed partial class TimelineViewModel : ObservableObject, IDisposable
             : null;
 
         OnPropertyChanged(nameof(IsEmpty));
+    }
+
+    private void ReplaceUnprocessedIntervals(
+        IReadOnlyList<UnprocessedIntervalItemViewModel> intervals)
+    {
+        UnprocessedIntervals.Clear();
+        foreach (var interval in intervals)
+        {
+            UnprocessedIntervals.Add(interval);
+        }
+
+        OnPropertyChanged(nameof(HasUnprocessedIntervals));
+    }
+
+    private void SetUnprocessedIntervalLoadError(string message)
+    {
+        if (string.Equals(
+                UnprocessedIntervalLoadErrorMessage,
+                message,
+                StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        UnprocessedIntervalLoadErrorMessage = message;
+        OnPropertyChanged(nameof(UnprocessedIntervalLoadErrorMessage));
+        OnPropertyChanged(nameof(HasUnprocessedIntervalLoadError));
+    }
+
+    private async Task<LoadResult<IReadOnlyList<UnprocessedIntervalItemViewModel>>>
+        LoadUnprocessedIntervalsAsync(
+            DateOnly date,
+            CancellationToken cancellationToken)
+    {
+        if (_unprocessedIntervalRepository is null)
+        {
+            return LoadResult<IReadOnlyList<UnprocessedIntervalItemViewModel>>.Success([]);
+        }
+
+        try
+        {
+            var utcRange = CreateUtcDayRange(date);
+            var intervals = await _unprocessedIntervalRepository
+                .GetForUtcRangeAsync(utcRange, cancellationToken)
+                .ConfigureAwait(true);
+            IReadOnlyList<UnprocessedIntervalItemViewModel> items = intervals
+                .OrderBy(static interval => interval.Range.Start)
+                .ThenBy(static interval => interval.Range.End)
+                .ThenBy(static interval => interval.CaptureChunkId, StringComparer.Ordinal)
+                .Select(static interval => new UnprocessedIntervalItemViewModel(interval))
+                .ToArray();
+            return LoadResult<IReadOnlyList<UnprocessedIntervalItemViewModel>>.Success(items);
+        }
+        catch (Exception exception)
+        {
+            return LoadResult<IReadOnlyList<UnprocessedIntervalItemViewModel>>.Failure(
+                exception);
+        }
+    }
+
+    private TimeRange CreateUtcDayRange(DateOnly date)
+    {
+        var start = ConvertLocalBoundaryToUtc(date.ToDateTime(TimeOnly.MinValue));
+        var end = ConvertLocalBoundaryToUtc(date.AddDays(1).ToDateTime(TimeOnly.MinValue));
+        return new TimeRange(start, end);
+    }
+
+    private DateTimeOffset ConvertLocalBoundaryToUtc(DateTime localBoundary)
+    {
+        var local = DateTime.SpecifyKind(localBoundary, DateTimeKind.Unspecified);
+        var timeZone = _timeProvider.LocalTimeZone;
+
+        while (timeZone.IsInvalidTime(local))
+        {
+            local = local.AddMinutes(1);
+        }
+
+        var offset = timeZone.IsAmbiguousTime(local)
+            ? timeZone.GetAmbiguousTimeOffsets(local).Max()
+            : timeZone.GetUtcOffset(local);
+        return new DateTimeOffset(local, offset).ToUniversalTime();
+    }
+
+    private static async Task<LoadResult<T>> CaptureLoadResultAsync<T>(Task<T> task)
+    {
+        try
+        {
+            return LoadResult<T>.Success(await task.ConfigureAwait(true));
+        }
+        catch (Exception exception)
+        {
+            return LoadResult<T>.Failure(exception);
+        }
     }
 
     private static bool MatchesSearch(TimelineEntry entry, string search)
@@ -498,5 +657,12 @@ public sealed partial class TimelineViewModel : ObservableObject, IDisposable
         IsSaving = false;
         _mutationGate.Release();
         operation.Dispose();
+    }
+
+    private sealed record LoadResult<T>(T Value, Exception? Error)
+    {
+        public static LoadResult<T> Success(T value) => new(value, null);
+
+        public static LoadResult<T> Failure(Exception error) => new(default!, error);
     }
 }
