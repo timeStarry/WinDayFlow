@@ -549,6 +549,130 @@
                         </Grid>
                     </Border>
 
+                </StackPanel>
+
+                <StackPanel Spacing="12">
+                    <TextBlock Style="{StaticResource SectionTitleTextStyle}" Text="AI 分析" />
+
+                    <InfoBar
+                        x:Name="AiProviderInfoBar"
+                        AutomationProperties.LiveSetting="Polite"
+                        IsClosable="False"
+                        IsOpen="True"
+                        Severity="Informational"
+                        Title="分析提供方" />
+
+                    <Border Style="{StaticResource SettingsGroupBorderStyle}">
+                        <StackPanel Padding="20" Spacing="16">
+                            <StackPanel Spacing="2">
+                                <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}" Text="OpenAI-compatible 提供方" />
+                                <TextBlock
+                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                    Text="配置保存到本机；远程地址只允许 HTTPS，本机回环地址可以使用 HTTP。"
+                                    TextWrapping="Wrap" />
+                            </StackPanel>
+
+                            <TextBox
+                                x:Name="AiProviderNameTextBox"
+                                AutomationProperties.AutomationId="AiProviderDisplayName"
+                                AutomationProperties.Name="分析提供方名称"
+                                Header="名称"
+                                MaxLength="80"
+                                PlaceholderText="例如：OpenAI 或本机 LM Studio" />
+
+                            <TextBox
+                                x:Name="AiProviderEndpointTextBox"
+                                AutomationProperties.AutomationId="AiProviderEndpoint"
+                                AutomationProperties.Name="API 基础地址"
+                                Header="API 基础地址"
+                                MaxLength="2048"
+                                PlaceholderText="https://api.openai.com/v1/" />
+
+                            <TextBox
+                                x:Name="AiProviderModelTextBox"
+                                AutomationProperties.AutomationId="AiProviderModel"
+                                AutomationProperties.Name="视觉模型"
+                                Header="视觉模型"
+                                MaxLength="200"
+                                PlaceholderText="输入支持图像与结构化输出的模型名称" />
+
+                            <NumberBox
+                                x:Name="AiProviderTimeoutNumberBox"
+                                MaxWidth="240"
+                                HorizontalAlignment="Left"
+                                AutomationProperties.AutomationId="AiProviderTimeout"
+                                AutomationProperties.Name="请求超时秒数"
+                                Header="请求超时（秒）"
+                                LargeChange="30"
+                                Maximum="600"
+                                Minimum="10"
+                                SmallChange="10"
+                                SpinButtonPlacementMode="Compact"
+                                Value="60" />
+
+                            <PasswordBox
+                                x:Name="AiProviderApiKeyPasswordBox"
+                                AutomationProperties.AutomationId="AiProviderApiKey"
+                                AutomationProperties.HelpText="保存后不会再次显示；留空将保留已保存密钥"
+                                AutomationProperties.Name="API 密钥"
+                                Header="API 密钥"
+                                MaxLength="8192"
+                                PasswordRevealMode="Peek"
+                                PlaceholderText="留空以保留已保存密钥" />
+
+                            <CheckBox
+                                x:Name="ClearAiProviderApiKeyCheckBox"
+                                AutomationProperties.AutomationId="ClearAiProviderApiKey"
+                                AutomationProperties.Name="清除已保存的 API 密钥"
+                                Content="清除已保存的 API 密钥" />
+
+                            <StackPanel Spacing="4">
+                                <TextBlock
+                                    x:Name="AiCredentialStatusText"
+                                    Style="{StaticResource MetadataTextStyle}"
+                                    TextWrapping="Wrap" />
+                                <TextBlock
+                                    x:Name="AiValidationStatusText"
+                                    Style="{StaticResource MetadataTextStyle}"
+                                    TextWrapping="Wrap" />
+                            </StackPanel>
+
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <Button
+                                    x:Name="SaveAiProviderButton"
+                                    Click="OnSaveAiProvider"
+                                    AutomationProperties.AutomationId="SaveAiProviderButton"
+                                    AutomationProperties.Name="保存分析提供方配置"
+                                    IsEnabled="{x:Bind AiViewModel.CanSave, Mode=OneWay}"
+                                    Style="{StaticResource AccentButtonStyle}">
+                                    <StackPanel Orientation="Horizontal" Spacing="8">
+                                        <SymbolIcon Symbol="Save" />
+                                        <TextBlock Text="保存配置" />
+                                    </StackPanel>
+                                </Button>
+                                <Button
+                                    x:Name="TestAiProviderButton"
+                                    Click="OnTestAiProvider"
+                                    AutomationProperties.AutomationId="TestAiProviderButton"
+                                    AutomationProperties.HelpText="只发送应用生成的合成图像，不发送录制证据"
+                                    AutomationProperties.Name="测试分析提供方连接"
+                                    IsEnabled="{x:Bind AiViewModel.CanTestConnection, Mode=OneWay}">
+                                    <StackPanel Orientation="Horizontal" Spacing="8">
+                                        <SymbolIcon Symbol="Sync" />
+                                        <TextBlock Text="测试连接" />
+                                    </StackPanel>
+                                </Button>
+                            </StackPanel>
+
+                            <ProgressBar
+                                x:Name="AiProviderProgressBar"
+                                AutomationProperties.LiveSetting="Polite"
+                                AutomationProperties.Name="正在更新分析提供方"
+                                IsIndeterminate="True"
+                                Visibility="Collapsed" />
+                        </StackPanel>
+                    </Border>
+
                     <Border Style="{StaticResource SettingsGroupBorderStyle}">
                         <Grid
                             x:Name="CloudSettingLayout"
@@ -565,8 +689,8 @@
                             <StackPanel VerticalAlignment="Center" Spacing="2">
                                 <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}" Text="允许云端分析" />
                                 <TextBlock
+                                    x:Name="CloudAnalysisStatusText"
                                     Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                    Text="提供方尚未接入，当前数据仅保存在本机。"
                                     TextWrapping="Wrap" />
                             </StackPanel>
                             <ToggleSwitch
@@ -575,12 +699,13 @@
                                 HorizontalAlignment="Right"
                                 VerticalAlignment="Center"
                                 AutomationProperties.AutomationId="CloudAnalysisToggle"
-                                AutomationProperties.HelpText="云分析提供方尚未接入"
+                                AutomationProperties.HelpText="启用前必须保存并验证当前分析提供方"
                                 AutomationProperties.Name="允许云端分析"
-                                IsEnabled="False"
-                                IsOn="{x:Bind ViewModel.CloudAnalysisEnabled, Mode=OneWay}"
+                                IsEnabled="{x:Bind AiViewModel.CanChangeCloudAnalysis, Mode=OneWay}"
+                                IsOn="{x:Bind AiViewModel.CloudAnalysisEnabled, Mode=OneWay}"
                                 OffContent="仅本地"
-                                OnContent="已启用云端" />
+                                OnContent="已启用"
+                                Toggled="OnCloudAnalysisToggled" />
                         </Grid>
                     </Border>
                 </StackPanel>

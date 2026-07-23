@@ -2,10 +2,12 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.UI.Xaml;
 using Microsoft.Windows.AppLifecycle;
+using WinDayFlow.Application.Ai;
 using WinDayFlow.Application.Capture;
 using WinDayFlow.Application.Settings;
 using WinDayFlow.Application.Timeline;
 using WinDayFlow.Capture.Interop;
+using WinDayFlow.Infrastructure.Ai;
 using WinDayFlow.Infrastructure.Persistence;
 using WinDayFlow.Infrastructure.Settings;
 using WinDayFlow.Infrastructure.Timeline;
@@ -40,6 +42,14 @@ public partial class App : Microsoft.UI.Xaml.Application
                 services.AddSingleton<ICaptureRuntimeAuthorization>(
                     DenyCaptureRuntimeAuthorization.Instance);
                 services.AddSingleton<AppSettingsService>();
+                services.AddSingleton<WindowsDpapiCredentialProtector>();
+                services.AddSingleton<SqliteAiProviderProfileStore>();
+                services.AddSingleton<IAiProviderProfileStore>(static provider =>
+                    provider.GetRequiredService<SqliteAiProviderProfileStore>());
+                services.AddSingleton<OpenAiCompatibleProviderFactory>();
+                services.AddSingleton<IAiAnalysisProviderFactory>(static provider =>
+                    provider.GetRequiredService<OpenAiCompatibleProviderFactory>());
+                services.AddSingleton<AiProviderConfigurationService>();
                 services.AddSingleton<SqliteTimelineRepository>();
                 services.AddSingleton<ITimelineStore>(static provider =>
                     provider.GetRequiredService<SqliteTimelineRepository>());
@@ -52,6 +62,7 @@ public partial class App : Microsoft.UI.Xaml.Application
 
                 services.AddTransient<TimelineViewModel>();
                 services.AddTransient<SettingsViewModel>();
+                services.AddTransient<AiProviderSettingsViewModel>();
                 services.AddSingleton<CaptureStatusViewModel>();
                 services.AddSingleton<ShellViewModel>();
                 services.AddSingleton<MainWindow>();
@@ -96,12 +107,15 @@ public partial class App : Microsoft.UI.Xaml.Application
     {
         try
         {
-            await _host.StartAsync();
             await _host.Services
                 .GetRequiredService<SqliteDatabaseInitializer>()
                 .InitializeAsync();
             var settings = _host.Services.GetRequiredService<AppSettingsService>();
             await settings.InitializeAsync();
+            await _host.Services
+                .GetRequiredService<AiProviderConfigurationService>()
+                .InitializeAsync();
+            await _host.StartAsync();
             ApplyTheme(settings.Current.Theme);
             _window = _host.Services.GetRequiredService<MainWindow>();
             _window.Closed += OnWindowClosed;

@@ -90,6 +90,20 @@ public sealed class AppSettingsService : IDisposable
             cancellationToken);
     }
 
+    public Task SetCloudAnalysisEnabledAsync(
+        bool enabled,
+        CancellationToken cancellationToken = default)
+    {
+        return UpdateAsync(
+            current => new AppSettings(
+                current.Theme,
+                current.CaptureEnabled,
+                enabled,
+                current.RecordingConsent,
+                current.CapturePrivacy),
+            cancellationToken);
+    }
+
     public Task GrantRecordingConsentAsync(
         CancellationToken cancellationToken = default)
     {

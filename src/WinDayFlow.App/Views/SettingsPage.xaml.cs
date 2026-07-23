@@ -16,6 +16,7 @@ public sealed partial class SettingsPage : Page
     private bool _dialogOpen;
     private ExclusionRuleItemViewModel? _editingExclusionRule;
     private bool _isSubscribed;
+    private bool _isUpdatingCloudAnalysisToggle;
     private bool _isUpdatingCaptureToggle;
     private bool _isUpdatingExclusionRuleControls;
     private bool _isUpdatingPrivacyControls;
@@ -25,6 +26,7 @@ public sealed partial class SettingsPage : Page
     public SettingsPage()
     {
         ViewModel = App.GetService<SettingsViewModel>();
+        AiViewModel = App.GetService<AiProviderSettingsViewModel>();
         InitializeComponent();
         DataFolderTextBox.Text = App.DataDirectoryPath;
         Loaded += OnLoaded;
@@ -36,15 +38,20 @@ public sealed partial class SettingsPage : Page
         UpdateConsentActions();
         UpdateCaptureInformation();
         UpdateExclusionRuleInformation();
+        SynchronizeAiProviderControls();
+        UpdateAiProviderInformation();
     }
 
     public SettingsViewModel ViewModel { get; }
+
+    public AiProviderSettingsViewModel AiViewModel { get; }
 
     private void OnLoaded(object sender, RoutedEventArgs e)
     {
         if (!_isSubscribed)
         {
             ViewModel.PropertyChanged += OnViewModelPropertyChanged;
+            AiViewModel.PropertyChanged += OnAiViewModelPropertyChanged;
             _isSubscribed = true;
         }
 
@@ -56,6 +63,8 @@ public sealed partial class SettingsPage : Page
         UpdateCaptureInformation();
         UpdateExclusionRuleInformation();
         UpdateErrorInformation();
+        SynchronizeAiProviderControls();
+        UpdateAiProviderInformation();
     }
 
     private void OnUnloaded(object sender, RoutedEventArgs e)
@@ -63,6 +72,7 @@ public sealed partial class SettingsPage : Page
         if (_isSubscribed)
         {
             ViewModel.PropertyChanged -= OnViewModelPropertyChanged;
+            AiViewModel.PropertyChanged -= OnAiViewModelPropertyChanged;
             _isSubscribed = false;
         }
 
@@ -70,6 +80,7 @@ public sealed partial class SettingsPage : Page
         Loaded -= OnLoaded;
         Unloaded -= OnUnloaded;
         ViewModel.Dispose();
+        AiViewModel.Dispose();
     }
 
     private void OnSizeChanged(object sender, SizeChangedEventArgs e)
@@ -116,7 +127,7 @@ public sealed partial class SettingsPage : Page
         content.Children.Add(CreateDialogText(
             "保存位置：录制证据默认保存在本机的 WinDayFlow 数据目录。"));
         content.Children.Add(CreateDialogText(
-            "外部传输：云分析提供方尚未接入。未来启用云端分析前会提供独立开关和说明。"));
+            "外部传输：录制证据默认不离开本机。只有单独配置、测试并启用云端分析后，才会向明确显示的提供方发送提取的静态截图和筛选后的上下文；不会发送完整视频。"));
         content.Children.Add(CreateDialogText(
             "控制权：你可以随时停止录制或撤回同意。撤回不会自动删除已有本地数据。"));
         content.Children.Add(CreateDialogText(
@@ -221,6 +232,132 @@ public sealed partial class SettingsPage : Page
         }
 
         UpdateErrorInformation();
+    }
+
+    private async void OnSaveAiProvider(object sender, RoutedEventArgs e)
+    {
+        if (AiViewModel.IsBusy)
+        {
+            return;
+        }
+
+        if (!TryReadAiProviderTimeout(out var requestTimeoutSeconds))
+        {
+            ShowAiProviderError("请求超时必须是 10 到 600 之间的整数秒数。");
+            AiProviderTimeoutNumberBox.Focus(FocusState.Programmatic);
+            return;
+        }
+
+        var apiKey = AiProviderApiKeyPasswordBox.Password;
+        try
+        {
+            var saved = await AiViewModel.SaveAsync(
+                AiProviderNameTextBox.Text.Trim(),
+                AiProviderEndpointTextBox.Text.Trim(),
+                AiProviderModelTextBox.Text.Trim(),
+                requestTimeoutSeconds,
+                apiKey,
+                ClearAiProviderApiKeyCheckBox.IsChecked == true);
+            if (saved)
+            {
+                SynchronizeAiProviderControls();
+            }
+        }
+        finally
+        {
+            AiProviderApiKeyPasswordBox.Password = string.Empty;
+        }
+
+        UpdateAiProviderInformation();
+    }
+
+    private async void OnTestAiProvider(object sender, RoutedEventArgs e)
+    {
+        if (AiViewModel.IsBusy)
+        {
+            return;
+        }
+
+        _ = await AiViewModel.TestConnectionAsync();
+        UpdateAiProviderInformation();
+    }
+
+    private async void OnCloudAnalysisToggled(object sender, RoutedEventArgs e)
+    {
+        if (_isUpdatingCloudAnalysisToggle
+            || AiViewModel.IsBusy
+            || CloudAnalysisToggle.IsOn == AiViewModel.CloudAnalysisEnabled)
+        {
+            return;
+        }
+
+        var requestedState = CloudAnalysisToggle.IsOn;
+        if (requestedState && !await ConfirmCloudAnalysisDisclosureAsync())
+        {
+            SynchronizeCloudAnalysisToggle();
+            return;
+        }
+
+        if (!await AiViewModel.SetCloudAnalysisEnabledAsync(requestedState))
+        {
+            SynchronizeCloudAnalysisToggle();
+        }
+
+        UpdateAiProviderInformation();
+    }
+
+    private async Task<bool> ConfirmCloudAnalysisDisclosureAsync()
+    {
+        if (_dialogOpen)
+        {
+            return false;
+        }
+
+        var endpointOrigin = Uri.TryCreate(
+            AiViewModel.BaseEndpoint,
+            UriKind.Absolute,
+            out var endpoint)
+                ? endpoint.GetLeftPart(UriPartial.Authority)
+                : AiViewModel.BaseEndpoint;
+        var content = new StackPanel
+        {
+            MaxWidth = 520,
+            Spacing = 10,
+        };
+        content.Children.Add(CreateDialogText($"接收方：{endpointOrigin}"));
+        content.Children.Add(CreateDialogText(
+            "发送内容：从已提交录制块提取的少量静态截图、对应时间范围，以及经过隐私规则筛选的应用上下文。"));
+        content.Children.Add(CreateDialogText(
+            "不会发送：完整录制视频、未选择的本地文件或 WinDayFlow 数据库。"));
+        content.Children.Add(CreateDialogText(
+            "关闭此开关会阻止新任务发起网络分析；已经发送的请求仍受所选提供方的条款约束。"));
+
+        var dialog = new ContentDialog
+        {
+            XamlRoot = XamlRoot,
+            Title = "允许向此提供方发送分析证据？",
+            Content = content,
+            PrimaryButtonText = "允许并启用",
+            CloseButtonText = "取消",
+            DefaultButton = ContentDialogButton.Close,
+        };
+
+        return await ShowDialogAsync(dialog) == ContentDialogResult.Primary;
+    }
+
+    private bool TryReadAiProviderTimeout(out int requestTimeoutSeconds)
+    {
+        var value = AiProviderTimeoutNumberBox.Value;
+        if (!double.IsFinite(value)
+            || value != Math.Truncate(value)
+            || value is < 10 or > 600)
+        {
+            requestTimeoutSeconds = 0;
+            return false;
+        }
+
+        requestTimeoutSeconds = checked((int)value);
+        return true;
     }
 
     private async void OnAddExclusionRule(object sender, RoutedEventArgs e)
@@ -535,6 +672,25 @@ public sealed partial class SettingsPage : Page
         {
             ThemePicker.IsEnabled = !ViewModel.IsBusy;
         }
+    }
+
+    private void OnAiViewModelPropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        _ = sender;
+        if (e.PropertyName is nameof(AiProviderSettingsViewModel.DisplayName)
+            or nameof(AiProviderSettingsViewModel.BaseEndpoint)
+            or nameof(AiProviderSettingsViewModel.Model)
+            or nameof(AiProviderSettingsViewModel.RequestTimeoutSeconds))
+        {
+            SynchronizeAiProviderControls();
+        }
+
+        if (e.PropertyName == nameof(AiProviderSettingsViewModel.CloudAnalysisEnabled))
+        {
+            SynchronizeCloudAnalysisToggle();
+        }
+
+        UpdateAiProviderInformation();
     }
 
     private void PrepareCreateExclusionRuleEditor()
@@ -966,6 +1122,68 @@ public sealed partial class SettingsPage : Page
         {
             _isUpdatingPrivacyControls = false;
         }
+    }
+
+    private void SynchronizeAiProviderControls()
+    {
+        AiProviderNameTextBox.Text = AiViewModel.DisplayName;
+        AiProviderEndpointTextBox.Text = AiViewModel.BaseEndpoint;
+        AiProviderModelTextBox.Text = AiViewModel.Model;
+        AiProviderTimeoutNumberBox.Value = AiViewModel.RequestTimeoutSeconds;
+        ClearAiProviderApiKeyCheckBox.IsChecked = false;
+        AiCredentialStatusText.Text = AiViewModel.CredentialStatusText;
+        AiValidationStatusText.Text = AiViewModel.ValidationStatusText;
+        SynchronizeCloudAnalysisToggle();
+    }
+
+    private void SynchronizeCloudAnalysisToggle()
+    {
+        _isUpdatingCloudAnalysisToggle = true;
+        CloudAnalysisToggle.IsOn = AiViewModel.CloudAnalysisEnabled;
+        _isUpdatingCloudAnalysisToggle = false;
+    }
+
+    private void UpdateAiProviderInformation()
+    {
+        AiProviderProgressBar.Visibility = AiViewModel.IsBusy
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+        AiCredentialStatusText.Text = AiViewModel.CredentialStatusText;
+        AiValidationStatusText.Text = AiViewModel.ValidationStatusText;
+        CloudAnalysisStatusText.Text = AiViewModel.CloudAnalysisStatusText;
+
+        if (AiViewModel.HasError)
+        {
+            AiProviderInfoBar.Title = "分析提供方操作失败";
+            AiProviderInfoBar.Message = AiViewModel.ErrorMessage;
+            AiProviderInfoBar.Severity = InfoBarSeverity.Error;
+        }
+        else if (AiViewModel.HasNotice)
+        {
+            AiProviderInfoBar.Title = "分析提供方已更新";
+            AiProviderInfoBar.Message = AiViewModel.NoticeMessage;
+            AiProviderInfoBar.Severity = InfoBarSeverity.Success;
+        }
+        else
+        {
+            AiProviderInfoBar.Title = AiViewModel.IsValidated
+                ? "分析提供方已验证"
+                : "分析提供方";
+            AiProviderInfoBar.Message = AiViewModel.ValidationStatusText;
+            AiProviderInfoBar.Severity = AiViewModel.HasProfile
+                ? InfoBarSeverity.Informational
+                : InfoBarSeverity.Warning;
+        }
+
+        AiProviderInfoBar.IsOpen = true;
+    }
+
+    private void ShowAiProviderError(string message)
+    {
+        AiProviderInfoBar.Title = "请检查分析提供方配置";
+        AiProviderInfoBar.Message = message;
+        AiProviderInfoBar.Severity = InfoBarSeverity.Error;
+        AiProviderInfoBar.IsOpen = true;
     }
 
     private void UpdateConsentActions()
