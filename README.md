@@ -42,8 +42,9 @@ contains:
 
 - a working WinUI 3 Fluent shell with a custom system-integrated title bar,
   responsive navigation, and a retained hamburger menu;
-- versioned SQLite migrations plus local timeline and settings repositories,
-  initialized before the main window opens;
+- schema-v6 SQLite migrations plus local timeline, settings, capture-chunk,
+  durable analysis-job, and AI-provider-profile persistence, initialized before
+  the main window opens;
 - a timeline review surface with date navigation, search, filters, and durable
   manual activity creation, editing, and deletion;
 - a settings surface with persistent system/light/dark theme selection,
@@ -53,6 +54,13 @@ contains:
 - schema v4 settings persistence that commits the complete ordered rule
   snapshot, capture-off state, and exact privacy-revision change atomically,
   with optimistic concurrency checks over the complete settings snapshot;
+- an OpenAI-compatible vision-analysis adapter with bounded JPEG requests,
+  strict structured-response validation, stable failure mapping, redirect and
+  response-size limits, and provider-specific data kept outside the domain;
+- a Settings workflow for provider endpoint, vision model, timeout, and
+  DPAPI-protected API credentials, with a synthetic-image connection test,
+  revision-bound validation, explicit cloud-transfer disclosure, and cloud-off
+  default;
 - an x64 C++20 native-capture foundation with a versioned C ABI, stable status
   codes, a bounded polled event queue, fail-closed privacy inputs, and an
   original target-scoped safety core; its additive 224-byte runtime
@@ -126,13 +134,17 @@ contains:
   project boundaries with automated persistence and mutation tests; and
 - an unpackaged, self-contained development bundle for manual UI verification.
 
-Manual activities, consent, privacy settings, and user-authored exclusion rules
-are stored at `%LOCALAPPDATA%\WinDayFlow\Data\windayflow.db` and survive
-application restarts.
-The live C-ABI-connected DXGI/WIC/Media Foundation worker and persistence path,
-analysis queue and providers, generated Daily and Weekly views, journal editing,
-and timeline-grounded chat are **not integrated yet**. The foreground verifier
-and event monitor are inactive foundations, not a live activation claim:
+Manual activities, consent, privacy settings, user-authored exclusion rules,
+provider profiles, capture metadata, and analysis jobs are stored at
+`%LOCALAPPDATA%\WinDayFlow\Data\windayflow.db` and survive application restarts.
+The provider configuration UI, OpenAI-compatible adapter, durable stores,
+committed-manifest scanner, and application-level analysis processor exist as
+separate tested components. They are **not yet composed into a runnable
+capture-to-analysis pipeline**: native evidence extraction, startup/event-driven
+ingestion and job supervision, analyzed timeline projection, and live capture
+activation remain open. Generated Daily and Weekly views, journal editing, and
+timeline-grounded chat are also not integrated. The foreground verifier and
+event monitor are inactive foundations, not a live activation claim:
 image-bound publisher-signer verification, unique hosted-app attribution,
 presentation notifications, periodic storage refresh, worker-side stage
 orchestration and generation/permit revalidation, C ABI controller ownership,
@@ -161,6 +173,34 @@ policy must still choose resumable evidence Pause or sticky session Stop. The
 native foundation deliberately advertises no screen-capture, H.264-chunk, or
 evidence-extraction capability, App DI continues to use the unavailable
 backend, and the development bundle is not yet a functional recorder.
+
+### Immediate Development Priority
+
+Development is now frozen around one P0 vertical slice:
+
+```text
+consent-gated recording
+  -> committed MP4 + manifest
+  -> idempotent discovery and durable job
+  -> bounded JPEG evidence extraction
+  -> configured and explicitly enabled LLM API
+  -> validated response and atomic timeline commit
+```
+
+The next implementation order is live recording composition, manifest
+ingestion/recovery, root-bound native evidence extraction, background analysis
+supervision, and visible unprocessed/queued/failed/completed states. New Daily,
+Weekly, Chat, export, additional-provider, and visual-polish work is deferred
+unless it is required to complete or verify this chain.
+
+This slice is usable only when a clean Windows x64 profile can record, configure
+and test an OpenAI-compatible endpoint, opt in to cloud analysis, and obtain an
+editable normalized timeline entry; the same data must recover after forced
+restart without duplicates. With cloud analysis off or unavailable, recording
+must perform no network request and must remain visible as an unprocessed local
+interval. Production capture capabilities stay disabled until those conditions
+and the privacy transition smoke tests pass. See the architecture design's
+`Immediate P0` section for the complete gates.
 
 See the [architecture design](docs/ARCHITECTURE.md) for delivery phases and the
 [Reference Baseline](docs/ARCHITECTURE.md#2-reference-baseline) for the reviewed

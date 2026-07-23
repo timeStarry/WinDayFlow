@@ -1468,6 +1468,68 @@ evidence-Pause versus sticky-Stop policy remain open activation gates.
 `EvidenceExtraction`, and managed-adapter runtime activation remain disabled,
 so no phase exit criterion is met.
 
+### Immediate P0: Runnable Capture-to-Analysis Vertical Slice
+
+Until this slice meets its exit criterion, it takes precedence over new Daily,
+Weekly, Journal, Chat, export, provider-expansion, and visual-polish work. Those
+areas may receive only fixes needed to keep the current shell and manual
+timeline usable.
+
+Implementation order is deliberately end to end:
+
+1. **Record and publish.** Close the remaining live-activation gates, compose
+   the native runtime owner with the Windows privacy monitor and target
+   verifier, and produce a committed `chunks/<id>/capture.mp4` plus
+   `manifest.json` through consent-gated Start/Pause/Resume/Stop.
+2. **Discover and enqueue.** On startup and on every chunk-completed wake hint,
+   rescan all committed manifests, idempotently upsert chunks, and enqueue work
+   against the exact active, validated provider revision. A wake event is never
+   treated as the source of truth.
+3. **Configure the LLM boundary.** Keep OpenAI-compatible endpoint, model,
+   timeout, and DPAPI-protected credential configuration in Settings. Require a
+   successful synthetic connection test and explicit data-transfer disclosure
+   before cloud analysis can be enabled; configuration changes invalidate the
+   previous validation and must not race an in-flight commit.
+4. **Extract bounded evidence.** Add a root-bound native Media Foundation/WIC
+   extractor that accepts a canonical chunk identifier rather than an arbitrary
+   path. It publishes at most 32 JPEG frames, 2 MiB per frame and 12 MiB total,
+   through a versioned, atomic evidence manifest. Complete MP4 files never enter
+   managed memory and are never sent to a provider.
+5. **Analyze and commit.** Run the durable job state machine, validate structured
+   provider output, recheck the provider/settings revision before and after the
+   network call, and atomically commit normalized timeline entries with job
+   completion. Retry, timeout, cancellation, lease recovery, and stale response
+   behavior use persisted states and stable error codes.
+6. **Expose truth in the UI.** Show recording state, unprocessed chunks, queued
+   and failed analysis, provider identity, and normalized timeline results.
+   Users must be able to retry or continue reviewing local evidence without an
+   available provider.
+
+P0 acceptance requires one clean-profile Windows x64 run to demonstrate all of
+the following:
+
+- with cloud analysis off, recording creates a visible local unprocessed
+  interval and performs no network request;
+- after a provider is saved, synthetically tested, disclosed, and enabled, a
+  newly recorded chunk reaches a normalized, editable timeline entry using only
+  bounded extracted JPEG evidence;
+- forced termination after chunk publication, extraction, provider response,
+  and commit is recoverable without duplicate chunks, jobs, or timeline entries;
+- lock, secure desktop, RDP, presentation, display change, sleep, exclusion,
+  consent revocation, and shutdown stop or pause persistence before stale
+  evidence can advance;
+- provider authentication, rate-limit, timeout, malformed-output, storage, and
+  missing-evidence failures remain visible and retryable or terminal according
+  to their stable disposition; and
+- focused automated tests pass, followed by a development-bundle manual smoke
+  when WinUI or real Desktop Duplication cannot be validated reliably in the
+  automated environment.
+
+Only after this acceptance passes may production advertise the combined
+`ScreenCapture | H264Chunks | EvidenceExtraction` capability and switch the
+native controller from disabled to enabled activation in the same reviewed
+change.
+
 ### Phase 0: Foundation
 
 - Create the solution and project boundaries.
