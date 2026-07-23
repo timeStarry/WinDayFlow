@@ -192,11 +192,16 @@ public sealed class AnalysisJobProcessor
                     _options.ExtractionTimeout,
                     cancellationToken)
                 .ConfigureAwait(false);
+            var expectedSourceFingerprint = new CaptureChunkFingerprint(
+                current.InputFingerprint);
 
             AnalysisEvidenceBatch evidence;
             try
             {
-                evidence = await ExtractWithTimeoutAsync(chunk, cancellationToken)
+                evidence = await ExtractWithTimeoutAsync(
+                        chunk,
+                        expectedSourceFingerprint,
+                        cancellationToken)
                     .ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -220,6 +225,18 @@ public sealed class AnalysisJobProcessor
                         current,
                         code,
                         disposition,
+                        _options.RetryDelay,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+
+            if (evidence is null
+                || evidence.SourceFingerprint != expectedSourceFingerprint)
+            {
+                return await FailAsync(
+                        current,
+                        AnalysisJobErrorCode.EvidenceInvalid,
+                        AnalysisFailureDisposition.Terminal,
                         _options.RetryDelay,
                         cancellationToken)
                     .ConfigureAwait(false);
@@ -573,12 +590,13 @@ public sealed class AnalysisJobProcessor
 
     private async Task<AnalysisEvidenceBatch> ExtractWithTimeoutAsync(
         CaptureChunk chunk,
+        CaptureChunkFingerprint expectedSourceFingerprint,
         CancellationToken cancellationToken)
     {
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(_options.ExtractionTimeout);
         return await _evidenceExtractor
-            .ExtractAsync(chunk, timeout.Token)
+            .ExtractAsync(chunk, expectedSourceFingerprint, timeout.Token)
             .ConfigureAwait(false);
     }
 

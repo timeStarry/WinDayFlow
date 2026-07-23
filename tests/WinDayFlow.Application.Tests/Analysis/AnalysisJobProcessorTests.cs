@@ -32,6 +32,7 @@ public sealed class AnalysisJobProcessorTests
         Assert.Equal(1, harness.ProviderFactory.CreateCount);
         Assert.Equal(1, harness.Provider.CallCount);
         Assert.Equal(1, harness.Extractor.CallCount);
+        Assert.Equal(new string('A', 64), harness.Extractor.ExpectedFingerprint?.Value);
         Assert.Equal(
             [
                 AnalysisJobState.Extracting,
@@ -81,6 +82,22 @@ public sealed class AnalysisJobProcessorTests
         Assert.Equal(0, harness.ProviderFactory.CreateCount);
         Assert.Equal(0, harness.Extractor.CallCount);
         Assert.Equal(AnalysisJobState.FailedTerminal, harness.JobStore.Current.State);
+    }
+
+    [Fact]
+    public async Task ChangedEvidenceFingerprintTerminatesBeforeNetworking()
+    {
+        using var harness = await CreateHarnessAsync(cloudEnabled: true);
+        harness.Extractor.Evidence = CreateEvidence(
+            CreateChunk(),
+            new CaptureChunkFingerprint(new string('B', 64)));
+
+        var result = await harness.Processor.ProcessNextAsync();
+
+        Assert.Equal(AnalysisJobProcessStatus.FailedTerminal, result.Status);
+        Assert.Equal(AnalysisJobErrorCode.EvidenceInvalid, result.FailureCode);
+        Assert.Equal(0, harness.ProviderFactory.CreateCount);
+        Assert.Equal(0, harness.Committer.CallCount);
     }
 
     [Theory]
@@ -320,8 +337,11 @@ public sealed class AnalysisJobProcessorTests
             ingestedAtUtc: Now.AddMinutes(2));
     }
 
-    private static AnalysisEvidenceBatch CreateEvidence(CaptureChunk chunk) => new(
+    private static AnalysisEvidenceBatch CreateEvidence(
+        CaptureChunk chunk,
+        CaptureChunkFingerprint? sourceFingerprint = null) => new(
         chunk.VideoPath.Value,
+        sourceFingerprint ?? new CaptureChunkFingerprint(new string('A', 64)),
         [new AiEvidenceImage(
             "frame-1",
             chunk.Range.Start.AddSeconds(10),
@@ -597,14 +617,20 @@ public sealed class AnalysisJobProcessorTests
     private sealed class TestEvidenceExtractor(AnalysisEvidenceBatch evidence)
         : IAnalysisEvidenceExtractor
     {
+        public AnalysisEvidenceBatch Evidence { get; set; } = evidence;
+
         public int CallCount { get; private set; }
+
+        public CaptureChunkFingerprint? ExpectedFingerprint { get; private set; }
 
         public Task<AnalysisEvidenceBatch> ExtractAsync(
             CaptureChunk chunk,
+            CaptureChunkFingerprint expectedSourceFingerprint,
             CancellationToken cancellationToken = default)
         {
             CallCount++;
-            return Task.FromResult(evidence);
+            ExpectedFingerprint = expectedSourceFingerprint;
+            return Task.FromResult(Evidence);
         }
     }
 

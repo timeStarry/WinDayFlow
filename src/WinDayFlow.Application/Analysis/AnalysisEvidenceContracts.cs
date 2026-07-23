@@ -11,10 +11,12 @@ public sealed class AnalysisEvidenceBatch
 
     public AnalysisEvidenceBatch(
         string artifactPath,
+        CaptureChunkFingerprint sourceFingerprint,
         IReadOnlyList<AiEvidenceImage> images,
         IReadOnlyList<AiAnalysisContextSlice> context)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(artifactPath);
+        ArgumentNullException.ThrowIfNull(sourceFingerprint);
         ArgumentNullException.ThrowIfNull(images);
         ArgumentNullException.ThrowIfNull(context);
         if (!string.Equals(artifactPath, artifactPath.Trim(), StringComparison.Ordinal)
@@ -43,11 +45,14 @@ public sealed class AnalysisEvidenceBatch
         }
 
         ArtifactPath = artifactPath;
+        SourceFingerprint = sourceFingerprint;
         _images = Array.AsReadOnly(imageCopy);
         _context = Array.AsReadOnly(contextCopy);
     }
 
     public string ArtifactPath { get; }
+
+    public CaptureChunkFingerprint SourceFingerprint { get; }
 
     public IReadOnlyList<AiEvidenceImage> Images => _images;
 
@@ -58,5 +63,6 @@ public interface IAnalysisEvidenceExtractor
 {
     Task<AnalysisEvidenceBatch> ExtractAsync(
         CaptureChunk chunk,
+        CaptureChunkFingerprint expectedSourceFingerprint,
         CancellationToken cancellationToken = default);
 }
