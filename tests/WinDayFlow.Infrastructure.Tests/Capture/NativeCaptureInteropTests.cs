@@ -913,7 +913,11 @@ public sealed class NativeCaptureInteropTests
             CreateAllowedRuntimeAuthorization(runtimePolicyRevision: 2));
         var committed = new TaskCompletionSource<NativeCaptureChunkCommitted>(
             TaskCreationOptions.RunContinuationsAsynchronously);
+        var wakeHint = new TaskCompletionSource<CaptureChunkCommittedEventArgs>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
         backend.ChunkCommitted += (_, args) => committed.TrySetResult(args.Chunk);
+        ((ICaptureChunkCommitNotifier)backend).ChunkCommitted += (_, args) =>
+            wakeHint.TrySetResult(args);
 
         nativeApi.Enqueue(
             sequence: 1,
@@ -930,6 +934,9 @@ public sealed class NativeCaptureInteropTests
         Assert.Equal<uint>(0, chunk.DroppedBefore);
         Assert.Equal(persistenceGeneration, chunk.PersistenceGeneration);
         Assert.Equal<ulong>(1, chunk.TargetEpoch);
+        Assert.Same(
+            CaptureChunkCommittedEventArgs.WakeHint,
+            await wakeHint.Task.WaitAsync(TimeSpan.FromSeconds(2)));
     }
 
     [Fact]

@@ -43,6 +43,7 @@ internal sealed class NativeCaptureBackend
     private CaptureStatus _status;
     private EventHandler<CaptureStatusChangedEventArgs>? _statusChanged;
     private EventHandler<NativeCaptureChunkCommittedEventArgs>? _chunkCommitted;
+    private EventHandler<CaptureChunkCommittedEventArgs>? _chunkCommittedHint;
     private Task? _pumpStopTask;
     private Task? _requestStopTask;
     private NativePersistenceBoundary _persistenceBoundary = new(0, 0, null, 0);
@@ -197,6 +198,26 @@ internal sealed class NativeCaptureBackend
             lock (_statusSync)
             {
                 _chunkCommitted -= value;
+            }
+        }
+    }
+
+    event EventHandler<CaptureChunkCommittedEventArgs>?
+        ICaptureChunkCommitNotifier.ChunkCommitted
+    {
+        add
+        {
+            lock (_statusSync)
+            {
+                ObjectDisposedException.ThrowIf(_disposed, this);
+                _chunkCommittedHint += value;
+            }
+        }
+        remove
+        {
+            lock (_statusSync)
+            {
+                _chunkCommittedHint -= value;
             }
         }
     }
@@ -763,6 +784,7 @@ internal sealed class NativeCaptureBackend
             _disposed = true;
             _statusChanged = null;
             _chunkCommitted = null;
+            _chunkCommittedHint = null;
         }
 
         _lifetimeCancellation.Dispose();
@@ -1453,6 +1475,7 @@ internal sealed class NativeCaptureBackend
     private void DispatchChunkCommitted(ChunkCommittedNotification notification)
     {
         EventHandler<NativeCaptureChunkCommittedEventArgs>? handler;
+        EventHandler<CaptureChunkCommittedEventArgs>? hintHandler;
         lock (_statusSync)
         {
             if (_disposed)
@@ -1461,12 +1484,17 @@ internal sealed class NativeCaptureBackend
             }
 
             handler = _chunkCommitted;
+            hintHandler = _chunkCommittedHint;
         }
 
         InvokeSubscribers(
             handler,
             new NativeCaptureChunkCommittedEventArgs(notification.Chunk),
             "chunk");
+        InvokeSubscribers(
+            hintHandler,
+            CaptureChunkCommittedEventArgs.WakeHint,
+            "chunk hint");
     }
 
     private void InvokeSubscribers<TEventArgs>(

@@ -33,6 +33,37 @@ public sealed class NativeCaptureRuntimeOwnerTests
     }
 
     [Fact]
+    public async Task ChunkCommitIsForwardedAsAnApplicationWakeHint()
+    {
+        var backend = new ScriptedRuntimeBackend();
+        var owner = CreateOwner(backend);
+        try
+        {
+            var observed = new TaskCompletionSource<CaptureChunkCommittedEventArgs>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            object? sender = null;
+            owner.ChunkCommitted += (_, _) =>
+                throw new InvalidOperationException("subscriber failed");
+            owner.ChunkCommitted += (eventSender, eventArgs) =>
+            {
+                sender = eventSender;
+                observed.TrySetResult(eventArgs);
+            };
+
+            backend.RaiseChunkCommitted();
+
+            Assert.Same(
+                CaptureChunkCommittedEventArgs.WakeHint,
+                await observed.Task.WaitAsync(TimeSpan.FromSeconds(2)));
+            Assert.Same(owner, sender);
+        }
+        finally
+        {
+            await owner.DisposeAsync();
+        }
+    }
+
+    [Fact]
     public async Task ConcurrentDisposeUsesOneStrictTerminationSequence()
     {
         var backend = new ScriptedRuntimeBackend();
@@ -638,6 +669,15 @@ public sealed class NativeCaptureRuntimeOwnerTests
         {
             add { }
             remove { }
+        }
+
+        public event EventHandler<CaptureChunkCommittedEventArgs>? ChunkCommitted;
+
+        public void RaiseChunkCommitted()
+        {
+            ChunkCommitted?.Invoke(
+                this,
+                CaptureChunkCommittedEventArgs.WakeHint);
         }
 
         public Task<NativeCaptureCommandAdmissionV1?> TryIssueCommandAdmissionAsync(

@@ -5,6 +5,7 @@ namespace WinDayFlow.Capture.Interop;
 
 public sealed class NativeCaptureRuntimeOwner
     : ICaptureBackend,
+      ICaptureChunkCommitNotifier,
       IAppSettingsCommitBarrier,
       ICaptureRuntimeAuthorization,
       INativeCapturePrivacySignalSink,
@@ -13,6 +14,7 @@ public sealed class NativeCaptureRuntimeOwner
     private readonly object _terminationSync = new();
     private readonly INativeCaptureRuntimeBackend _backend;
     private readonly NativeCapturePrivacyCoordinator _coordinator;
+    private EventHandler<CaptureChunkCommittedEventArgs>? _chunkCommitted;
     private Task? _terminationTask;
     private int _terminating;
 
@@ -59,6 +61,7 @@ public sealed class NativeCaptureRuntimeOwner
             throw;
         }
         _backend.StatusChanged += OnBackendStatusChanged;
+        _backend.ChunkCommitted += OnBackendChunkCommitted;
     }
 
     public CaptureStatus CurrentStatus => _backend.CurrentStatus;
@@ -137,6 +140,26 @@ public sealed class NativeCaptureRuntimeOwner
             _backend.StatusChanged += value;
         }
         remove => _backend.StatusChanged -= value;
+    }
+
+    public event EventHandler<CaptureChunkCommittedEventArgs>? ChunkCommitted
+    {
+        add
+        {
+            ThrowIfTerminating();
+            lock (_terminationSync)
+            {
+                ObjectDisposedException.ThrowIf(_terminating != 0, this);
+                _chunkCommitted += value;
+            }
+        }
+        remove
+        {
+            lock (_terminationSync)
+            {
+                _chunkCommitted -= value;
+            }
+        }
     }
 
     public event EventHandler<CaptureRuntimeAuthorizationChangedEventArgs>?
@@ -329,6 +352,22 @@ public sealed class NativeCaptureRuntimeOwner
 
             try
             {
+                _backend.ChunkCommitted -= OnBackendChunkCommitted;
+            }
+            catch (Exception exception)
+            {
+                failures.Add(exception);
+            }
+            finally
+            {
+                lock (_terminationSync)
+                {
+                    _chunkCommitted = null;
+                }
+            }
+
+            try
+            {
                 _coordinator.Dispose();
             }
             catch (Exception exception)
@@ -468,6 +507,43 @@ public sealed class NativeCaptureRuntimeOwner
         if (eventArgs.Current.State == CaptureState.Faulted)
         {
             _ = BeginTermination();
+        }
+    }
+
+    private void OnBackendChunkCommitted(
+        object? sender,
+        CaptureChunkCommittedEventArgs eventArgs)
+    {
+        _ = sender;
+        EventHandler<CaptureChunkCommittedEventArgs>? handler;
+        lock (_terminationSync)
+        {
+            if (_terminating != 0)
+            {
+                return;
+            }
+
+            handler = _chunkCommitted;
+        }
+
+        if (handler is null)
+        {
+            return;
+        }
+
+        foreach (var subscriber in handler.GetInvocationList())
+        {
+            try
+            {
+                ((EventHandler<CaptureChunkCommittedEventArgs>)subscriber)(
+                    this,
+                    eventArgs);
+            }
+            catch (Exception exception)
+            {
+                System.Diagnostics.Debug.WriteLine(
+                    $"Capture chunk wake-hint subscriber failed: {exception}");
+            }
         }
     }
 

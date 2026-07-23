@@ -3,7 +3,8 @@ using WinDayFlow.Application.Capture;
 namespace WinDayFlow.Capture.Interop;
 
 internal interface INativeCaptureRuntimeBackend
-    : INativeCaptureAuthorizationTarget
+    : INativeCaptureAuthorizationTarget,
+      ICaptureChunkCommitNotifier
 {
     NativeCaptureCapabilities Capabilities { get; }
 
