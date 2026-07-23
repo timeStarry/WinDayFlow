@@ -35,6 +35,10 @@ public sealed class SqliteAppSettingsMigrationTests
         await using (var command = connection.CreateCommand())
         {
             command.CommandText = """
+                DROP INDEX ix_analysis_jobs_provider_revision_state;
+                DROP TABLE ai_provider_profiles;
+                DROP TABLE analysis_jobs;
+                DROP TABLE capture_chunks;
                 DROP TABLE capture_exclusion_rules;
                 DROP TABLE app_settings;
                 DELETE FROM schema_migrations WHERE version >= 2;
@@ -88,6 +92,12 @@ public sealed class SqliteAppSettingsMigrationTests
         Assert.Equal(1, reader.GetInt32(1));
         Assert.True(await reader.ReadAsync());
         Assert.Equal(4, reader.GetInt32(0));
+        Assert.Equal(1, reader.GetInt32(1));
+        Assert.True(await reader.ReadAsync());
+        Assert.Equal(5, reader.GetInt32(0));
+        Assert.Equal(1, reader.GetInt32(1));
+        Assert.True(await reader.ReadAsync());
+        Assert.Equal(6, reader.GetInt32(0));
         Assert.Equal(1, reader.GetInt32(1));
         Assert.False(await reader.ReadAsync());
     }
@@ -171,7 +181,7 @@ public sealed class SqliteAppSettingsMigrationTests
     }
 
     [Fact]
-    public async Task VersionThreeDatabaseUpgradesWithoutChangingSettingsOrTimelineData()
+    public async Task VersionThreeDatabasePreservesDataAndForcesCloudAnalysisOff()
     {
         using var database = new TemporaryDatabase();
         var factory = new SqliteConnectionFactory(database.DatabasePath);
@@ -195,8 +205,12 @@ public sealed class SqliteAppSettingsMigrationTests
         await using (var command = connection.CreateCommand())
         {
             command.CommandText = """
+                DROP INDEX ix_analysis_jobs_provider_revision_state;
+                DROP TABLE ai_provider_profiles;
+                DROP TABLE analysis_jobs;
+                DROP TABLE capture_chunks;
                 DROP TABLE capture_exclusion_rules;
-                DELETE FROM schema_migrations WHERE version = 4;
+                DELETE FROM schema_migrations WHERE version >= 4;
                 UPDATE app_settings
                 SET theme = 2,
                     capture_enabled = 1,
@@ -225,7 +239,7 @@ public sealed class SqliteAppSettingsMigrationTests
         var expected = new AppSettings(
             AppThemePreference.Dark,
             CaptureEnabled: true,
-            CloudAnalysisEnabled: true,
+            CloudAnalysisEnabled: false,
             new RecordingConsent(
                 AppSettingsService.CurrentRecordingConsentVersion,
                 DateTimeOffset.ParseExact(
@@ -266,6 +280,10 @@ public sealed class SqliteAppSettingsMigrationTests
         await using (var command = connection.CreateCommand())
         {
             command.CommandText = """
+                DROP INDEX ix_analysis_jobs_provider_revision_state;
+                DROP TABLE ai_provider_profiles;
+                DROP TABLE analysis_jobs;
+                DROP TABLE capture_chunks;
                 DROP TABLE capture_exclusion_rules;
                 ALTER TABLE app_settings RENAME TO app_settings_v3;
                 CREATE TABLE app_settings (
@@ -306,7 +324,7 @@ public sealed class SqliteAppSettingsMigrationTests
         var settings = await new SqliteAppSettingsRepository(factory).GetAsync();
         Assert.Equal(AppThemePreference.Dark, settings.Theme);
         Assert.False(settings.CaptureEnabled);
-        Assert.True(settings.CloudAnalysisEnabled);
+        Assert.False(settings.CloudAnalysisEnabled);
         Assert.Equal(1, settings.RecordingConsent?.PolicyVersion);
         Assert.Equal(
             DateTimeOffset.ParseExact(

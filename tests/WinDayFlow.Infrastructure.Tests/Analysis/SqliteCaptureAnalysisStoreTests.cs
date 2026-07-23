@@ -1,0 +1,553 @@
+using WinDayFlow.Application.Analysis;
+using WinDayFlow.Application.Capture;
+using WinDayFlow.Domain;
+using WinDayFlow.Infrastructure.Analysis;
+using WinDayFlow.Infrastructure.Persistence;
+using Xunit;
+
+namespace WinDayFlow.Infrastructure.Tests.Analysis;
+
+public sealed class SqliteCaptureAnalysisStoreTests
+{
+    private static readonly DateTimeOffset Now =
+        new(2026, 7, 23, 1, 2, 3, TimeSpan.Zero);
+
+    private static readonly Guid ProviderId =
+        Guid.Parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
+
+    [Fact]
+    public async Task VersionFiveMigrationCreatesDurableQueueTablesOnce()
+    {
+        using var database = new TemporaryDatabase();
+        var factory = new SqliteConnectionFactory(database.DatabasePath);
+        var initializer = new SqliteDatabaseInitializer(factory);
+
+        await initializer.InitializeAsync();
+        await initializer.InitializeAsync();
+
+        await using var connection = await factory.OpenConnectionAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT
+                (SELECT COUNT(*) FROM schema_migrations WHERE version = 5),
+                (SELECT COUNT(*) FROM sqlite_master
+                    WHERE type = 'table' AND name = 'capture_chunks'),
+                (SELECT COUNT(*) FROM sqlite_master
+                    WHERE type = 'table' AND name = 'analysis_jobs');
+            """;
+        await using var reader = await command.ExecuteReaderAsync();
+
+        Assert.True(await reader.ReadAsync());
+        Assert.Equal(1, reader.GetInt32(0));
+        Assert.Equal(1, reader.GetInt32(1));
+        Assert.Equal(1, reader.GetInt32(2));
+    }
+
+    [Fact]
+    public async Task IngestIsIdempotentAndPersistsUnsignedAuthorityAsUppercaseHex()
+    {
+        using var database = new TemporaryDatabase();
+        var (factory, store) = await CreateStoreAsync(database);
+        var chunk = CreateChunk(
+            "chunk-00000000000000000000000000000001",
+            persistenceGeneration: ulong.MaxValue,
+            targetEpoch: ulong.MaxValue - 1,
+            ingestedAt: Now.AddMinutes(2));
+
+        var first = await store.IngestCommittedAsync(chunk);
+        var duplicate = await store.IngestCommittedAsync(CreateChunk(
+            chunk.Id,
+            persistenceGeneration: ulong.MaxValue,
+            targetEpoch: ulong.MaxValue - 1,
+            ingestedAt: Now.AddDays(1)));
+        var restored = await ((ICaptureChunkStore)store).GetAsync(chunk.Id);
+
+        Assert.True(first.Created);
+        Assert.False(duplicate.Created);
+        Assert.Equal(first.Chunk, duplicate.Chunk);
+        Assert.Equal(chunk.Id, restored?.Id);
+        Assert.Equal(ulong.MaxValue, restored?.PersistenceGeneration);
+        Assert.Equal(ulong.MaxValue - 1, restored?.TargetEpoch);
+        Assert.Equal(chunk.IngestedAtUtc, duplicate.Chunk.IngestedAtUtc);
+
+        await using var connection = await factory.OpenConnectionAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT persistence_generation_hex, target_epoch_hex
+            FROM capture_chunks
+            WHERE id = $id;
+            """;
+        command.Parameters.AddWithValue("$id", chunk.Id);
+        await using var reader = await command.ExecuteReaderAsync();
+        Assert.True(await reader.ReadAsync());
+        Assert.Equal("FFFFFFFFFFFFFFFF", reader.GetString(0));
+        Assert.Equal("FFFFFFFFFFFFFFFE", reader.GetString(1));
+    }
+
+    [Fact]
+    public async Task IngestRejectsConflictingMetadataWithoutChangingStoredChunk()
+    {
+        using var database = new TemporaryDatabase();
+        var (_, store) = await CreateStoreAsync(database);
+        var chunk = CreateChunk("chunk-00000000000000000000000000000002");
+        await store.IngestCommittedAsync(chunk);
+        var conflict = CreateChunk(chunk.Id, videoByteCount: chunk.VideoByteCount + 1);
+
+        await Assert.ThrowsAsync<CaptureChunkConflictException>(
+            () => store.IngestCommittedAsync(conflict));
+
+        var restored = await ((ICaptureChunkStore)store).GetAsync(chunk.Id);
+        Assert.Equal(chunk.VideoByteCount, restored?.VideoByteCount);
+    }
+
+    [Theory]
+    [InlineData(CaptureChunkAvailability.Missing)]
+    [InlineData(CaptureChunkAvailability.Deleted)]
+    public async Task IngestRejectsChunkThatIsNotAvailable(
+        CaptureChunkAvailability availability)
+    {
+        using var database = new TemporaryDatabase();
+        var (_, store) = await CreateStoreAsync(database);
+        var chunk = CreateChunk(
+            "chunk-00000000000000000000000000000011",
+            availability: availability);
+
+        var exception = await Assert.ThrowsAsync<ArgumentException>(
+            () => store.IngestCommittedAsync(chunk));
+
+        Assert.Equal("chunk", exception.ParamName);
+        Assert.Null(await ((ICaptureChunkStore)store).GetAsync(chunk.Id));
+    }
+
+    [Fact]
+    public async Task EnqueueIsIdempotentByStableInputKeyAndRejectsChangedFingerprint()
+    {
+        using var database = new TemporaryDatabase();
+        var (_, store) = await CreateStoreAsync(database);
+        var chunk = CreateChunk("chunk-00000000000000000000000000000003");
+        await store.IngestCommittedAsync(chunk);
+        var firstJob = CreatePendingJob(
+            Guid.Parse("10000000-0000-0000-0000-000000000001"),
+            chunk.Id,
+            fingerprintCharacter: 'A');
+        var duplicateJob = CreatePendingJob(
+            Guid.Parse("10000000-0000-0000-0000-000000000002"),
+            chunk.Id,
+            fingerprintCharacter: 'A',
+            createdAt: Now.AddMinutes(1));
+
+        var first = await store.EnqueueAsync(firstJob);
+        var duplicate = await store.EnqueueAsync(duplicateJob);
+
+        Assert.True(first.Created);
+        Assert.False(duplicate.Created);
+        Assert.Equal(firstJob.Id, duplicate.Job.Id);
+        Assert.Equal(AnalysisJobState.Pending, duplicate.Job.State);
+
+        var conflict = CreatePendingJob(
+            Guid.Parse("10000000-0000-0000-0000-000000000003"),
+            chunk.Id,
+            fingerprintCharacter: 'B');
+        await Assert.ThrowsAsync<AnalysisJobConflictException>(
+            () => store.EnqueueAsync(conflict));
+    }
+
+    [Fact]
+    public async Task EnqueueRejectsMissingSourceChunkWithoutPersistingJob()
+    {
+        using var database = new TemporaryDatabase();
+        var (_, store) = await CreateStoreAsync(database);
+        var job = CreatePendingJob(
+            Guid.Parse("10000000-0000-0000-0000-000000000004"),
+            "chunk-00000000000000000000000000000012");
+
+        await Assert.ThrowsAsync<KeyNotFoundException>(() => store.EnqueueAsync(job));
+
+        Assert.Null(await ((IAnalysisJobStore)store).GetAsync(job.Id));
+    }
+
+    [Theory]
+    [InlineData(CaptureChunkAvailability.Missing)]
+    [InlineData(CaptureChunkAvailability.Deleted)]
+    public async Task EnqueueRejectsSourceChunkThatIsNotAvailable(
+        CaptureChunkAvailability availability)
+    {
+        using var database = new TemporaryDatabase();
+        var (factory, store) = await CreateStoreAsync(database);
+        var chunk = CreateChunk("chunk-00000000000000000000000000000013");
+        await store.IngestCommittedAsync(chunk);
+        await SetChunkAvailabilityAsync(factory, chunk.Id, availability);
+        var job = CreatePendingJob(
+            Guid.Parse("10000000-0000-0000-0000-000000000005"),
+            chunk.Id);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => store.EnqueueAsync(job));
+
+        Assert.Null(await ((IAnalysisJobStore)store).GetAsync(job.Id));
+    }
+
+    [Theory]
+    [InlineData(CaptureChunkAvailability.Missing)]
+    [InlineData(CaptureChunkAvailability.Deleted)]
+    public async Task ClaimSkipsJobWhoseSourceChunkIsNotAvailable(
+        CaptureChunkAvailability availability)
+    {
+        using var database = new TemporaryDatabase();
+        var (factory, store) = await CreateStoreAsync(database);
+        var chunk = CreateChunk("chunk-00000000000000000000000000000014");
+        await store.IngestCommittedAsync(chunk);
+        var job = CreatePendingJob(
+            Guid.Parse("20000000-0000-0000-0000-000000000002"),
+            chunk.Id);
+        await store.EnqueueAsync(job);
+        await SetChunkAvailabilityAsync(factory, chunk.Id, availability);
+
+        Assert.Null(await store.TryClaimNextAsync(
+            "worker-a",
+            Now,
+            TimeSpan.FromMinutes(5)));
+
+        var persisted = await ((IAnalysisJobStore)store).GetAsync(job.Id);
+        Assert.NotNull(persisted);
+        Assert.Equal(AnalysisJobState.Pending, persisted.State);
+        Assert.Equal(0, persisted.Attempt);
+    }
+
+    [Fact]
+    public async Task ConcurrentClaimHasExactlyOneWinner()
+    {
+        using var database = new TemporaryDatabase();
+        var (_, store) = await CreateStoreAsync(database);
+        var chunk = CreateChunk("chunk-00000000000000000000000000000004");
+        await store.IngestCommittedAsync(chunk);
+        await store.EnqueueAsync(CreatePendingJob(
+            Guid.Parse("20000000-0000-0000-0000-000000000001"),
+            chunk.Id));
+
+        var claims = await Task.WhenAll(Enumerable.Range(0, 16).Select(index =>
+            store.TryClaimNextAsync(
+                $"worker-{index}",
+                Now,
+                TimeSpan.FromMinutes(5))));
+
+        var winner = Assert.Single(claims, static claim => claim is not null);
+        Assert.Equal(AnalysisJobState.Claimed, winner!.State);
+        Assert.Equal(1, winner.Attempt);
+        Assert.Equal(winner.Id, winner.Lease?.JobId);
+        Assert.Equal(32, winner.Lease?.Token.Length);
+    }
+
+    [Fact]
+    public async Task LeaseCanBeRenewedAndNormalStatesAdvanceWithCompareAndSwap()
+    {
+        using var database = new TemporaryDatabase();
+        var (_, store) = await CreateStoreAsync(database);
+        var chunk = CreateChunk("chunk-00000000000000000000000000000005");
+        await store.IngestCommittedAsync(chunk);
+        await store.EnqueueAsync(CreatePendingJob(
+            Guid.Parse("30000000-0000-0000-0000-000000000001"),
+            chunk.Id));
+        var claimed = await store.TryClaimNextAsync(
+            "worker-a",
+            Now,
+            TimeSpan.FromMinutes(2));
+        Assert.NotNull(claimed);
+
+        var extracting = await store.TryTransitionAsync(
+            claimed.Lease!,
+            AnalysisJobState.Claimed,
+            AnalysisJobState.Extracting,
+            Now.AddSeconds(1));
+        Assert.NotNull(extracting);
+        Assert.Null(await store.TryTransitionAsync(
+            claimed.Lease!,
+            AnalysisJobState.Claimed,
+            AnalysisJobState.Extracting,
+            Now.AddSeconds(2)));
+
+        var renewed = await store.TryRenewLeaseAsync(
+            extracting.Lease!,
+            Now.AddSeconds(2),
+            Now.AddMinutes(10));
+        Assert.NotNull(renewed);
+        Assert.Equal(Now.AddMinutes(10), renewed.Lease?.ExpiresAtUtc);
+
+        var current = renewed;
+        var transitions = new[]
+        {
+            (AnalysisJobState.Extracting, AnalysisJobState.Observing),
+            (AnalysisJobState.Observing, AnalysisJobState.Summarizing),
+            (AnalysisJobState.Summarizing, AnalysisJobState.Committing),
+            (AnalysisJobState.Committing, AnalysisJobState.Completed),
+        };
+        for (var index = 0; index < transitions.Length; index++)
+        {
+            var (expected, next) = transitions[index];
+            var transitioned = await store.TryTransitionAsync(
+                current.Lease!,
+                expected,
+                next,
+                Now.AddSeconds(index + 3));
+            Assert.NotNull(transitioned);
+            current = transitioned;
+        }
+
+        Assert.Equal(AnalysisJobState.Completed, current.State);
+        Assert.Null(current.Lease);
+        Assert.Equal(Now.AddSeconds(6), current.CompletedAtUtc);
+    }
+
+    [Fact]
+    public async Task RetryableFailureHonorsBackoffAndBecomesTerminalAtAttemptLimit()
+    {
+        using var database = new TemporaryDatabase();
+        var (_, store) = await CreateStoreAsync(database);
+        var chunk = CreateChunk("chunk-00000000000000000000000000000006");
+        await store.IngestCommittedAsync(chunk);
+        var job = CreatePendingJob(
+            Guid.Parse("40000000-0000-0000-0000-000000000001"),
+            chunk.Id,
+            maxAttempts: 2);
+        await store.EnqueueAsync(job);
+
+        var firstClaim = await store.TryClaimNextAsync(
+            "worker-a",
+            Now,
+            TimeSpan.FromMinutes(5));
+        Assert.NotNull(firstClaim);
+        var retryable = await store.TryFailAsync(
+            firstClaim.Lease!,
+            new AnalysisJobFailure(
+                AnalysisJobErrorCode.ProviderUnavailable,
+                "provider offline"),
+            AnalysisFailureDisposition.Retryable,
+            Now.AddSeconds(1),
+            TimeSpan.FromSeconds(30));
+        Assert.NotNull(retryable);
+
+        Assert.Equal(AnalysisJobState.FailedRetryable, retryable.State);
+        Assert.Equal(Now.AddSeconds(31), retryable.NotBeforeUtc);
+        Assert.Null(await store.TryClaimNextAsync(
+            "worker-b",
+            Now.AddSeconds(30),
+            TimeSpan.FromMinutes(5)));
+
+        var secondClaim = await store.TryClaimNextAsync(
+            "worker-b",
+            Now.AddSeconds(31),
+            TimeSpan.FromMinutes(5));
+        Assert.NotNull(secondClaim);
+        var terminal = await store.TryFailAsync(
+            secondClaim.Lease!,
+            new AnalysisJobFailure(AnalysisJobErrorCode.ProviderUnavailable),
+            AnalysisFailureDisposition.Retryable,
+            Now.AddSeconds(32),
+            TimeSpan.FromSeconds(30));
+        Assert.NotNull(terminal);
+
+        Assert.Equal(AnalysisJobState.FailedTerminal, terminal.State);
+        Assert.Equal(2, terminal.Attempt);
+        Assert.Null(terminal.NotBeforeUtc);
+        Assert.Equal(Now.AddSeconds(32), terminal.CompletedAtUtc);
+    }
+
+    [Fact]
+    public async Task ExpiredLeaseRecoveryRetriesWhenPossibleAndTerminatesAtLimit()
+    {
+        using var database = new TemporaryDatabase();
+        var (_, store) = await CreateStoreAsync(database);
+        var retryChunk = CreateChunk("chunk-00000000000000000000000000000007");
+        var terminalChunk = CreateChunk("chunk-00000000000000000000000000000008");
+        await store.IngestCommittedAsync(retryChunk);
+        await store.IngestCommittedAsync(terminalChunk);
+        var retryJob = CreatePendingJob(
+            Guid.Parse("50000000-0000-0000-0000-000000000001"),
+            retryChunk.Id,
+            maxAttempts: 2);
+        var terminalJob = CreatePendingJob(
+            Guid.Parse("50000000-0000-0000-0000-000000000002"),
+            terminalChunk.Id,
+            analysisVersion: "analysis-v2",
+            maxAttempts: 1);
+        await store.EnqueueAsync(retryJob);
+        await store.EnqueueAsync(terminalJob);
+        var firstClaim = await store.TryClaimNextAsync(
+            "worker-a",
+            Now,
+            TimeSpan.FromMinutes(1));
+        Assert.NotNull(firstClaim);
+        var secondClaim = await store.TryClaimNextAsync(
+            "worker-b",
+            Now,
+            TimeSpan.FromMinutes(1));
+        Assert.NotNull(secondClaim);
+
+        Assert.Equal(2, await store.RecoverExpiredLeasesAsync(
+            Now.AddMinutes(1),
+            TimeSpan.FromSeconds(15)));
+
+        var first = await ((IAnalysisJobStore)store).GetAsync(firstClaim.Id);
+        var second = await ((IAnalysisJobStore)store).GetAsync(secondClaim.Id);
+        Assert.NotNull(first);
+        Assert.NotNull(second);
+        var retryable = first.MaxAttempts == 2 ? first : second;
+        var terminal = first.MaxAttempts == 1 ? first : second;
+        Assert.Equal(AnalysisJobState.FailedRetryable, retryable.State);
+        Assert.Equal(AnalysisJobErrorCode.LeaseExpired, retryable.Failure?.Code);
+        Assert.Equal(Now.AddMinutes(1).AddSeconds(15), retryable.NotBeforeUtc);
+        Assert.Equal(AnalysisJobState.FailedTerminal, terminal.State);
+        Assert.Equal(AnalysisJobErrorCode.LeaseExpired, terminal.Failure?.Code);
+
+        Assert.Null(await store.TryTransitionAsync(
+            firstClaim.Lease!,
+            AnalysisJobState.Claimed,
+            AnalysisJobState.Extracting,
+            Now.AddMinutes(1).AddSeconds(1)));
+    }
+
+    [Fact]
+    public async Task PendingAndRetryableJobsCanBeCancelledButActiveJobsCannot()
+    {
+        using var database = new TemporaryDatabase();
+        var (_, store) = await CreateStoreAsync(database);
+        var firstChunk = CreateChunk("chunk-00000000000000000000000000000009");
+        var secondChunk = CreateChunk("chunk-00000000000000000000000000000010");
+        await store.IngestCommittedAsync(firstChunk);
+        await store.IngestCommittedAsync(secondChunk);
+        var pending = CreatePendingJob(
+            Guid.Parse("60000000-0000-0000-0000-000000000001"),
+            firstChunk.Id);
+        var active = CreatePendingJob(
+            Guid.Parse("60000000-0000-0000-0000-000000000002"),
+            secondChunk.Id,
+            analysisVersion: "analysis-v2");
+        await store.EnqueueAsync(pending);
+        await store.EnqueueAsync(active);
+
+        var cancelled = await store.TryCancelAsync(
+            pending.Id,
+            Now.AddSeconds(1));
+        Assert.NotNull(cancelled);
+        Assert.Equal(AnalysisJobState.Cancelled, cancelled.State);
+        Assert.Equal(Now.AddSeconds(1), cancelled.CompletedAtUtc);
+
+        var claimed = await store.TryClaimNextAsync(
+            "worker-a",
+            Now.AddSeconds(2),
+            TimeSpan.FromMinutes(5));
+        Assert.NotNull(claimed);
+        Assert.Equal(active.Id, claimed.Id);
+        Assert.Null(await store.TryCancelAsync(active.Id, Now.AddSeconds(3)));
+    }
+
+    [Fact]
+    public void StoreRequiresFullyQualifiedEvidenceRoot()
+    {
+        using var database = new TemporaryDatabase();
+        var factory = new SqliteConnectionFactory(database.DatabasePath);
+
+        Assert.Throws<ArgumentException>(() => new SqliteCaptureAnalysisStore(
+            factory,
+            "relative-evidence"));
+    }
+
+    private static async Task<(SqliteConnectionFactory Factory, SqliteCaptureAnalysisStore Store)>
+        CreateStoreAsync(TemporaryDatabase database)
+    {
+        var factory = new SqliteConnectionFactory(database.DatabasePath);
+        await new SqliteDatabaseInitializer(factory).InitializeAsync();
+        return (factory, new SqliteCaptureAnalysisStore(factory, database.EvidenceRoot));
+    }
+
+    private static CaptureChunk CreateChunk(
+        string id,
+        ulong persistenceGeneration = 1,
+        ulong targetEpoch = 2,
+        long videoByteCount = 4096,
+        DateTimeOffset? ingestedAt = null,
+        CaptureChunkAvailability availability = CaptureChunkAvailability.Available)
+    {
+        var start = Now.ToOffset(TimeSpan.FromHours(8));
+        return new CaptureChunk(
+            id,
+            new EvidenceRelativePath($"chunks/{id}/capture.mp4"),
+            new EvidenceRelativePath($"chunks/{id}/manifest.json"),
+            new TimeRange(start, start.AddMinutes(1)),
+            frameCount: 6,
+            videoWidth: 1920,
+            videoHeight: 1080,
+            frameRateNumerator: 1,
+            frameRateDenominator: 10,
+            videoByteCount,
+            persistenceGeneration,
+            targetEpoch,
+            committedAtUtc: Now.AddMinutes(1),
+            ingestedAtUtc: ingestedAt ?? Now.AddMinutes(2),
+            availability);
+    }
+
+    private static async Task SetChunkAvailabilityAsync(
+        SqliteConnectionFactory factory,
+        string chunkId,
+        CaptureChunkAvailability availability)
+    {
+        await using var connection = await factory.OpenConnectionAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            UPDATE capture_chunks
+            SET availability = $availability
+            WHERE id = $id;
+            """;
+        command.Parameters.AddWithValue("$availability", (int)availability);
+        command.Parameters.AddWithValue("$id", chunkId);
+
+        Assert.Equal(1, await command.ExecuteNonQueryAsync());
+    }
+
+    private static AnalysisJob CreatePendingJob(
+        Guid id,
+        string chunkId,
+        char fingerprintCharacter = 'A',
+        string analysisVersion = "analysis-v1",
+        int maxAttempts = 3,
+        DateTimeOffset? createdAt = null)
+    {
+        return AnalysisJob.CreatePending(
+            id,
+            chunkId,
+            ProviderId,
+            providerProfileRevision: 1,
+            analysisVersion,
+            new string(fingerprintCharacter, 64),
+            maxAttempts,
+            createdAt ?? Now);
+    }
+
+    private sealed class TemporaryDatabase : IDisposable
+    {
+        private readonly string _root = Path.Combine(
+            Path.GetTempPath(),
+            "WinDayFlow.CaptureAnalysis.Tests",
+            Guid.NewGuid().ToString("N"));
+
+        public string DatabasePath => Path.Combine(_root, "data", "windayflow.db");
+
+        public string EvidenceRoot => Path.Combine(_root, "evidence");
+
+        public void Dispose()
+        {
+            if (!Directory.Exists(_root))
+            {
+                return;
+            }
+
+            try
+            {
+                Directory.Delete(_root, recursive: true);
+            }
+            catch (IOException)
+            {
+            }
+        }
+    }
+}

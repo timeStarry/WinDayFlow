@@ -45,6 +45,12 @@ public sealed class SqliteTimelineRepositoryTests
         Assert.True(await reader.ReadAsync());
         Assert.Equal(4, reader.GetInt32(0));
         Assert.Equal(1, reader.GetInt32(1));
+        Assert.True(await reader.ReadAsync());
+        Assert.Equal(5, reader.GetInt32(0));
+        Assert.Equal(1, reader.GetInt32(1));
+        Assert.True(await reader.ReadAsync());
+        Assert.Equal(6, reader.GetInt32(0));
+        Assert.Equal(1, reader.GetInt32(1));
         Assert.False(await reader.ReadAsync());
     }
 

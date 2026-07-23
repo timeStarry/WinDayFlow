@@ -5,7 +5,7 @@ namespace WinDayFlow.Infrastructure.Persistence;
 
 public sealed class SqliteDatabaseInitializer
 {
-    private const int LatestSchemaVersion = 4;
+    private const int LatestSchemaVersion = 6;
 
     private const string CreateMigrationTableSql = """
         CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -268,12 +268,257 @@ public sealed class SqliteDatabaseInitializer
         );
         """;
 
+    private const string MigrationVersion5Sql = """
+        CREATE TABLE capture_chunks (
+            id TEXT NOT NULL PRIMARY KEY CHECK (
+                length(id) BETWEEN 1 AND 80
+                AND id = lower(id)
+                AND id NOT GLOB '*[^a-z0-9_-]*'
+            ),
+            video_relative_path TEXT NOT NULL UNIQUE COLLATE NOCASE CHECK (
+                video_relative_path = 'chunks/' || id || '/capture.mp4'
+            ),
+            manifest_relative_path TEXT NOT NULL UNIQUE COLLATE NOCASE CHECK (
+                manifest_relative_path = 'chunks/' || id || '/manifest.json'
+            ),
+            start_utc_ticks INTEGER NOT NULL CHECK (start_utc_ticks >= 0),
+            start_offset_minutes INTEGER NOT NULL CHECK (
+                start_offset_minutes BETWEEN -840 AND 840
+            ),
+            end_utc_ticks INTEGER NOT NULL CHECK (end_utc_ticks > start_utc_ticks),
+            end_offset_minutes INTEGER NOT NULL CHECK (
+                end_offset_minutes BETWEEN -840 AND 840
+            ),
+            frame_count INTEGER NOT NULL CHECK (frame_count > 0),
+            video_width INTEGER NOT NULL CHECK (
+                video_width >= 2 AND video_width % 2 = 0
+            ),
+            video_height INTEGER NOT NULL CHECK (
+                video_height >= 2 AND video_height % 2 = 0
+            ),
+            frame_rate_numerator INTEGER NOT NULL CHECK (frame_rate_numerator > 0),
+            frame_rate_denominator INTEGER NOT NULL CHECK (frame_rate_denominator > 0),
+            video_byte_count INTEGER NOT NULL CHECK (
+                video_byte_count BETWEEN 1 AND 67108864
+            ),
+            persistence_generation_hex TEXT NOT NULL CHECK (
+                length(persistence_generation_hex) = 16
+                AND persistence_generation_hex NOT GLOB '*[^0-9A-F]*'
+                AND persistence_generation_hex <> '0000000000000000'
+            ),
+            target_epoch_hex TEXT NOT NULL CHECK (
+                length(target_epoch_hex) = 16
+                AND target_epoch_hex NOT GLOB '*[^0-9A-F]*'
+                AND target_epoch_hex <> '0000000000000000'
+            ),
+            committed_at_utc_ticks INTEGER NOT NULL CHECK (committed_at_utc_ticks >= 0),
+            ingested_at_utc_ticks INTEGER NOT NULL CHECK (ingested_at_utc_ticks >= 0),
+            availability INTEGER NOT NULL CHECK (availability BETWEEN 0 AND 2)
+        );
+
+        CREATE INDEX ix_capture_chunks_range
+            ON capture_chunks(start_utc_ticks, end_utc_ticks, id);
+
+        CREATE TABLE analysis_jobs (
+            id TEXT NOT NULL PRIMARY KEY CHECK (
+                length(id) = 36 AND id = lower(id)
+            ),
+            capture_chunk_id TEXT NOT NULL,
+            provider_profile_id TEXT NOT NULL CHECK (
+                length(provider_profile_id) = 36
+                AND provider_profile_id = lower(provider_profile_id)
+            ),
+            provider_profile_revision INTEGER NOT NULL CHECK (
+                provider_profile_revision > 0
+            ),
+            analysis_version TEXT NOT NULL CHECK (
+                length(analysis_version) BETWEEN 1 AND 128
+                AND analysis_version = trim(analysis_version)
+            ),
+            input_fingerprint TEXT NOT NULL CHECK (
+                length(input_fingerprint) = 64
+                AND input_fingerprint NOT GLOB '*[^0-9A-F]*'
+            ),
+            state INTEGER NOT NULL CHECK (state BETWEEN 0 AND 9),
+            attempt INTEGER NOT NULL CHECK (attempt >= 0),
+            max_attempts INTEGER NOT NULL CHECK (max_attempts BETWEEN 1 AND 100),
+            not_before_utc_ticks INTEGER NULL CHECK (
+                not_before_utc_ticks IS NULL OR not_before_utc_ticks >= 0
+            ),
+            lease_owner TEXT NULL CHECK (
+                lease_owner IS NULL
+                OR (
+                    length(lease_owner) BETWEEN 1 AND 128
+                    AND lease_owner = trim(lease_owner)
+                    AND instr(lease_owner, char(0)) = 0
+                )
+            ),
+            lease_token TEXT NULL CHECK (
+                lease_token IS NULL
+                OR (
+                    length(lease_token) = 32
+                    AND lease_token NOT GLOB '*[^0-9a-f]*'
+                )
+            ),
+            lease_expires_at_utc_ticks INTEGER NULL CHECK (
+                lease_expires_at_utc_ticks IS NULL OR lease_expires_at_utc_ticks >= 0
+            ),
+            error_code INTEGER NOT NULL CHECK (
+                error_code IN (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 255)
+            ),
+            error_detail TEXT NULL CHECK (
+                error_detail IS NULL
+                OR (
+                    length(error_detail) <= 1000
+                    AND instr(error_detail, char(0)) = 0
+                )
+            ),
+            created_at_utc_ticks INTEGER NOT NULL CHECK (created_at_utc_ticks >= 0),
+            updated_at_utc_ticks INTEGER NOT NULL CHECK (
+                updated_at_utc_ticks >= created_at_utc_ticks
+            ),
+            completed_at_utc_ticks INTEGER NULL CHECK (
+                completed_at_utc_ticks IS NULL
+                OR completed_at_utc_ticks >= created_at_utc_ticks
+            ),
+            FOREIGN KEY (capture_chunk_id) REFERENCES capture_chunks(id) ON DELETE RESTRICT,
+            UNIQUE (
+                capture_chunk_id,
+                provider_profile_id,
+                provider_profile_revision,
+                analysis_version
+            ),
+            CHECK (attempt <= max_attempts),
+            CHECK (
+                (state = 0 AND attempt = 0)
+                OR state = 9
+                OR (state NOT IN (0, 9) AND attempt > 0)
+            ),
+            CHECK (state <> 7 OR attempt < max_attempts),
+            CHECK (
+                (state IN (0, 7) AND not_before_utc_ticks IS NOT NULL)
+                OR (state NOT IN (0, 7) AND not_before_utc_ticks IS NULL)
+            ),
+            CHECK (
+                (state BETWEEN 1 AND 5
+                    AND lease_owner IS NOT NULL
+                    AND lease_token IS NOT NULL
+                    AND lease_expires_at_utc_ticks IS NOT NULL
+                    AND lease_expires_at_utc_ticks > updated_at_utc_ticks)
+                OR
+                (state NOT BETWEEN 1 AND 5
+                    AND lease_owner IS NULL
+                    AND lease_token IS NULL
+                    AND lease_expires_at_utc_ticks IS NULL)
+            ),
+            CHECK (
+                (state IN (7, 8) AND error_code <> 0)
+                OR
+                (state NOT IN (7, 8) AND error_code = 0 AND error_detail IS NULL)
+            ),
+            CHECK (
+                (state IN (6, 8, 9) AND completed_at_utc_ticks IS NOT NULL)
+                OR (state NOT IN (6, 8, 9) AND completed_at_utc_ticks IS NULL)
+            )
+        );
+
+        CREATE INDEX ix_analysis_jobs_eligible
+            ON analysis_jobs(state, not_before_utc_ticks, created_at_utc_ticks, id);
+
+        CREATE INDEX ix_analysis_jobs_expired_lease
+            ON analysis_jobs(state, lease_expires_at_utc_ticks, id);
+        """;
+
+    private const string MigrationVersion6Sql = """
+        CREATE TABLE ai_provider_profiles (
+            id TEXT NOT NULL PRIMARY KEY CHECK (
+                length(id) = 36 AND id = lower(id)
+            ),
+            display_name TEXT NOT NULL CHECK (
+                length(display_name) BETWEEN 1 AND 80
+                AND display_name = trim(display_name)
+                AND instr(display_name, char(0)) = 0
+            ),
+            kind INTEGER NOT NULL CHECK (kind = 0),
+            base_endpoint TEXT NOT NULL CHECK (
+                length(base_endpoint) BETWEEN 1 AND 4096
+                AND base_endpoint = trim(base_endpoint)
+                AND instr(base_endpoint, char(0)) = 0
+            ),
+            model TEXT NOT NULL CHECK (
+                length(model) BETWEEN 1 AND 200
+                AND model = trim(model)
+                AND instr(model, char(0)) = 0
+            ),
+            request_timeout_ticks INTEGER NOT NULL CHECK (
+                request_timeout_ticks BETWEEN 1000000 AND 6000000000
+            ),
+            revision INTEGER NOT NULL CHECK (revision > 0),
+            is_active INTEGER NOT NULL CHECK (is_active IN (0, 1)),
+            api_key_ciphertext BLOB NULL CHECK (
+                api_key_ciphertext IS NULL
+                OR (
+                    typeof(api_key_ciphertext) = 'blob'
+                    AND length(api_key_ciphertext) BETWEEN 1 AND 65536
+                )
+            ),
+            api_key_salt BLOB NULL CHECK (
+                api_key_salt IS NULL
+                OR (
+                    typeof(api_key_salt) = 'blob'
+                    AND length(api_key_salt) = 32
+                )
+            ),
+            api_key_protection_version INTEGER NULL CHECK (
+                api_key_protection_version IS NULL
+                OR api_key_protection_version = 1
+            ),
+            validated_revision INTEGER NULL CHECK (
+                validated_revision IS NULL
+                OR (validated_revision > 0 AND validated_revision <= revision)
+            ),
+            validated_at_utc_ticks INTEGER NULL CHECK (
+                validated_at_utc_ticks IS NULL OR validated_at_utc_ticks >= 0
+            ),
+            created_at_utc_ticks INTEGER NOT NULL CHECK (created_at_utc_ticks >= 0),
+            updated_at_utc_ticks INTEGER NOT NULL CHECK (
+                updated_at_utc_ticks >= created_at_utc_ticks
+            ),
+            CHECK (
+                (api_key_ciphertext IS NULL
+                    AND api_key_salt IS NULL
+                    AND api_key_protection_version IS NULL)
+                OR
+                (api_key_ciphertext IS NOT NULL
+                    AND api_key_salt IS NOT NULL
+                    AND api_key_protection_version IS NOT NULL)
+            ),
+            CHECK (
+                (validated_revision IS NULL AND validated_at_utc_ticks IS NULL)
+                OR (validated_revision IS NOT NULL AND validated_at_utc_ticks IS NOT NULL)
+            )
+        );
+
+        CREATE UNIQUE INDEX ux_ai_provider_profiles_single_active
+            ON ai_provider_profiles(is_active)
+            WHERE is_active = 1;
+
+        CREATE INDEX ix_analysis_jobs_provider_revision_state
+            ON analysis_jobs(provider_profile_id, provider_profile_revision, state);
+
+        UPDATE app_settings
+        SET cloud_analysis_enabled = 0
+        WHERE id = 1;
+        """;
+
     private static readonly IReadOnlyList<Migration> Migrations =
     [
         new(1, MigrationVersion1Sql),
         new(2, MigrationVersion2Sql),
         new(3, MigrationVersion3Sql),
         new(4, MigrationVersion4Sql),
+        new(5, MigrationVersion5Sql),
+        new(6, MigrationVersion6Sql),
     ];
 
     private readonly SqliteConnectionFactory _connectionFactory;
