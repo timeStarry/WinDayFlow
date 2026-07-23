@@ -96,6 +96,140 @@ public sealed class AiProviderConfigurationServiceTests
     }
 
     [Fact]
+    public async Task SameOriginEndpointChangeWithoutReplacementPreservesCredential()
+    {
+        var initial = CreateSnapshot(revision: 3, validated: true);
+        var store = new TestProfileStore(initial);
+        var repository = new TestSettingsRepository(cloudAnalysisEnabled: true);
+        using var settings = new AppSettingsService(repository);
+        await settings.InitializeAsync();
+        using var service = CreateService(store, settings);
+        await service.InitializeAsync();
+
+        var saved = await service.SaveAsync(
+            initial.Profile.DisplayName,
+            "https://API.EXAMPLE.COM:443/compatible/v1",
+            initial.Profile.Model,
+            checked((int)initial.Profile.RequestTimeout.TotalSeconds),
+            replacementApiKey: null);
+
+        Assert.Equal(4, saved.Revision);
+        Assert.Equal("/compatible/v1/", saved.Profile.BaseEndpoint.AbsolutePath);
+        Assert.True(saved.HasApiKey);
+        Assert.Equal(
+            AiProviderCredentialUpdateKind.Preserve,
+            store.LastCredentialUpdate?.Kind);
+        Assert.False(service.IsCloudAnalysisEnabled);
+    }
+
+    [Fact]
+    public async Task ChangedRemoteOriginWithoutReplacementIsRejectedWithoutChangingState()
+    {
+        var initial = CreateSnapshot(revision: 3, validated: true);
+        var store = new TestProfileStore(initial);
+        var repository = new TestSettingsRepository(cloudAnalysisEnabled: true);
+        using var settings = new AppSettingsService(repository);
+        await settings.InitializeAsync();
+        using var service = CreateService(store, settings);
+        await service.InitializeAsync();
+
+        var exception = await Assert.ThrowsAsync<AiProviderException>(() =>
+            service.SaveAsync(
+                initial.Profile.DisplayName,
+                "https://api.other.example/v1",
+                initial.Profile.Model,
+                checked((int)initial.Profile.RequestTimeout.TotalSeconds),
+                replacementApiKey: null));
+
+        Assert.Equal(AiProviderErrorCode.InvalidConfiguration, exception.ErrorCode);
+        Assert.Same(initial, service.Current);
+        Assert.Same(initial, store.Current);
+        Assert.Equal(0, store.SaveCount);
+        Assert.Null(store.LastCredentialUpdate);
+        Assert.True(service.IsCloudAnalysisEnabled);
+        Assert.Empty(repository.SavedSettings);
+    }
+
+    [Fact]
+    public async Task SwitchingToLoopbackWithoutReplacementClearsCredential()
+    {
+        var initial = CreateSnapshot(revision: 3, validated: true);
+        var store = new TestProfileStore(initial);
+        var repository = new TestSettingsRepository(cloudAnalysisEnabled: true);
+        using var settings = new AppSettingsService(repository);
+        await settings.InitializeAsync();
+        using var service = CreateService(store, settings);
+        await service.InitializeAsync();
+
+        var saved = await service.SaveAsync(
+            "Local provider",
+            "http://127.0.0.1:11434/v1",
+            "local-vision",
+            requestTimeoutSeconds: 30,
+            replacementApiKey: null);
+
+        Assert.Equal(4, saved.Revision);
+        Assert.True(saved.Profile.IsLoopback);
+        Assert.False(saved.HasApiKey);
+        Assert.Equal(
+            AiProviderCredentialUpdateKind.Clear,
+            store.LastCredentialUpdate?.Kind);
+        Assert.False(service.IsCloudAnalysisEnabled);
+    }
+
+    [Fact]
+    public async Task ChangedRemoteOriginWithReplacementUsesOnlyNewCredential()
+    {
+        var initial = CreateSnapshot(revision: 3, validated: true);
+        var store = new TestProfileStore(initial);
+        var repository = new TestSettingsRepository(cloudAnalysisEnabled: true);
+        using var settings = new AppSettingsService(repository);
+        await settings.InitializeAsync();
+        using var service = CreateService(store, settings);
+        await service.InitializeAsync();
+
+        var saved = await service.SaveAsync(
+            "Replacement provider",
+            "https://api.other.example/v1",
+            "other-vision",
+            requestTimeoutSeconds: 30,
+            replacementApiKey: "new-provider-key");
+
+        Assert.Equal(4, saved.Revision);
+        Assert.True(saved.HasApiKey);
+        Assert.Equal(
+            AiProviderCredentialUpdateKind.Replace,
+            store.LastCredentialUpdate?.Kind);
+        Assert.Equal(
+            "new-provider-key",
+            store.LastCredentialUpdate?.GetReplacement());
+        Assert.False(service.IsCloudAnalysisEnabled);
+    }
+
+    [Fact]
+    public async Task InitialLoopbackSaveWithoutCredentialUsesClearUpdate()
+    {
+        var store = new TestProfileStore(current: null);
+        var repository = new TestSettingsRepository(cloudAnalysisEnabled: false);
+        using var settings = new AppSettingsService(repository);
+        await settings.InitializeAsync();
+        using var service = CreateService(store, settings);
+        await service.InitializeAsync();
+
+        var saved = await service.SaveAsync(
+            "Local provider",
+            "http://localhost:11434/v1",
+            "local-vision",
+            requestTimeoutSeconds: 30,
+            replacementApiKey: null);
+
+        Assert.False(saved.HasApiKey);
+        Assert.Equal(
+            AiProviderCredentialUpdateKind.Clear,
+            store.LastCredentialUpdate?.Kind);
+    }
+
+    [Fact]
     public async Task FailedStoreSaveLeavesCloudAnalysisDisabledAndCurrentUnchanged()
     {
         var initial = CreateSnapshot(revision: 2, validated: true);

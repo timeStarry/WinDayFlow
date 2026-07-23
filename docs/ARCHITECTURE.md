@@ -275,7 +275,10 @@ Infrastructure -> Application, Domain
 Capture.Interop -> Application
 
 Current: Capture.Interop <-> Capture.Native is built and integration-tested
-Runtime: App remains unavailable until monitor/owner wiring and writer activation gates close
+Default runtime: App registers the unavailable backend; production capture is off
+Dev-live runtime: an explicitly gated x64 bundle composes monitor, owner, writer, and chunk wakeups
+Analysis runtime: App always composes scanner, durable jobs, native extraction,
+                  provider, and Timeline commit
 ```
 
 `ICaptureService` and `ICaptureBackend` are owned by Application. The
@@ -294,25 +297,31 @@ callback path closes native authorization admission before system-event
 callbacks return. An explicit asynchronous owner quiesces by applying Block,
 stopping, joining, and destroying in order;
 `SafeHandle` remains a final fallback rather than the normal shutdown proof.
-The native backend remains unregistered. A synchronous Windows foreground
-target-verifier foundation now exists, but it is not connected to the native
-owner or live writer. An event-driven monitor foundation now synchronously
+The default/production App registers the unavailable backend. The x64 dev-live
+composition registers one `NativeCaptureRuntimeOwner` instance as the backend,
+chunk-commit notifier, settings commit barrier, runtime authorization, and
+native privacy-signal sink. A synchronous Windows foreground target verifier is
+connected to that owner through an event-driven monitor, which synchronously
 invalidates managed admission and target continuity, closes native admission,
 applies a generation-bound native barrier, and asynchronously re-observes
 through one Windows event owner thread. Its hidden top-level HWND receives
-display-topology, current-session WTS, and suspend/resume notifications, but the
-monitor is also not connected to the App or native owner. Image-bound
-publisher-signer verification, unique hosted-app child attribution,
-presentation notifications, periodic storage refresh, App/native live
-composition, and the dynamic privacy Pause/Stop policy remain activation gates.
+display-topology, current-session WTS, and suspend/resume notifications. The
+monitor is hosted and disposed before its owner. Dev-live adds a narrow,
+non-production policy that admits only unpackaged/classic foreground
+`WinDayFlow.App.exe` and `cmd.exe` targets with a present non-empty title. This
+basename policy is not signer proof. Image-bound publisher-signer verification,
+unique hosted-app child attribution, complete presentation notifications,
+periodic storage refresh, and real privacy-transition smoke remain production
+activation gates.
 The bounded title-read, conservative window-location invalidation,
 display-scoped authorization, strict DXGI resolver, native target observer, and
 pre/post fingerprinted frame-source gates are closed. A C-ABI-owned controller
 now composes the worker with held stage permits and the DXGI/WIC/Media
-Foundation/storage components, but production keeps that controller in disabled
-activation mode. The native foundation does not reference managed UI or domain
-assemblies. The App
-project may reference concrete adapters for dependency-injection registration;
+Foundation/storage components. Production keeps that controller in disabled
+activation mode; only the separately compiled dev-live DLL enables it and adds
+`ScreenCapture | H264Chunks`. The native foundation does not reference managed
+UI or domain assemblies. The App project may reference concrete adapters for
+dependency-injection registration;
 feature code consumes their inward-facing contracts. The domain project must
 not reference WinUI, SQLite, HTTP, Windows App SDK, or the native capture
 implementation.
@@ -419,8 +428,9 @@ authorize live capture or live window enumeration.
 Core," fixes the additive C ABI v1 runtime-authorization layout, target and
 instance identity, native persistence generations, shared/unique write-permit
 linearization, revoke and quiescence ordering, and the complete capability mask.
-It deliberately leaves `ScreenCapture` disabled until a real writer and Windows
-observers use those contracts end to end.
+The production build deliberately leaves `ScreenCapture` disabled. The separate
+dev-live compile flavor enables it only after composing the real writer and
+Windows observers under the same contracts.
 
 [ADR 0004](adr/0004-owner-bound-command-admission.md), "Owner-Bound Capture
 Command Admission," closes the Boolean-to-backend Start/Resume TOCTOU boundary
@@ -440,8 +450,9 @@ Capture Privacy Monitor," fixes callback-time latch and target invalidation, an
 independent observation generation, the forced native barrier and single
 generation-bound publication protocol, WinEvent thread ownership, worker
 coalescing, stale-Allow compensation, sanitized terminal faults, and teardown
-ordering. It remains inactive and does not define Pause/Stop policy or authorize
-a real writer.
+ordering. It remains inactive in production. The dev-live host activates it as
+a narrow manual-test harness; that activation does not satisfy the production
+identity or lifecycle-smoke gates.
 
 [ADR 0007](adr/0007-bounded-window-title-and-location-invalidation.md),
 "Bounded Window Title Reads and Location Invalidation," fixes the unique
@@ -469,15 +480,17 @@ does not interrupt an already-held persistence permit or activate a writer.
 target observer, pre/post fingerprinted DXGI frame source, bounded WIC scaler,
 in-memory H.264 writer, privacy-safe manifest, whole-directory atomic store,
 required-event reservation, authorization-epoch post-check, and runtime token
-mailbox. These components are independently tested but remain disconnected from
-C ABI Start/Resume, so they do not activate capture.
+mailbox. These components are independently tested and are connected to C ABI
+Start/Resume only in the explicitly compiled dev-live controller. The production
+controller remains disabled.
 
 [ADR 0011](adr/0011-authority-checked-native-capture-worker-orchestration.md),
 "Authority-Checked Native Capture Worker Orchestration," composes those
 components behind a fakeable worker backend, enforces fresh target/permit guards
 for each stage, defines Pause epochs and graceful Stop, and makes validated
 required-event insertion the final publication linearization point. The worker
-and real Windows adapter remain behind the closed C ABI capability boundary.
+and real Windows adapter remain behind the closed production C ABI capability
+boundary and the explicit dev-live build gate.
 
 [ADR 0012](adr/0012-run-isolated-native-capture-instance-control.md),
 "Run-Isolated Native Capture Instance Control," makes one controller own native
@@ -485,7 +498,9 @@ authorization, admission, lifecycle state, worker/backend, event delivery, and
 runtime shutdown. It adds run-ID-guarded checkpoints, provisional authorization
 Pause, single-flight Stop finalization, and required terminal-event capacity.
 The production C ABI uses its disabled mode, so this ownership change does not
-advertise or start live capture.
+advertise or start live capture. The dev-live C ABI selects enabled mode and
+advertises only `ScreenCapture | H264Chunks` in addition to the safety
+capabilities.
 
 `CaptureStatus` is a stable machine-readable contract, not just display text.
 It carries an unsigned 64-bit `Sequence`, `CaptureReasonCode`, and
@@ -587,14 +602,16 @@ state, or stamp rejection is nonfatal; malformed native output and internal
 native failures quarantine the owner. A successful explicit Stop advances and
 reconciles runtime authorization before another stamp can be issued.
 
-The current sticky automatic Stop is likewise a conservative foundation, not
-the final dynamic-policy model. The event monitor and owner must explicitly
-classify lock, application/window exclusion, and Unknown transitions as either
-an evidence Pause that preserves a quiescent session or a sticky session Stop
-that tears it down. Recovery, target changes, and repeated signals require
-tests for both paths. This milestone does not implement that distinction.
+The Application service tracks recording, user-paused, and user-stopped intent
+separately from transient runtime authorization. Runtime invalidation can own a
+resumable Pause, while an explicit user Pause/Stop remains sticky and prevents
+automatic recovery. A persisted authorized recording intent is reconciled to a
+fresh Start only after runtime authorization becomes current. Targeted tests
+cover startup, transient invalidation recovery, and sticky user intent. A
+clean-profile dev-live smoke must still prove that behavior before production
+activation.
 
-The inactive `WindowsCapturePrivacyProbe` can synchronously sample documented
+`WindowsCapturePrivacyProbe` can synchronously sample documented
 Windows 10 1809+ signals for session unlock, input desktop, RDP/remote control,
 Windows Presentation Mode, and storage headroom. API failure or ambiguity is
 isolated per signal and becomes Unknown while later signals continue sampling;
@@ -606,21 +623,21 @@ independently and returns only a matched rule ID. Each observed identity and
 title is `Unknown`, known `Absent`, or `Present`; Unknown and malformed present
 identities fail closed when a rule requires them, while Absent is a conclusive
 non-match.
-The verifier does not compose a policy decision and is not yet wired into the
-runtime owner. Image-bound publisher-signer verification, unique hosted-app
-child attribution, presentation notifications, periodic storage refresh,
-dynamic evidence-Pause versus sticky-Stop classification, real-writer permit
-integration, and App registration remain pending. The inactive event monitor
+The verifier does not compose a policy decision by itself. Production leaves it
+unregistered; dev-live wires it through the monitor to the runtime owner and
+then applies a strict basename allowlist for classic `WinDayFlow.App.exe` and
+`cmd.exe` targets. Image-bound publisher-signer verification, unique hosted-app
+child attribution, complete presentation notifications, periodic storage
+refresh, and production policy remain pending. The event monitor
 supplies foreground, desktop, conservative window-object, display-topology,
 current-session, and power invalidation. Object events are not foreground or
 top-level identity proof, and recovery notifications only request a fresh
-barrier and sample. Phase 1 activates the implemented native backend
-only after those platform inputs and the complete screen-capture capability
-mask are present, then adds evidence-extraction
-interfaces under Capture.Interop. Capture options come from validated
-application settings; extraction is not added as an unrelated method on the
-lifecycle service. The adapter maps native events to `CaptureStatus` and
-`CaptureStatusChangedEventArgs`.
+barrier and sample. Production activation still requires those platform inputs
+and the complete reviewed screen-capture policy. Evidence extraction is already
+implemented as an independent root-bound interface under Capture.Interop; it is
+not an unrelated method on the lifecycle service. Capture options come from
+validated application settings, and the lifecycle adapter maps native events to
+`CaptureStatus` and `CaptureStatusChangedEventArgs`.
 
 Interop remains coarse-grained. There are no per-frame managed callbacks.
 Native events are queued and marshalled onto the appropriate managed
@@ -654,6 +671,11 @@ v1 foundation under `WinDayFlow.Capture.Native`. Its implemented boundary has:
   Duplication source with 8K pixel and 126.6 MiB packed/mapped BGRA ceilings,
   bounded even-dimension WIC scaler, real 64 MiB fail-closed in-memory H.264
   writer, and typed privacy-safe chunk manifest;
+- a root-bound Media Foundation/WIC analysis-evidence extractor that accepts a
+  canonical chunk identifier, uses no-follow source access and pre/post source
+  fingerprints, atomically publishes a strict v1 evidence manifest, and
+  revalidates per-frame SHA-256 on reuse and read; output is capped at 32 JPEGs,
+  2 MiB per frame, and 12 MiB total;
 - a two-phase same-volume chunk store that locks each no-follow directory
   identity, serializes the typed manifest internally, flushes both files in one
   staging directory, renames by the held source identity without overwrite,
@@ -678,7 +700,8 @@ v1 foundation under `WinDayFlow.Capture.Native`. Its implemented boundary has:
   lets the worker finish and join, and revokes afterward; privacy revoke still
   closes persistence first so stale work is discarded.
 
-This is a real component-level writer foundation, not a usable recorder. The
+This is a real production-disabled writer foundation plus a deliberately narrow
+dev-live recorder, not a production recorder. The
 native and managed tests prove target/PID/display reuse rejection, target and
 instance epochs, persistence-generation invalidation, permit linearization,
 quiescence, timeout/failure quarantine, ABI layout, capability dependencies,
@@ -690,26 +713,63 @@ manifests, cross-instance-safe event reservation, and deterministic worker
 orchestration across Pause/Resume/Stop, every invalidation stage, topology
 rebuild, event failure, compensation retry, C ABI controller ownership,
 run-ID-guarded publication, and Stop single flight. They do not prove the
-end-to-end live desktop write path.
+end-to-end live desktop write path; that still requires a manual dev-live smoke.
 
 The complete live mask requires privacy guard, event queue, target-scoped and
 display-scoped authorization, persistence-generation barrier, deterministic
 stop, display-bound command admission, callback-time authorization
 invalidation, screen capture, and H.264 chunk capabilities. Evidence extraction
-is independent. The foundation currently advertises eight runtime-owner
-foundation capabilities: privacy guard, event queue, target-scoped
-authorization, persistence-generation barrier, deterministic stop,
-display-scoped authorization, display-bound command admission, and callback-time
-authorization invalidation. `ScreenCapture`, `H264Chunks`, and
-`EvidenceExtraction` remain deliberately
-disabled, so the live mask is incomplete. Authorized Start/Resume validate and
-consume a command stamp but return `NotImplemented` without creating a worker.
+is independent. Every build advertises eight runtime-owner foundation
+capabilities: privacy guard, event queue, target-scoped authorization,
+persistence-generation barrier, deterministic stop, display-scoped
+authorization, display-bound command admission, and callback-time authorization
+invalidation. The default build advertises none of `ScreenCapture`,
+`H264Chunks`, or `EvidenceExtraction`; its authorized Start/Resume path remains
+disabled. The dev-live native build adds `ScreenCapture | H264Chunks`, enables
+the controller, and starts the worker after valid command admission. Neither
+build advertises `EvidenceExtraction`; the strict extraction exports are
+consumed independently by the analysis adapter.
 Legacy command-admission capability bit 8 remains defined but is not advertised
 by a display-scoped DLL. Current owners require display-bound command-admission
 bit 10, so both old-client/new-DLL and new-client/old-DLL combinations fail at
 capability negotiation instead of at the first fully allowed authorization.
-The App continues to use `DenyCaptureRuntimeAuthorization` and
-`UnavailableCaptureBackend`, and the shell recording control remains disabled.
+The default App uses `DenyCaptureRuntimeAuthorization` and
+`UnavailableCaptureBackend`. The dev-live App registers one runtime owner across
+all capture/privacy contracts and feeds its chunk-completed notification into
+the analysis runner.
+
+Dev-live activation requires three independent gates: the native and managed
+projects must be compiled with `EnableDevLiveCapture=true`, publishing must also
+set `DevBundleBuild=true`, and the process must receive exactly one argument,
+`--enable-dev-live-capture`. The packaging script enforces the first two and
+rejects dev-live ARM64. The supported commands are:
+
+```powershell
+# Default development bundle: production capture posture
+pwsh -File .\scripts\Build-DevPackage.ps1 `
+  -Configuration Release `
+  -RuntimeIdentifier win-x64
+.\artifacts\dev\WinDayFlow-dev-x64\WinDayFlow.App.exe
+
+# Controlled x64 dev-live smoke bundle
+pwsh -File .\scripts\Build-DevPackage.ps1 `
+  -Configuration Release `
+  -RuntimeIdentifier win-x64 `
+  -EnableDevLiveCapture
+.\artifacts\dev\WinDayFlow-dev-live-x64\WinDayFlow.App.exe `
+  --enable-dev-live-capture
+```
+
+Omitting any gate selects the unavailable backend. Extra, missing, or
+differently spelled launch arguments do not activate capture.
+
+Manual dev-live acceptance also requires an unlocked local interactive desktop.
+Session lock, the secure desktop, and foreground targets outside the narrow
+`WinDayFlow.App.exe` / `cmd.exe` allowlist intentionally retain the fail-closed
+authorization state; the conservative defaults also pause for Remote Desktop
+and Windows Presentation Mode. A recording smoke must keep an allowed target in
+the foreground for longer than the default 10-second sampling interval before
+exercising graceful Stop and partial-chunk publication.
 
 The remaining activation gates are integration work beyond command admission,
 synchronous target observation, the bounded title worker, and conservative
@@ -721,13 +781,13 @@ selected HMONITOR/device key now has both a strict resolver and a frame source
 that revalidates the complete binding before and after acquisition. The
 controller-owned worker now composes target observation and a fresh permit
 around acquisition, WIC, H.264, staging, rename, and reserved-event publication.
-Remaining gates are the managed resumable-privacy-Pause versus sticky-Stop
-policy, filesystem interruption and disk-full integration, durable compensation
-across object/process loss, stale-staging recovery, committed-event replay,
-owner-epoch races, and consent-gated Windows lifecycle/live-desktop tests. Until
-those gates pass, no live frame or context metadata can be persisted and App DI
-must continue to register `DenyCaptureRuntimeAuthorization` and
-`UnavailableCaptureBackend`.
+Remaining production gates include filesystem interruption and disk-full
+integration, durable compensation across object/process loss, stale-staging
+recovery, committed-event replay, owner-epoch races, production-grade target
+attribution, and consent-gated Windows lifecycle/live-desktop tests. Until those
+gates pass, the production build must keep registering
+`DenyCaptureRuntimeAuthorization` and `UnavailableCaptureBackend`; only the
+explicitly gated dev-live harness may persist live frames.
 
 The safety core, target observer, runtime mailbox, event reservation, worker
 orchestration, and Windows backend adapter are original WinDayFlow work. The
@@ -835,25 +895,25 @@ with `[REDACTED]`; raw paths, titles, package identities, handles, and display
 keys must not enter logs or native events.
 
 Together with ADR 0007, this foundation closes the stable synchronous
-observation and bounded-title portions of the ADR 0003 target gate, not the
-complete live-activation gate. Live use remains blocked until all of the
-following are implemented and tested together:
+observation and bounded-title portions of the ADR 0003 target gate. Dev-live
+uses them under its restricted classic-process policy, but production live use
+remains blocked until all of the following are implemented and tested together:
 
 - primary publisher-signer verification bound to the running image;
 - unique child-application attribution for hosted Windows surfaces;
-- integration of the implemented WinEvent generation and location-invalidation
-  plus display-topology, current-session, and power source with the runtime
-  owner, presentation notifications, and periodic storage refresh, followed by
-  explicit evidence-Pause versus sticky-session-Stop classification;
-- writer-side use of the native HMONITOR/device-key resolver plus target/display
-  and generation/permit revalidation before and after acquisition; and
-- real acquisition, encoding, temporary output, atomic publication, metadata,
-  cleanup, and recovery under the native persistence-permit boundary.
+- production policy integration beyond the dev-live basename allowlist,
+  complete presentation notifications, and periodic storage refresh;
+- clean-profile startup-intent, evidence-Pause, sticky user Pause/Stop, and
+  repeated recovery smoke; and
+- clean-profile real acquisition, encoding, temporary output, atomic
+  publication, metadata, cleanup, and privacy-transition smoke under the native
+  persistence-permit boundary.
 
 ### 9.3 Event-Driven Privacy Monitor Foundation
 
-The inactive `WindowsCapturePrivacyMonitor` closes the polling-only race around
-the ADR 0005 verifier. One owner thread registers a never-shown, non-activating
+Production does not register `WindowsCapturePrivacyMonitor`; the dev-live host
+does, closing the polling-only race around the ADR 0005 verifier for controlled
+manual testing. One owner thread registers a never-shown, non-activating
 top-level HWND rather than a message-only window because it must receive system
 broadcasts. The same message pump owns current-session WTS registration,
 user32 suspend/resume registration, and `WINEVENT_OUTOFCONTEXT` hooks for
@@ -917,15 +977,16 @@ the callback bridge is released after clean unhook and conservatively retained
 only while native callback completion cannot be proven.
 
 Callback closure prevents new command admission and new native persistence
-permits, but it cannot revoke a permit already held by a future writer. The
+permits, but it cannot revoke a permit already held by the writer. The
 following Block barrier drains existing holders before acknowledging the
 generation; the writer must additionally recheck authority at acquisition,
 encode, metadata, rename, and committed-event boundaries. The present source
 covers conservative window-location, display-topology, current-session, and
 sleep/resume invalidation, but not presentation notifications or periodic
-storage refresh. The monitor does not choose evidence Pause versus sticky
-session Stop and is not registered in App dependency injection. See ADRs 0006,
-0007, and 0009 for the complete contract.
+storage refresh. The monitor itself does not own user intent: the Application
+service distinguishes runtime-owned resumable Pause from sticky user Pause/Stop.
+Only dev-live dependency injection registers the monitor. See ADRs 0006, 0007,
+and 0009 for the complete contract.
 
 Capture invariants:
 
@@ -960,6 +1021,22 @@ Pending/FailedRetryable -> Cancelled
 Committing -> Completed
 ```
 
+The current App host composes this workflow at startup. It initializes SQLite,
+settings, and provider configuration before starting a hosted background runner.
+The runner treats a full scan of committed `chunks/<id>/manifest.json` files as
+the source of truth; startup and chunk-completed events are only wake reasons.
+It idempotently stores chunks and jobs, fingerprints each source, invokes the
+root-bound native evidence extractor, calls the validated active
+OpenAI-compatible provider, and commits normalized Timeline entries with job
+completion in one SQLite transaction.
+
+Provider readiness requires a complete saved profile, a successful synthetic
+connection test for its current revision, explicit cloud-transfer enablement,
+and current settings at send time. A process-local send gate linearizes cloud
+disable persistence with creation of a new network task. Completed chunks are
+not reanalyzed merely because the provider profile revision changes, preserving
+user-edited Timeline history.
+
 Rules:
 
 - Only one worker may claim a job at a time.
@@ -968,6 +1045,17 @@ Rules:
 - Attempts are bounded and persisted.
 - Retry decisions use stable error codes, not display text.
 - Observation and activity outputs are schema-validated.
+- A commit-eligible provider result contains at least one activity and covers
+  the complete request range contiguously: the first `start_offset_ms` is `0`,
+  every later `start_offset_ms` equals the preceding `end_offset_ms`, and the
+  final `end_offset_ms` equals `range_duration_ms`. Leading, internal, and
+  trailing gaps are invalid.
+- Evidence uncertainty is represented by an activity covering the affected
+  interval with `unknown` labels; uncertainty never permits omitted time.
+- Empty or incomplete coverage maps to `ProviderResponseInvalid`, transitions
+  the job to `FailedTerminal`, and is rejected before `Committing`. No generated
+  Timeline entries or `Completed` transition enter the atomic result
+  transaction.
 - Observations, activities, timeline writes, and job completion commit in one
   SQLite transaction.
 - Duplicate chunk completion events are idempotent.
@@ -1026,12 +1114,13 @@ Capabilities include:
 VisionAnalysis | TextGeneration | Streaming | ToolCalling | LocalExecution
 ```
 
-Planned adapters:
+Current and deferred adapters:
 
-1. OpenAI-compatible HTTP.
-2. Gemini.
-3. Ollama and LM Studio.
-4. Codex CLI and Claude Code CLI where their stable interfaces permit it.
+1. OpenAI-compatible HTTP is implemented for bounded vision analysis.
+2. Gemini is deferred.
+3. Ollama and LM Studio are deferred.
+4. Codex CLI and Claude Code CLI are deferred until stable interfaces and a
+   reviewed local-process boundary exist.
 
 All provider-specific payloads and labels are normalized in Infrastructure.
 Provider responses cannot write domain state directly. Structured analysis uses
@@ -1097,7 +1186,7 @@ Persistence rules:
 
 ### 14.1 Current Persistence Slice
 
-The implemented persistence slice uses schema version 4. Version 1 contains
+The implemented persistence slice uses schema version 6. Version 1 contains
 `schema_migrations`, `timeline_entries`, `timeline_entry_apps`, and
 `timeline_entry_tags`; version 2 adds the singleton `app_settings` row while
 preserving existing timeline data. Version 3 adds evidence-retention,
@@ -1107,9 +1196,14 @@ consent as stale metadata, not its covered revision or a complete snapshot of
 the old privacy choices. It forces capture off because that consent did not
 cover the new choices. Version 4 adds an initially empty, ordered
 `capture_exclusion_rules` child table without changing capture state or privacy
-revision during migration. The application completes the idempotent migrations
-and initializes settings before creating the main window. Every timeline write
-plus its ordered child rows commits in one SQLite transaction. Settings writes
+revision during migration. Version 5 adds constrained `capture_chunks` and
+durable leased `analysis_jobs`; version 6 adds the active OpenAI-compatible
+provider profile, protected credential metadata, validation revision, and
+provider/job indexes, while forcing cloud analysis off during migration. The
+application completes the idempotent migrations and initializes settings and
+provider configuration before starting the host and creating the main window.
+Every timeline write plus its ordered child rows commits in one SQLite
+transaction. Settings writes
 use `BEGIN IMMEDIATE`, compare the complete expected snapshot, and atomically
 persist and read back the singleton settings row plus the complete ordered rule
 snapshot. An effective rule change also disables capture and advances the
@@ -1125,17 +1219,21 @@ results are searched and filtered in the ViewModel. The settings store persists
 theme, capture-enabled, cloud-analysis, consent version/timestamp/privacy
 revision, evidence-retention days, conservative exclusion/session choices, the
 current privacy revision, and typed ordered application/window rules with
-database constraints. Capture evidence,
-unprocessed intervals, analysis jobs, generated projections, and the remaining
-table groups in this section are still pending.
+database constraints. Committed capture chunks, analysis jobs, and provider
+profiles are durable; unprocessed intervals project directly from chunk/job
+truth, and normalized analysis results commit into the editable Timeline. Daily,
+Weekly, Journal, Chat, audit, retention, and import table groups remain pending.
 
 ## 15. Privacy and Security
 
 The following are mandatory release requirements. The current build implements
 the persistent, versioned recording-consent gate and defaults capture and cloud
-analysis to off. Native capture and cloud providers remain unavailable. Schema
-version 4 stores manual timeline content, settings, and user-authored exclusion
-rules locally without
+analysis to off. Production live capture remains unavailable; the
+OpenAI-compatible cloud provider becomes usable only after a current synthetic
+connection test, disclosure, and explicit enablement. The dev-live capture path
+is separately gated and is not a production claim. Schema version 6 stores
+manual and analyzed timeline content, settings, user-authored exclusion rules,
+capture chunks, analysis jobs, and provider profiles locally without
 application-level database encryption.
 
 - Recording is opt-in. Before the first capture, onboarding explains the data
@@ -1154,9 +1252,10 @@ application-level database encryption.
   remote-session pause, screen-sharing pause choices, and typed ordered
   application/window rule lists. Full first-run onboarding remains Phase 1
   work. The event-driven application/window identity monitor plus
-  display/session/power invalidation foundation is implemented but inactive;
-  presentation and periodic-storage integration, Pause/Stop classification, and
-  live activation remain Phase 1 work.
+  display/session/power invalidation foundation remains inactive in production
+  and is composed only by dev-live; production attribution, presentation and
+  periodic-storage integration, clean-profile Pause/Stop/startup validation, and
+  live-desktop smoke remain Phase 1 work.
 - The current `pause_during_screen_sharing` storage name is retained for schema
   compatibility, but the Windows UI describes only Windows Presentation Mode.
   Windows has no public, universal signal for arbitrary third-party screen
@@ -1330,8 +1429,9 @@ the user explicitly enables a future telemetry feature.
 
 ### Native
 
-- The current native foundation is exercised by fifteen CTest executables:
+- The current native foundation is exercised by seventeen CTest executables:
   `pixel_buffer_tests`, `atomic_chunk_store_tests`, `capture_policy_tests`,
+  `capture_chunk_fingerprint_tests`, `analysis_evidence_extractor_tests`,
   `capture_event_queue_tests`, `capture_instance_controller_tests`,
   `capture_safety_core_tests`,
   `capture_worker_tests`, `chunk_manifest_tests`, `dxgi_output_resolver_tests`,
@@ -1340,8 +1440,9 @@ the user explicitly enables a future telemetry feature.
   `mf_h264_chunk_writer_tests`, `capture_c_api_tests`, and the C17
   `c_header_compatibility_test`. These tests prove the current ABI, policy,
   queue, C header, pixel/runtime safety, real in-memory H.264 round trip,
-  DXGI/WIC bounds, handle-bound transactional storage, typed manifests, and
-  retryable compensation. The worker test adds deterministic per-stage
+  DXGI/WIC bounds, handle-bound transactional storage, typed manifests,
+  source fingerprints, bounded atomic JPEG evidence, and retryable
+  compensation. The worker test adds deterministic per-stage
   invalidation, Pause/Resume/Stop, topology, event-linearization, and rollback
   coverage. The controller test adds run-ID, checkpoint, Stop single-flight,
   stale deferred-Stop rejection, atomic terminal-result sharing and exception
@@ -1427,6 +1528,10 @@ the user explicitly enables a future telemetry feature.
   accessibility tests.
 - Timeline virtualization with large datasets.
 - End-to-end capture-to-timeline flow using deterministic provider fixtures.
+- The implemented SQLite/native/fake-HTTP integration test covers manifest scan,
+  provider save/test/enable, fingerprint and JPEG extraction, durable processing,
+  atomic Timeline commit, restart idempotency, provider-revision stability, and
+  user-edit preservation without duplicate network or extraction work.
 - Coordinated application exit during capture and analysis.
 - Performance regression checks and documented 24-hour and multi-day soak runs
   against the budgets established under Section 18.
@@ -1434,39 +1539,25 @@ the user explicitly enables a future telemetry feature.
 ## 21. Delivery Plan
 
 Phases are release gates, not a claim of strict implementation order. As of
-2026-07-20, the no-capture manual-timeline portions of Phases 2 and 3 plus
-schema v4, consent policy v2, persistent retention/exclusion/session choices,
-and user-authored typed exclusion rules are implemented. Phase 1 also has
-Accepted ADRs 0001 through 0012, verified QiDayflow source provenance, the x64
-C++20 C ABI v1 foundation, fifteen native tests, the display-scoped safety
-core, managed asynchronous owner/quiescence contract, owner-bound single-use
-Start/Resume admission, the inactive runtime privacy coordinator, the pure
-exclusion matcher, the on-demand Windows privacy probe, and the synchronous
-Windows foreground-target verifier foundation, plus the inactive event-driven
-privacy monitor with its independent generation and forced barrier. The safety
-core covers synthetic target reuse, generation, acquire-to-persist permit,
-command-admission, and stop/join/destroy races; the verifier covers stable
-HWND/TID/PID/process/display observation and process-wide monotonic target
-epochs. The process-wide 100 ms title worker and conservative filtered
-window-location invalidation close those two activation gates. A hidden
-top-level notification window now adds display-topology, current-session WTS,
-and suspend/resume invalidation with independent session/power holds, while a
-callback-safe native gate prevents old Allow updates from reopening admission
-before the matching Block acknowledgement. The native writer slice now adds
-strict target/DXGI observation, bounded WIC, real in-memory H.264, privacy-safe
-manifests, compensating whole-directory publication, per-stage authority
-guards, Pause epochs, and a deterministic fake-backed orchestration worker with
-a real Windows adapter. A C-ABI-owned instance controller now adds independent
-run IDs, checkpoint-driven state, resumable authorization replacement,
-single-flight Stop/revoke, stale-callback rejection, and reserved terminal-event
-delivery while production remains in disabled activation mode. Image-bound
-publisher-signer verification, unique child attribution, presentation
-notifications, periodic storage refresh, durable compensation and stale-artifact
-recovery/replay, consent-gated live Desktop Duplication smoke, and the managed
-evidence-Pause versus sticky-Stop policy remain open activation gates.
-`ScreenCapture`, `H264Chunks`,
-`EvidenceExtraction`, and managed-adapter runtime activation remain disabled,
-so no phase exit criterion is met.
+2026-07-23, schema v6, consent policy v2, manual and analyzed Timeline storage,
+capture chunk/job/provider persistence, provider configuration and validation,
+native bounded evidence extraction, and the hosted analysis pipeline are
+implemented. Seventeen native tests cover the C ABI, safety core, writer,
+fingerprint, and evidence extractor, while managed integration coverage proves
+the deterministic capture-manifest-to-editable-Timeline path with a fake HTTP
+provider and restart idempotency.
+
+The x64 dev-live flavor also composes the native owner, privacy monitor, target
+verifier, real Desktop Duplication/H.264 worker, chunk notifier, and analysis
+runner. It is protected by compile property, development-bundle property, and
+exact launch-argument gates, and it admits only the two documented classic
+process targets. Production remains in disabled activation mode and advertises
+no `ScreenCapture`, `H264Chunks`, or `EvidenceExtraction` bit. P0 and the Phase 1
+exit criterion are therefore not complete: a clean-profile dev-live Desktop
+Duplication and startup-intent smoke, full privacy/lifecycle transitions,
+production-grade signer/hosted-app attribution, presentation and periodic
+storage integration, and recovery at native persistence boundaries remain
+gates.
 
 ### Immediate P0: Runnable Capture-to-Analysis Vertical Slice
 
@@ -1475,35 +1566,33 @@ Weekly, Journal, Chat, export, provider-expansion, and visual-polish work. Those
 areas may receive only fixes needed to keep the current shell and manual
 timeline usable.
 
-Implementation order is deliberately end to end:
+Current implementation status follows the end-to-end order:
 
-1. **Record and publish.** Close the remaining live-activation gates, compose
-   the native runtime owner with the Windows privacy monitor and target
-   verifier, and produce a committed `chunks/<id>/capture.mp4` plus
-   `manifest.json` through consent-gated Start/Pause/Resume/Stop.
-2. **Discover and enqueue.** On startup and on every chunk-completed wake hint,
-   rescan all committed manifests, idempotently upsert chunks, and enqueue work
-   against the exact active, validated provider revision. A wake event is never
-   treated as the source of truth.
-3. **Configure the LLM boundary.** Keep OpenAI-compatible endpoint, model,
-   timeout, and DPAPI-protected credential configuration in Settings. Require a
-   successful synthetic connection test and explicit data-transfer disclosure
-   before cloud analysis can be enabled; configuration changes invalidate the
-   previous validation and must not race an in-flight commit.
-4. **Extract bounded evidence.** Add a root-bound native Media Foundation/WIC
-   extractor that accepts a canonical chunk identifier rather than an arbitrary
-   path. It publishes at most 32 JPEG frames, 2 MiB per frame and 12 MiB total,
-   through a versioned, atomic evidence manifest. Complete MP4 files never enter
-   managed memory and are never sent to a provider.
-5. **Analyze and commit.** Run the durable job state machine, validate structured
-   provider output, recheck the provider/settings revision before and after the
-   network call, and atomically commit normalized timeline entries with job
-   completion. Retry, timeout, cancellation, lease recovery, and stale response
-   behavior use persisted states and stable error codes.
-6. **Expose truth in the UI.** Show recording state, unprocessed chunks, queued
-   and failed analysis, provider identity, and normalized timeline results.
-   Users must be able to retry or continue reviewing local evidence without an
-   available provider.
+1. **Record and publish: implemented behind dev-live gates, smoke pending.** The
+   native runtime owner, monitor, verifier, writer, and committed
+   `chunks/<id>/capture.mp4` plus `manifest.json` path are composed. Production
+   stays disabled until the real-device and privacy-transition checks pass.
+2. **Discover and enqueue: implemented.** Startup and every chunk-completed wake
+   rescan committed manifests, idempotently upsert chunks, and enqueue only for
+   the current validated provider. Wake events are never the source of truth.
+3. **Configure the LLM boundary: implemented.** Settings owns endpoint, model,
+   timeout, DPAPI-protected credential, synthetic connection test, revision
+   invalidation, disclosure, and explicit cloud enablement. Cloud disable is
+   serialized against creation of a new provider request.
+4. **Extract bounded evidence: implemented.** The root-bound native Media
+   Foundation/WIC extractor accepts only canonical chunk identifiers, publishes
+   at most 32 JPEG frames, 2 MiB per frame and 12 MiB total through a versioned
+   atomic manifest, and verifies source plus per-frame hashes. Complete MP4 files
+   never enter managed memory or a provider request.
+5. **Analyze and commit: implemented and integration-tested.** The durable job
+   state machine validates provider output, rechecks readiness/revision, and
+   atomically commits normalized Timeline entries with completion. Retry,
+   timeout, cancellation, lease recovery, stale responses, completed-version
+   idempotency, and user-edit protection use persisted state.
+6. **Expose truth in the UI: partially implemented.** Timeline projects
+   unprocessed chunks, job attempts/failures, and editable normalized results;
+   provider configuration is available in Settings. Final recording-state and
+   retry affordance smoke remains acceptance work.
 
 P0 acceptance requires one clean-profile Windows x64 run to demonstrate all of
 the following:
@@ -1525,10 +1614,11 @@ the following:
   when WinUI or real Desktop Duplication cannot be validated reliably in the
   automated environment.
 
-Only after this acceptance passes may production advertise the combined
-`ScreenCapture | H264Chunks | EvidenceExtraction` capability and switch the
-native controller from disabled to enabled activation in the same reviewed
-change.
+Only after this acceptance passes may production advertise
+`ScreenCapture | H264Chunks`, register the native runtime owner, and switch the
+controller from disabled to enabled activation in the same reviewed change.
+Evidence extraction remains an independently bounded C ABI surface; publishing
+its capability bit requires a separate reviewed compatibility decision.
 
 ### Phase 0: Foundation
 

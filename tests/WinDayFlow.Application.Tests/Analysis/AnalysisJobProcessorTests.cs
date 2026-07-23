@@ -101,6 +101,46 @@ public sealed class AnalysisJobProcessorTests
     }
 
     [Theory]
+    [InlineData(
+        AnalysisEvidenceExtractionFailureKind.EvidenceNotFound,
+        AnalysisJobErrorCode.EvidenceMissing,
+        AnalysisJobProcessStatus.FailedTerminal)]
+    [InlineData(
+        AnalysisEvidenceExtractionFailureKind.EvidenceConflict,
+        AnalysisJobErrorCode.EvidenceInvalid,
+        AnalysisJobProcessStatus.FailedTerminal)]
+    [InlineData(
+        AnalysisEvidenceExtractionFailureKind.DecoderFailure,
+        AnalysisJobErrorCode.EvidenceInvalid,
+        AnalysisJobProcessStatus.FailedTerminal)]
+    [InlineData(
+        AnalysisEvidenceExtractionFailureKind.IoFailure,
+        AnalysisJobErrorCode.ExtractionFailed,
+        AnalysisJobProcessStatus.FailedRetryable)]
+    [InlineData(
+        AnalysisEvidenceExtractionFailureKind.CryptoFailure,
+        AnalysisJobErrorCode.ExtractionFailed,
+        AnalysisJobProcessStatus.FailedRetryable)]
+    public async Task NativeExtractionFailuresHaveStableJobMappings(
+        AnalysisEvidenceExtractionFailureKind failureKind,
+        AnalysisJobErrorCode expectedCode,
+        AnalysisJobProcessStatus expectedStatus)
+    {
+        using var harness = await CreateHarnessAsync(cloudEnabled: true);
+        harness.Extractor.Failure = new AnalysisEvidenceExtractionException(
+            failureKind,
+            resultCode: -1);
+
+        var result = await harness.Processor.ProcessNextAsync();
+
+        Assert.Equal(expectedStatus, result.Status);
+        Assert.Equal(expectedCode, result.FailureCode);
+        Assert.Equal(expectedCode, harness.JobStore.Current.Failure?.Code);
+        Assert.Equal(0, harness.ProviderFactory.CreateCount);
+        Assert.Equal(0, harness.Committer.CallCount);
+    }
+
+    [Theory]
     [InlineData(AiProviderErrorCode.RateLimited, true, AnalysisJobErrorCode.ProviderRateLimited, AnalysisJobProcessStatus.FailedRetryable)]
     [InlineData(AiProviderErrorCode.AuthenticationFailed, false, AnalysisJobErrorCode.ProviderRejected, AnalysisJobProcessStatus.FailedTerminal)]
     [InlineData(AiProviderErrorCode.InvalidResponse, false, AnalysisJobErrorCode.ProviderResponseInvalid, AnalysisJobProcessStatus.FailedTerminal)]
@@ -153,12 +193,63 @@ public sealed class AnalysisJobProcessorTests
     {
         using var harness = await CreateHarnessAsync(cloudEnabled: true);
         harness.Provider.AfterAnalyzeAsync = () =>
-            harness.Settings.SetCloudAnalysisEnabledAsync(false);
+            harness.Configuration.SetCloudAnalysisEnabledAsync(false);
 
-        var result = await harness.Processor.ProcessNextAsync();
+        var result = await harness.Processor
+            .ProcessNextAsync()
+            .WaitAsync(TimeSpan.FromSeconds(5));
 
         Assert.Equal(AnalysisJobProcessStatus.FailedRetryable, result.Status);
         Assert.Equal(AnalysisJobErrorCode.ProviderUnavailable, result.FailureCode);
+        Assert.Equal(1, harness.Provider.CallCount);
+        Assert.Equal(0, harness.Committer.CallCount);
+    }
+
+    [Fact]
+    public async Task CloudDisableWhileFactoryIsBlockedPreventsProviderSend()
+    {
+        using var harness = await CreateHarnessAsync(cloudEnabled: true);
+        harness.ProviderFactory.BlockNextCreate();
+        var processing = harness.Processor.ProcessNextAsync();
+        await harness.ProviderFactory.WaitUntilCreateStartedAsync();
+
+        try
+        {
+            await harness.Configuration
+                .SetCloudAnalysisEnabledAsync(false)
+                .WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.False(harness.Configuration.IsCloudAnalysisEnabled);
+        }
+        finally
+        {
+            harness.ProviderFactory.ReleaseCreate();
+        }
+
+        var result = await processing.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(AnalysisJobProcessStatus.FailedRetryable, result.Status);
+        Assert.Equal(AnalysisJobErrorCode.ProviderUnavailable, result.FailureCode);
+        Assert.Equal(1, harness.ProviderFactory.CreateCount);
+        Assert.Equal(0, harness.Provider.CallCount);
+        Assert.Equal(0, harness.Committer.CallCount);
+    }
+
+    [Fact]
+    public async Task ProviderRevisionChangeWhileFactoryIsBlockedPreventsProviderSend()
+    {
+        using var harness = await CreateHarnessAsync(cloudEnabled: true);
+        harness.ProviderFactory.BlockNextCreate();
+        var processing = harness.Processor.ProcessNextAsync();
+        await harness.ProviderFactory.WaitUntilCreateStartedAsync();
+
+        harness.ProfileStore.Current = CreateSnapshot(revision: 2);
+        harness.ProviderFactory.ReleaseCreate();
+        var result = await processing.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(AnalysisJobProcessStatus.FailedTerminal, result.Status);
+        Assert.Equal(AnalysisJobErrorCode.ProviderRejected, result.FailureCode);
+        Assert.Equal(1, harness.ProviderFactory.CreateCount);
+        Assert.Equal(0, harness.Provider.CallCount);
         Assert.Equal(0, harness.Committer.CallCount);
     }
 
@@ -232,7 +323,7 @@ public sealed class AnalysisJobProcessorTests
     }
 
     [Fact]
-    public async Task EmptyValidatedResponseCompletesWithoutFabricatingEntries()
+    public async Task EmptyValidatedResponseFailsWithoutCommittingEntries()
     {
         using var harness = await CreateHarnessAsync(cloudEnabled: true);
         harness.Provider.Response = new AiAnalysisResponse(
@@ -243,9 +334,11 @@ public sealed class AnalysisJobProcessorTests
 
         var result = await harness.Processor.ProcessNextAsync();
 
-        Assert.Equal(AnalysisJobProcessStatus.Completed, result.Status);
+        Assert.Equal(AnalysisJobProcessStatus.FailedTerminal, result.Status);
+        Assert.Equal(AnalysisJobErrorCode.ProviderResponseInvalid, result.FailureCode);
+        Assert.Equal(AnalysisJobState.FailedTerminal, harness.JobStore.Current.State);
         Assert.Empty(harness.Committer.Entries);
-        Assert.Equal(1, harness.Committer.CallCount);
+        Assert.Equal(0, harness.Committer.CallCount);
     }
 
     private static async Task<TestHarness> CreateHarnessAsync(
@@ -273,6 +366,12 @@ public sealed class AnalysisJobProcessorTests
         var extractor = new TestEvidenceExtractor(CreateEvidence(chunk));
         var provider = new TestProvider(CreateProfile());
         var providerFactory = new TestProviderFactory(provider);
+        var configuration = new AiProviderConfigurationService(
+            profileStore,
+            providerFactory,
+            settings,
+            new FixedTimeProvider(Now));
+        await configuration.InitializeAsync();
         var committer = new TestResultCommitter();
         var processor = new AnalysisJobProcessor(
             jobStore,
@@ -292,6 +391,7 @@ public sealed class AnalysisJobProcessorTests
             new FixedTimeProvider(Now));
         return new TestHarness(
             processor,
+            configuration,
             settings,
             profileStore,
             jobStore,
@@ -355,7 +455,7 @@ public sealed class AnalysisJobProcessorTests
         [
             new AiActivityCandidate(
                 StartOffsetMilliseconds: 0,
-                EndOffsetMilliseconds: 30_000,
+                EndOffsetMilliseconds: 60_000,
                 "Focused implementation",
                 "Implemented the analysis worker.",
                 "focused_work",
@@ -368,6 +468,7 @@ public sealed class AnalysisJobProcessorTests
 
     private sealed class TestHarness(
         AnalysisJobProcessor processor,
+        AiProviderConfigurationService configuration,
         AppSettingsService settings,
         TestProfileStore profileStore,
         TestJobStore jobStore,
@@ -377,6 +478,8 @@ public sealed class AnalysisJobProcessorTests
         TestResultCommitter committer) : IDisposable
     {
         public AnalysisJobProcessor Processor { get; } = processor;
+
+        public AiProviderConfigurationService Configuration { get; } = configuration;
 
         public AppSettingsService Settings { get; } = settings;
 
@@ -392,7 +495,11 @@ public sealed class AnalysisJobProcessorTests
 
         public TestResultCommitter Committer { get; } = committer;
 
-        public void Dispose() => Settings.Dispose();
+        public void Dispose()
+        {
+            Configuration.Dispose();
+            Settings.Dispose();
+        }
     }
 
     private sealed class TestJobStore(AnalysisJob current) : IAnalysisJobStore
@@ -416,6 +523,33 @@ public sealed class AnalysisJobProcessorTests
             Guid jobId,
             CancellationToken cancellationToken = default) =>
             Task.FromResult<AnalysisJob?>(Current.Id == jobId ? Current : null);
+
+        public Task<bool> HasCompletedAnalysisAsync(
+            string captureChunkId,
+            string analysisVersion,
+            string inputFingerprint,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var matchesIdentity = string.Equals(
+                    Current.CaptureChunkId,
+                    captureChunkId,
+                    StringComparison.Ordinal)
+                && string.Equals(
+                    Current.AnalysisVersion,
+                    analysisVersion,
+                    StringComparison.Ordinal);
+            if (matchesIdentity && !string.Equals(
+                    Current.InputFingerprint,
+                    inputFingerprint,
+                    StringComparison.Ordinal))
+            {
+                throw new CaptureChunkConflictException(captureChunkId);
+            }
+
+            return Task.FromResult(
+                matchesIdentity && Current.State == AnalysisJobState.Completed);
+        }
 
         public Task<AnalysisJob?> TryClaimNextAsync(
             string leaseOwner,
@@ -623,6 +757,8 @@ public sealed class AnalysisJobProcessorTests
 
         public CaptureChunkFingerprint? ExpectedFingerprint { get; private set; }
 
+        public Exception? Failure { get; set; }
+
         public Task<AnalysisEvidenceBatch> ExtractAsync(
             CaptureChunk chunk,
             CaptureChunkFingerprint expectedSourceFingerprint,
@@ -630,7 +766,9 @@ public sealed class AnalysisJobProcessorTests
         {
             CallCount++;
             ExpectedFingerprint = expectedSourceFingerprint;
-            return Task.FromResult(Evidence);
+            return Failure is null
+                ? Task.FromResult(Evidence)
+                : Task.FromException<AnalysisEvidenceBatch>(Failure);
         }
     }
 
@@ -681,14 +819,50 @@ public sealed class AnalysisJobProcessorTests
     private sealed class TestProviderFactory(TestProvider provider)
         : IAiAnalysisProviderFactory
     {
+        private TaskCompletionSource? _createStarted;
+        private TaskCompletionSource? _releaseCreate;
+
         public int CreateCount { get; private set; }
 
-        public Task<IAiAnalysisProvider> CreateAsync(
+        public void BlockNextCreate()
+        {
+            if (_releaseCreate is not null)
+            {
+                throw new InvalidOperationException("A provider create is already blocked.");
+            }
+
+            _createStarted = new TaskCompletionSource(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            _releaseCreate = new TaskCompletionSource(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+        }
+
+        public async Task WaitUntilCreateStartedAsync()
+        {
+            var started = _createStarted
+                ?? throw new InvalidOperationException("Provider create is not blocked.");
+            await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+
+        public void ReleaseCreate()
+        {
+            _releaseCreate?.TrySetResult();
+        }
+
+        public async Task<IAiAnalysisProvider> CreateAsync(
             AiProviderProfileSnapshot snapshot,
             CancellationToken cancellationToken = default)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             CreateCount++;
-            return Task.FromResult<IAiAnalysisProvider>(provider);
+            var release = _releaseCreate;
+            _createStarted?.TrySetResult();
+            if (release is not null)
+            {
+                await release.Task.WaitAsync(cancellationToken);
+            }
+
+            return provider;
         }
     }
 

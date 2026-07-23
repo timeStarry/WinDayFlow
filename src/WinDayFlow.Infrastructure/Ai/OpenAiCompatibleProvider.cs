@@ -254,7 +254,11 @@ public sealed class OpenAiCompatibleProvider : IAiAnalysisProvider, IDisposable
                     "system",
                     "You produce a conservative structured activity timeline from bounded desktop evidence. "
                     + "Do not infer facts that are not supported by the evidence. "
-                    + "Use unknown labels when classification is uncertain."),
+                    + "Cover the entire request interval contiguously: the first start_offset_ms must be 0, "
+                    + "each next start_offset_ms must equal the previous end_offset_ms, and the final "
+                    + "end_offset_ms must equal range_duration_ms. "
+                    + "When evidence is insufficient for any interval, still emit an activity for it using "
+                    + "unknown labels so that no time is omitted."),
                 new ChatMessage("user", userContent),
             ],
             Temperature: 0,
@@ -492,6 +496,8 @@ public sealed class OpenAiCompatibleProvider : IAiAnalysisProvider, IDisposable
                 ["activities"] = new Dictionary<string, object?>
                 {
                     ["type"] = "array",
+                    ["minItems"] = 1,
+                    ["maxItems"] = AiAnalysisContract.MaximumActivities,
                     ["items"] = CreateActivitySchema(),
                 },
             },

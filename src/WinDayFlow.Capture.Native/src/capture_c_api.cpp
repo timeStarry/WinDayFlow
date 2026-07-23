@@ -13,7 +13,9 @@
 #include <string_view>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
+#include "analysis_evidence_extractor.h"
 #include "capture_instance_controller.h"
 #include "capture_chunk_fingerprint.h"
 #include "capture_policy.h"
@@ -32,6 +34,8 @@ using windayflow::capture::CaptureCommand;
 using windayflow::capture::CaptureCommandAdmission;
 using windayflow::capture::CaptureSafetyUpdateResult;
 using windayflow::capture::CaptureTargetIdentity;
+using windayflow::capture::AnalysisEvidenceRequest;
+using windayflow::capture::AnalysisEvidenceResult;
 using windayflow::capture::PrivacyContext;
 using windayflow::capture::RuntimeAuthorization;
 
@@ -49,6 +53,18 @@ constexpr size_t kLegacyRuntimeAuthorizationSize =
 constexpr size_t kCurrentRuntimeAuthorizationSize =
     sizeof(wdf_capture_runtime_authorization_v1);
 constexpr int kMaximumDisplayDeviceKeyUtf16Characters = 31;
+
+#if WDF_ENABLE_DEV_LIVE_CAPTURE
+constexpr CaptureActivationMode kCaptureActivationMode =
+    CaptureActivationMode::kEnabled;
+constexpr wdf_capture_capabilities kLiveCaptureCapabilities =
+    WDF_CAPTURE_CAPABILITY_SCREEN_CAPTURE |
+    WDF_CAPTURE_CAPABILITY_H264_CHUNKS;
+#else
+constexpr CaptureActivationMode kCaptureActivationMode =
+    CaptureActivationMode::kDisabled;
+constexpr wdf_capture_capabilities kLiveCaptureCapabilities = 0;
+#endif
 
 static_assert(kLegacyRuntimeAuthorizationSize ==
               offsetof(wdf_capture_runtime_authorization_v1,
@@ -379,6 +395,35 @@ wdf_capture_result MapChunkFingerprintResult(
   }
 }
 
+wdf_capture_result MapAnalysisEvidenceResult(AnalysisEvidenceResult result) {
+  switch (result) {
+    case AnalysisEvidenceResult::kOk:
+      return WDF_CAPTURE_RESULT_OK;
+    case AnalysisEvidenceResult::kInvalidArgument:
+      return WDF_CAPTURE_RESULT_INVALID_ARGUMENT;
+    case AnalysisEvidenceResult::kNotFound:
+      return WDF_CAPTURE_RESULT_EVIDENCE_NOT_FOUND;
+    case AnalysisEvidenceResult::kUnsafeEvidence:
+      return WDF_CAPTURE_RESULT_UNSAFE_EVIDENCE;
+    case AnalysisEvidenceResult::kTooLarge:
+      return WDF_CAPTURE_RESULT_EVIDENCE_TOO_LARGE;
+    case AnalysisEvidenceResult::kChangedDuringRead:
+      return WDF_CAPTURE_RESULT_EVIDENCE_CHANGED;
+    case AnalysisEvidenceResult::kIoFailure:
+      return WDF_CAPTURE_RESULT_IO_FAILURE;
+    case AnalysisEvidenceResult::kCryptoFailure:
+      return WDF_CAPTURE_RESULT_CRYPTO_FAILURE;
+    case AnalysisEvidenceResult::kInvalidEvidence:
+      return WDF_CAPTURE_RESULT_EVIDENCE_INVALID;
+    case AnalysisEvidenceResult::kDecoderFailure:
+      return WDF_CAPTURE_RESULT_DECODER_FAILURE;
+    case AnalysisEvidenceResult::kConflict:
+      return WDF_CAPTURE_RESULT_EVIDENCE_CONFLICT;
+    default:
+      return WDF_CAPTURE_RESULT_INTERNAL_ERROR;
+  }
+}
+
 bool TryCopyCommand(wdf_capture_command source, CaptureCommand* destination) {
   if (destination == nullptr) {
     return false;
@@ -613,7 +658,8 @@ wdf_capture_get_capabilities(wdf_capture_capabilities* capabilities) noexcept {
     if (capabilities == nullptr) {
       return WDF_CAPTURE_RESULT_INVALID_ARGUMENT;
     }
-    *capabilities = WDF_CAPTURE_CAPABILITY_PRIVACY_GUARD |
+    *capabilities = kLiveCaptureCapabilities |
+                    WDF_CAPTURE_CAPABILITY_PRIVACY_GUARD |
                     WDF_CAPTURE_CAPABILITY_EVENT_QUEUE |
                     WDF_CAPTURE_CAPABILITY_TARGET_SCOPED_AUTHORIZATION |
                     WDF_CAPTURE_CAPABILITY_PERSISTENCE_GENERATION_BARRIER |
@@ -648,7 +694,7 @@ extern "C" wdf_capture_result WDF_CAPTURE_CALL wdf_capture_create(
         config->chunk_duration_ms,
     };
     CaptureInstanceControllerConfiguration controller_configuration;
-    controller_configuration.activation_mode = CaptureActivationMode::kDisabled;
+    controller_configuration.activation_mode = kCaptureActivationMode;
     controller_configuration.event_queue_capacity = config->event_queue_capacity;
     controller_configuration.worker.policy = policy;
     controller_configuration.worker.maximum_width = config->max_width;
@@ -1020,6 +1066,182 @@ wdf_capture_compute_chunk_fingerprint(
     return WDF_CAPTURE_RESULT_OK;
   } catch (...) {
     clear_output();
+    return WDF_CAPTURE_RESULT_INTERNAL_ERROR;
+  }
+}
+
+extern "C" wdf_capture_result WDF_CAPTURE_CALL
+wdf_capture_extract_analysis_evidence(
+    const char* data_root_utf8,
+    uint32_t data_root_utf8_length,
+    const char* canonical_chunk_id_utf8,
+    uint32_t canonical_chunk_id_utf8_length,
+    uint64_t expected_video_byte_count,
+    uint32_t expected_frame_count,
+    uint32_t expected_video_width,
+    uint32_t expected_video_height,
+    uint64_t expected_duration_ms,
+    const char* expected_source_fingerprint_utf8,
+    uint32_t expected_source_fingerprint_utf8_length,
+    char* manifest_utf8,
+    uint32_t manifest_utf8_capacity,
+    uint32_t* manifest_utf8_required) noexcept {
+  if (manifest_utf8_required == nullptr) {
+    return WDF_CAPTURE_RESULT_INVALID_ARGUMENT;
+  }
+  *manifest_utf8_required = 0;
+  const auto clear_output = [manifest_utf8,
+                             manifest_utf8_capacity]() noexcept {
+    if (manifest_utf8 != nullptr && manifest_utf8_capacity > 0) {
+      manifest_utf8[0] = '\0';
+    }
+  };
+
+  try {
+    if (data_root_utf8 == nullptr || data_root_utf8_length == 0 ||
+        data_root_utf8_length > kMaximumOutputDirectoryBytes ||
+        canonical_chunk_id_utf8 == nullptr ||
+        canonical_chunk_id_utf8_length == 0 ||
+        expected_source_fingerprint_utf8 == nullptr ||
+        expected_source_fingerprint_utf8_length !=
+            WDF_CAPTURE_CHUNK_FINGERPRINT_UTF8_LENGTH ||
+        (manifest_utf8 == nullptr && manifest_utf8_capacity != 0)) {
+      clear_output();
+      return WDF_CAPTURE_RESULT_INVALID_ARGUMENT;
+    }
+    const std::string_view encoded_root(data_root_utf8,
+                                        data_root_utf8_length);
+    const std::string_view encoded_chunk_id(canonical_chunk_id_utf8,
+                                            canonical_chunk_id_utf8_length);
+    const std::string_view encoded_fingerprint(
+        expected_source_fingerprint_utf8,
+        expected_source_fingerprint_utf8_length);
+    std::wstring data_root;
+    if (!TryCopyUtf8Wide(encoded_root, &data_root) ||
+        !IsValidUtf8(encoded_chunk_id) ||
+        !windayflow::capture::IsCanonicalCaptureChunkId(encoded_chunk_id) ||
+        !IsValidUtf8(encoded_fingerprint) ||
+        !windayflow::capture::IsCanonicalSourceFingerprint(
+            encoded_fingerprint)) {
+      clear_output();
+      return WDF_CAPTURE_RESULT_INVALID_ARGUMENT;
+    }
+
+    AnalysisEvidenceRequest request;
+    request.data_root = std::move(data_root);
+    request.canonical_chunk_id.assign(encoded_chunk_id);
+    request.expected_video_byte_count = expected_video_byte_count;
+    request.expected_frame_count = expected_frame_count;
+    request.expected_video_width = expected_video_width;
+    request.expected_video_height = expected_video_height;
+    request.expected_duration_ms = expected_duration_ms;
+    request.expected_source_fingerprint.assign(encoded_fingerprint);
+    std::string manifest;
+    const wdf_capture_result result = MapAnalysisEvidenceResult(
+        windayflow::capture::ExtractAnalysisEvidence(request, &manifest));
+    if (result != WDF_CAPTURE_RESULT_OK) {
+      clear_output();
+      return result;
+    }
+    if (manifest.empty() ||
+        manifest.size() >
+            WDF_CAPTURE_ANALYSIS_EVIDENCE_MANIFEST_UTF8_MAX_LENGTH ||
+        manifest.size() >= std::numeric_limits<uint32_t>::max()) {
+      clear_output();
+      return WDF_CAPTURE_RESULT_INTERNAL_ERROR;
+    }
+    *manifest_utf8_required = static_cast<uint32_t>(manifest.size() + 1U);
+    if (manifest_utf8 == nullptr ||
+        manifest_utf8_capacity < *manifest_utf8_required) {
+      clear_output();
+      return WDF_CAPTURE_RESULT_BUFFER_TOO_SMALL;
+    }
+    std::memcpy(manifest_utf8, manifest.data(), manifest.size());
+    manifest_utf8[manifest.size()] = '\0';
+    return WDF_CAPTURE_RESULT_OK;
+  } catch (...) {
+    clear_output();
+    *manifest_utf8_required = 0;
+    return WDF_CAPTURE_RESULT_INTERNAL_ERROR;
+  }
+}
+
+extern "C" wdf_capture_result WDF_CAPTURE_CALL
+wdf_capture_read_analysis_evidence_frame(
+    const char* data_root_utf8,
+    uint32_t data_root_utf8_length,
+    const char* canonical_chunk_id_utf8,
+    uint32_t canonical_chunk_id_utf8_length,
+    const char* canonical_source_fingerprint_utf8,
+    uint32_t canonical_source_fingerprint_utf8_length,
+    uint32_t frame_index,
+    uint8_t* frame_bytes,
+    uint32_t frame_bytes_capacity,
+    uint32_t* frame_bytes_required) noexcept {
+  if (frame_bytes_required == nullptr) {
+    return WDF_CAPTURE_RESULT_INVALID_ARGUMENT;
+  }
+  *frame_bytes_required = 0;
+  const auto clear_output = [frame_bytes, frame_bytes_capacity]() noexcept {
+    if (frame_bytes != nullptr && frame_bytes_capacity > 0) {
+      frame_bytes[0] = 0;
+    }
+  };
+
+  try {
+    if (data_root_utf8 == nullptr || data_root_utf8_length == 0 ||
+        data_root_utf8_length > kMaximumOutputDirectoryBytes ||
+        canonical_chunk_id_utf8 == nullptr ||
+        canonical_chunk_id_utf8_length == 0 ||
+        canonical_source_fingerprint_utf8 == nullptr ||
+        canonical_source_fingerprint_utf8_length !=
+            WDF_CAPTURE_CHUNK_FINGERPRINT_UTF8_LENGTH ||
+        (frame_bytes == nullptr && frame_bytes_capacity != 0)) {
+      clear_output();
+      return WDF_CAPTURE_RESULT_INVALID_ARGUMENT;
+    }
+    const std::string_view encoded_root(data_root_utf8,
+                                        data_root_utf8_length);
+    const std::string_view encoded_chunk_id(canonical_chunk_id_utf8,
+                                            canonical_chunk_id_utf8_length);
+    const std::string_view encoded_fingerprint(
+        canonical_source_fingerprint_utf8,
+        canonical_source_fingerprint_utf8_length);
+    std::wstring data_root;
+    if (!TryCopyUtf8Wide(encoded_root, &data_root) ||
+        !IsValidUtf8(encoded_chunk_id) ||
+        !windayflow::capture::IsCanonicalCaptureChunkId(encoded_chunk_id) ||
+        !IsValidUtf8(encoded_fingerprint) ||
+        !windayflow::capture::IsCanonicalSourceFingerprint(
+            encoded_fingerprint)) {
+      clear_output();
+      return WDF_CAPTURE_RESULT_INVALID_ARGUMENT;
+    }
+    std::vector<uint8_t> bytes;
+    const wdf_capture_result result = MapAnalysisEvidenceResult(
+        windayflow::capture::ReadAnalysisEvidenceFrame(
+            data_root, encoded_chunk_id, encoded_fingerprint, frame_index,
+            &bytes));
+    if (result != WDF_CAPTURE_RESULT_OK) {
+      clear_output();
+      return result;
+    }
+    if (bytes.empty() ||
+        bytes.size() > WDF_CAPTURE_ANALYSIS_EVIDENCE_FRAME_MAX_BYTES) {
+      clear_output();
+      return WDF_CAPTURE_RESULT_INTERNAL_ERROR;
+    }
+    *frame_bytes_required = static_cast<uint32_t>(bytes.size());
+    if (frame_bytes == nullptr ||
+        frame_bytes_capacity < *frame_bytes_required) {
+      clear_output();
+      return WDF_CAPTURE_RESULT_BUFFER_TOO_SMALL;
+    }
+    std::memcpy(frame_bytes, bytes.data(), bytes.size());
+    return WDF_CAPTURE_RESULT_OK;
+  } catch (...) {
+    clear_output();
+    *frame_bytes_required = 0;
     return WDF_CAPTURE_RESULT_INTERNAL_ERROR;
   }
 }

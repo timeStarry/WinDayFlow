@@ -66,6 +66,18 @@ public sealed class TimelineUnprocessedIntervalTests
                 "分析已取消",
             ],
             viewModel.UnprocessedIntervals.Select(static interval => interval.StateText));
+        var retry = viewModel.UnprocessedIntervals[3];
+        Assert.Equal(1, retry.Attempt);
+        Assert.Equal(AnalysisJobErrorCode.ProviderUnavailable, retry.ErrorCode);
+        Assert.Equal(
+            "暂时无法连接分析提供方。系统稍后会自动执行第 2 次尝试。",
+            retry.StateDescription);
+        var failed = viewModel.UnprocessedIntervals[4];
+        Assert.Equal(1, failed.Attempt);
+        Assert.Equal(AnalysisJobErrorCode.ProviderRejected, failed.ErrorCode);
+        Assert.Equal(
+            "分析提供方拒绝了当前凭据、模型或请求。本次分析已停止，不会自动重试。",
+            failed.StateDescription);
         Assert.True(viewModel.HasUnprocessedIntervals);
         Assert.False(viewModel.HasUnprocessedIntervalLoadError);
         Assert.False(viewModel.HasError);

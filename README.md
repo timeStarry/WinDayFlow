@@ -36,9 +36,10 @@ The project is guided by these design principles:
 
 ## Current Status
 
-WinDayFlow is in active implementation. The first persistent, no-capture
-vertical slice and the settings privacy foundation are complete. The repository
-contains:
+WinDayFlow is in active implementation. The persistent UI/data foundation and
+the capture-to-analysis P0 plumbing are now composed. Production capture remains
+fail closed; a separately built and explicitly launched x64 dev-live bundle is
+available for controlled manual verification. The repository contains:
 
 - a working WinUI 3 Fluent shell with a custom system-integrated title bar,
   responsive navigation, and a retained hamburger menu;
@@ -51,7 +52,7 @@ contains:
   capture-off and cloud-off defaults, consent policy v2, evidence-retention and
   conservative exclusion/session choices, plus ordered EXE, package-family,
   publisher-certificate, and application-anchored window exclusion rules;
-- schema v4 settings persistence that commits the complete ordered rule
+- transactional settings persistence that commits the complete ordered rule
   snapshot, capture-off state, and exact privacy-revision change atomically,
   with optimistic concurrency checks over the complete settings snapshot;
 - an OpenAI-compatible vision-analysis adapter with bounded JPEG requests,
@@ -61,6 +62,15 @@ contains:
   DPAPI-protected API credentials, with a synthetic-image connection test,
   revision-bound validation, explicit cloud-transfer disclosure, and cloud-off
   default;
+- an application-hosted analysis pipeline that composes committed-manifest
+  scanning, SQLite chunk/job persistence, source fingerprinting, native evidence
+  extraction, durable ingestion and supervision, provider analysis, atomic
+  timeline commit, and startup plus chunk-event wakeups;
+- a root-bound native Media Foundation/WIC evidence extractor that accepts a
+  canonical chunk ID, verifies the source before and after extraction, publishes
+  a strict versioned manifest atomically, and limits output to 32 JPEG frames,
+  2 MiB per frame, and 12 MiB total; the managed adapter revalidates every frame
+  hash before constructing a provider request;
 - an x64 C++20 native-capture foundation with a versioned C ABI, stable status
   codes, a bounded polled event queue, fail-closed privacy inputs, and an
   original target-scoped safety core; its additive 224-byte runtime
@@ -73,8 +83,9 @@ contains:
   runtime owner epoch; capability bit 11 and a dedicated C ABI export now let a
   Windows callback close native command and persistence admission immediately,
   without waiting for an already-held persistence permit;
-- real native writer components and orchestration behind a C-ABI-owned disabled
-  controller:
+- real native writer components and orchestration behind a C-ABI-owned
+  controller whose production mode is disabled and whose dev-live mode is
+  available only through an explicit compile-time switch:
   a strict no-fallback HWND/PID/process-creation/display observer with a
   pre/post-fingerprinted DXGI Desktop Duplication source and an 8K/126.6 MiB
   BGRA ceiling, bounded
@@ -107,7 +118,7 @@ contains:
   obtains target epochs from a process-wide monotonic source across
   target/display changes, Unknown gaps, and verifier recreation, and redacts
   observed values from diagnostic text;
-- an inactive event-driven Windows privacy-monitor foundation with one owner
+- an event-driven Windows privacy-monitor foundation with one owner
   thread and message pump, a never-shown top-level HWND, narrow
   foreground/desktop/window hooks, `WM_DISPLAYCHANGE`, current-session WTS,
   suspend/resume notifications, and an exact `0x800B..0x800C` location/name
@@ -118,61 +129,66 @@ contains:
   forced native FailClosed barrier, latest-generation worker coalescing,
   generation-bound publication, independent session-unavailable and
   power-suspended holds, stale-Allow compensation, bounded teardown, and
-  value-only sanitized fault contracts;
+  value-only sanitized fault contracts; production does not register it, while
+  the dev-live composition owns and starts it before admitting capture;
 - a tested settings commit barrier, process-local capture latch with monotonic
   invalidation generations, sticky automatic-stop handling, a pure Windows
   privacy-policy composer, and a native coordinator whose runtime generations
-  are deliberately independent from persisted consent revisions; the App still
-  uses the unavailable path because the native binary does not yet advertise a
-  write-safe screen-capture capability;
-- an inactive, fail-closed Windows probe for session lock, input desktop,
+  are deliberately independent from persisted consent revisions; production App
+  registration uses the unavailable path, while the dev-live App maps the same
+  native owner to the capture backend, commit notifier, settings barrier, runtime
+  authorization, and privacy-signal contracts;
+- a fail-closed Windows probe for session lock, input desktop,
   Remote Desktop, Windows Presentation Mode, and storage headroom, plus a pure
   typed exclusion matcher that evaluates application and window rules
-  independently without returning observed identity or title text; live
-  application/window identity collection remains intentionally disconnected;
+  independently without returning observed identity or title text; dev-live
+  activation adds a deliberately narrow classic-process policy that accepts only
+  foreground `WinDayFlow.App.exe` and `cmd.exe` targets, while production-grade
+  signer and hosted-application attribution remain open;
 - domain, application, infrastructure, presentation, and capture-interoperability
   project boundaries with automated persistence and mutation tests; and
 - an unpackaged, self-contained development bundle for manual UI verification.
 
 Manual activities, consent, privacy settings, user-authored exclusion rules,
-provider profiles, capture metadata, and analysis jobs are stored at
-`%LOCALAPPDATA%\WinDayFlow\Data\windayflow.db` and survive application restarts.
-The provider configuration UI, OpenAI-compatible adapter, durable stores,
-committed-manifest scanner, and application-level analysis processor exist as
-separate tested components. They are **not yet composed into a runnable
-capture-to-analysis pipeline**: native evidence extraction, startup/event-driven
-ingestion and job supervision, analyzed timeline projection, and live capture
-activation remain open. Generated Daily and Weekly views, journal editing, and
-timeline-grounded chat are also not integrated. The foreground verifier and
-event monitor are inactive foundations, not a live activation claim:
-image-bound publisher-signer verification, unique hosted-app attribution,
-presentation notifications, periodic storage refresh, worker-side stage
-orchestration and generation/permit revalidation, C ABI controller ownership,
-run-ID-guarded state publication, and the native resumable authorization-Pause
-protocol are implemented, while managed pause-versus-sticky-Stop policy,
-crash recovery/replay, and real consent-gated Desktop Duplication smoke remain
-open gates. The bounded title-read, conservative window-location
-invalidation, display-topology/current-session/power event source,
-display-scoped authorization, callback-time native admission closure, and
-strict no-fallback DXGI output resolver gates are closed. The native
-worker composes the frame source with target observation, WIC, H.264, atomic
-storage, fresh per-stage permits, post-operation epoch/target checks, and
-compensating event publication. Callback closure cannot interrupt a Windows or
-codec call already in progress, but it invalidates that stage's post-check; no
-result advances unless the same target and permit remain current. A C ABI
-capture instance now owns this worker and its backend, but production uses the
-controller's disabled activation mode and never starts the worker.
-Owner-bound Start/Resume admission is implemented:
-the Application service obtains a single-use opaque stamp, rechecks persisted
-and runtime authorization, and the native owner atomically consumes the stamp
-against the current generation and target without retrying a stale command.
-The foundation consumes a valid authorized command but still returns
-`NotImplemented`; it starts no capture worker. Dynamic lock, exclusion, and
-Unknown transitions enter the native provisional-Pause protocol, but managed
-policy must still choose resumable evidence Pause or sticky session Stop. The
-native foundation deliberately advertises no screen-capture, H.264-chunk, or
-evidence-extraction capability, App DI continues to use the unavailable
-backend, and the development bundle is not yet a functional recorder.
+provider profiles, capture metadata, analysis jobs, and generated timeline
+entries are stored at `%LOCALAPPDATA%\WinDayFlow\Data\windayflow.db` and survive
+application restarts. App startup initializes the database, settings, and
+provider configuration before starting the hosted analysis runner. The runner
+rescans committed manifests on startup and on chunk-completed wake hints,
+idempotently persists chunks/jobs, extracts bounded evidence through the native
+adapter, and atomically commits validated results to the editable Timeline.
+Integration coverage exercises that path with a fake OpenAI-compatible HTTP
+endpoint, including restart idempotency and protection of user edits.
+
+The default native build advertises none of `ScreenCapture`, `H264Chunks`, or
+`EvidenceExtraction`; its controller remains disabled, and the default App uses
+`UnavailableCaptureBackend`. Native evidence extraction is exposed as a
+separate strict C ABI operation and is used by the composed analysis pipeline,
+without publishing the `EvidenceExtraction` capability bit. A dev-live build
+adds only `ScreenCapture | H264Chunks` and enables the controller. It can be
+selected by the App only when all three independent gates agree:
+
+1. native and managed projects are compiled with
+   `EnableDevLiveCapture=true`;
+2. the App is published as a development bundle with `DevBundleBuild=true`; and
+3. the executable is launched with exactly one argument,
+   `--enable-dev-live-capture`.
+
+Omitting any gate leaves capture unavailable. The dev-live privacy sampler is
+intentionally unsuitable for production: it admits only unpackaged/classic
+foreground targets whose executable basename is `WinDayFlow.App.exe` or
+`cmd.exe`, with a present non-empty title and no package family. It is a narrow
+manual-test harness, not a general application allowlist or signer proof.
+
+P0 is not complete. The composed path still needs a clean-profile real Desktop
+Duplication smoke, forced-restart checks at the native persistence boundaries,
+and manual lock, secure-desktop, RDP, presentation, display, sleep, exclusion,
+consent-revocation, and shutdown transitions. Startup reconciliation of a
+persisted recording intent is implemented and covered by targeted recovery and
+user-intent regression tests, but remains an acceptance gate until clean-profile
+dev-live smoke proves the startup behavior.
+Generated Daily and Weekly views, journal editing, timeline-grounded chat,
+export, and additional providers remain deferred.
 
 ### Immediate Development Priority
 
@@ -187,11 +203,19 @@ consent-gated recording
   -> validated response and atomic timeline commit
 ```
 
-The next implementation order is live recording composition, manifest
+A provider result is commit-eligible only when it contains at least one activity
+and continuously covers `0` through `range_duration_ms`; uncertain spans use
+`unknown` rather than being omitted. Empty or partial coverage is terminal
+`ProviderResponseInvalid`, and no generated Timeline entries are committed.
+
+The code path now includes dev-live recording composition, manifest
 ingestion/recovery, root-bound native evidence extraction, background analysis
-supervision, and visible unprocessed/queued/failed/completed states. New Daily,
-Weekly, Chat, export, additional-provider, and visual-polish work is deferred
-unless it is required to complete or verify this chain.
+supervision, atomic Timeline commit, and visible unprocessed/job failure states.
+The remaining implementation priority is to exercise startup intent, the real
+dev-live path, and privacy transitions on Windows, then fix any failures found
+by that smoke. New Daily, Weekly, Journal, Chat, export,
+additional-provider, and visual-polish work remains deferred unless required to
+complete or verify this chain.
 
 This slice is usable only when a clean Windows x64 profile can record, configure
 and test an OpenAI-compatible endpoint, opt in to cloud analysis, and obtain an
@@ -282,7 +306,7 @@ pwsh -File .\scripts\Build-Native.ps1 -Configuration Debug
 
 `Build-Native.ps1` selects an installed Visual Studio generator supported by
 CMake, ignores ambient `CMAKE_GENERATOR*` overrides, preserves x64
-multi-configuration output, builds the C++20 DLL, and runs all fifteen native C
+multi-configuration output, builds the C++20 DLL, and runs all seventeen native C
 and C++ tests with per-test timeouts. Use `-Fresh` to recreate CMake state, or
 `-Generator` to select a specific installed Visual Studio generator.
 
@@ -294,13 +318,52 @@ Run the unpackaged app directly from source:
 dotnet run --project src/WinDayFlow.App/WinDayFlow.App.csproj -c Debug -p:Platform=x64
 ```
 
+This source-run command uses the production capture posture: live capture is
+unavailable, while the local Timeline, provider configuration, manifest scan,
+and analysis pipeline still start normally.
+
 ## Build a Development Bundle
 
-Create a self-contained x64 bundle for manual verification:
+Create the default self-contained x64 bundle, which preserves the production
+capture posture:
 
 ```powershell
 pwsh -File .\scripts\Build-DevPackage.ps1 -Configuration Release -RuntimeIdentifier win-x64
 ```
+
+Launch it without a live-capture argument:
+
+```powershell
+.\artifacts\dev\WinDayFlow-dev-x64\WinDayFlow.App.exe
+```
+
+To build the separate x64 dev-live recorder for controlled manual smoke, run:
+
+```powershell
+pwsh -File .\scripts\Build-DevPackage.ps1 `
+  -Configuration Release `
+  -RuntimeIdentifier win-x64 `
+  -EnableDevLiveCapture
+```
+
+Close any existing WinDayFlow instance, then launch the dev-live executable with
+the exact activation argument:
+
+```powershell
+.\artifacts\dev\WinDayFlow-dev-live-x64\WinDayFlow.App.exe `
+  --enable-dev-live-capture
+```
+
+Run this smoke only from an unlocked local interactive desktop. Session lock,
+the secure desktop, or a foreground target outside the dev allowlist deliberately
+keeps capture fail closed; the conservative defaults also pause for Remote
+Desktop and Windows Presentation Mode. For the current controlled harness, keep
+`WinDayFlow.App.exe` or `cmd.exe` in the foreground while waiting across at
+least one 10-second sampling interval.
+
+The dev-live flavor is intentionally rejected for `win-arm64`. Passing no
+argument, an additional argument, or a differently spelled argument keeps the
+App on the unavailable capture path even when the dev-live flavor was built.
 
 After a successful restore, append `-NoRestore` to skip restoring during
 publish. For Windows on ARM, use `-RuntimeIdentifier win-arm64`.
@@ -313,6 +376,8 @@ It writes:
 ```text
 artifacts/dev/WinDayFlow-dev-x64/
 artifacts/dev/WinDayFlow-dev-x64.zip
+artifacts/dev/WinDayFlow-dev-live-x64/       # with -EnableDevLiveCapture
+artifacts/dev/WinDayFlow-dev-live-x64.zip    # with -EnableDevLiveCapture
 ```
 
 These artifacts are only for development and testing on Windows under the
@@ -323,8 +388,7 @@ transferring `Microsoft.WindowsAppSDK.WinUI` 2.2.1 to a third party. The bundle
 includes [DEV_BUNDLE_LOCAL_ONLY.txt](DEV_BUNDLE_LOCAL_ONLY.txt) as an explicit
 top-level warning.
 
-Launch `WinDayFlow.App.exe` from the generated directory. When using the ZIP,
-extract it completely before launching the executable.
+When using either ZIP, extract it completely before launching the executable.
 
 ## Reference Projects and Licensing
 

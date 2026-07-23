@@ -102,6 +102,7 @@ public sealed class AnalysisJobProcessor
     private readonly IAnalysisEvidenceExtractor _evidenceExtractor;
     private readonly IAnalysisResultCommitter _resultCommitter;
     private readonly AppSettingsService _settings;
+    private readonly AiAnalysisSendGate _sendGate;
     private readonly AnalysisJobProcessorOptions _options;
     private readonly TimeProvider _timeProvider;
 
@@ -126,6 +127,7 @@ public sealed class AnalysisJobProcessor
         _resultCommitter = resultCommitter
             ?? throw new ArgumentNullException(nameof(resultCommitter));
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
+        _sendGate = AiAnalysisSendGate.GetFor(settings);
         _options = options ?? throw new ArgumentNullException(nameof(options));
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
@@ -291,7 +293,8 @@ public sealed class AnalysisJobProcessor
                     cancellationToken)
                 .ConfigureAwait(false);
 
-            AiAnalysisResponse response;
+            AiAnalysisResponse? response = null;
+            ClaimedJobReadiness? sendBlockedReadiness = null;
             try
             {
                 var provider = await _providerFactory
@@ -299,10 +302,40 @@ public sealed class AnalysisJobProcessor
                     .ConfigureAwait(false);
                 try
                 {
-                    EnsureProviderMatchesProfile(provider, profile);
-                    response = await provider
-                        .AnalyzeAsync(request, cancellationToken)
-                        .ConfigureAwait(false);
+                    Task<AiAnalysisResponse>? analysisTask = null;
+                    using (await _sendGate
+                               .EnterAsync(cancellationToken)
+                               .ConfigureAwait(false))
+                    {
+                        var sendReadiness = await CheckClaimedJobReadinessAsync(
+                                current,
+                                cancellationToken)
+                            .ConfigureAwait(false);
+                        if (sendReadiness.Status == ClaimedJobReadinessStatus.Ready)
+                        {
+                            EnsureProviderMatchesProfile(provider, sendReadiness.Profile!);
+                            analysisTask = provider.AnalyzeAsync(request, cancellationToken)
+                                ?? throw new AiProviderException(
+                                    AiProviderErrorCode.InvalidResponse,
+                                    "The AI provider returned no analysis task.",
+                                    Guid.Empty,
+                                    isRetryable: false);
+                        }
+                        else
+                        {
+                            sendBlockedReadiness = sendReadiness;
+                        }
+                    }
+
+                    if (analysisTask is not null)
+                    {
+                        response = await analysisTask.ConfigureAwait(false)
+                            ?? throw new AiProviderException(
+                                AiProviderErrorCode.InvalidResponse,
+                                "The AI provider returned no analysis response.",
+                                Guid.Empty,
+                                isRetryable: false);
+                    }
                 }
                 finally
                 {
@@ -335,6 +368,15 @@ public sealed class AnalysisJobProcessor
                     .ConfigureAwait(false);
             }
 
+            if (sendBlockedReadiness is not null)
+            {
+                return await FailForReadinessAsync(
+                        current,
+                        sendBlockedReadiness.Status,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+
             current = await TransitionAsync(
                     current,
                     AnalysisJobState.Observing,
@@ -345,7 +387,7 @@ public sealed class AnalysisJobProcessor
             IReadOnlyList<TimelineEntry> entries;
             try
             {
-                var activities = AiAnalysisResponseValidator.Validate(request, response);
+                var activities = AiAnalysisResponseValidator.Validate(request, response!);
                 entries = activities
                     .Select((activity, index) => TimelineEntry.FromActivity(
                         CreateTimelineEntryId(current.Id, index),
@@ -654,6 +696,8 @@ public sealed class AnalysisJobProcessor
     {
         return exception switch
         {
+            AnalysisEvidenceExtractionException extractionFailure =>
+                MapExtractionFailure(extractionFailure.FailureKind),
             FileNotFoundException or DirectoryNotFoundException => (
                 AnalysisJobErrorCode.EvidenceMissing,
                 AnalysisFailureDisposition.Terminal),
@@ -669,6 +713,33 @@ public sealed class AnalysisJobProcessor
             IOException => (
                 AnalysisJobErrorCode.ExtractionFailed,
                 AnalysisFailureDisposition.Retryable),
+            _ => (
+                AnalysisJobErrorCode.ExtractionFailed,
+                AnalysisFailureDisposition.Retryable),
+        };
+    }
+
+    private static (AnalysisJobErrorCode Code, AnalysisFailureDisposition Disposition)
+        MapExtractionFailure(AnalysisEvidenceExtractionFailureKind failureKind)
+    {
+        return failureKind switch
+        {
+            AnalysisEvidenceExtractionFailureKind.EvidenceNotFound => (
+                AnalysisJobErrorCode.EvidenceMissing,
+                AnalysisFailureDisposition.Terminal),
+            AnalysisEvidenceExtractionFailureKind.IoFailure
+                or AnalysisEvidenceExtractionFailureKind.CryptoFailure => (
+                    AnalysisJobErrorCode.ExtractionFailed,
+                    AnalysisFailureDisposition.Retryable),
+            AnalysisEvidenceExtractionFailureKind.UnsafeEvidence
+                or AnalysisEvidenceExtractionFailureKind.EvidenceTooLarge
+                or AnalysisEvidenceExtractionFailureKind.EvidenceChanged
+                or AnalysisEvidenceExtractionFailureKind.InvalidEvidence
+                or AnalysisEvidenceExtractionFailureKind.DecoderFailure
+                or AnalysisEvidenceExtractionFailureKind.EvidenceConflict
+                or AnalysisEvidenceExtractionFailureKind.NativeContractFailure => (
+                    AnalysisJobErrorCode.EvidenceInvalid,
+                    AnalysisFailureDisposition.Terminal),
             _ => (
                 AnalysisJobErrorCode.ExtractionFailed,
                 AnalysisFailureDisposition.Retryable),

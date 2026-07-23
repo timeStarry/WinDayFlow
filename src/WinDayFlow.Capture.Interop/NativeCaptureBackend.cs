@@ -20,6 +20,7 @@ internal sealed class NativeCaptureBackend
         throwOnInvalidBytes: true);
 
     private readonly object _statusSync = new();
+    private readonly object _eventPumpObservationSync = new();
     private readonly object _pumpStopSync = new();
     private readonly object _shutdownSync = new();
     private readonly object _persistenceBoundarySync = new();
@@ -40,6 +41,8 @@ internal sealed class NativeCaptureBackend
         });
     private Task _eventPump = Task.CompletedTask;
     private Task _notificationPump = Task.CompletedTask;
+    private TaskCompletionSource _eventPumpObservationChanged =
+        CreateEventPumpObservationSource();
     private CaptureStatus _status;
     private EventHandler<CaptureStatusChangedEventArgs>? _statusChanged;
     private EventHandler<NativeCaptureChunkCommittedEventArgs>? _chunkCommitted;
@@ -49,6 +52,11 @@ internal sealed class NativeCaptureBackend
     private NativePersistenceBoundary _persistenceBoundary = new(0, 0, null, 0);
     private long _callbackInvalidationGeneration;
     private ulong _lastNativeAuthorizationEpoch;
+    private ulong _lastObservedNativeEventSequence;
+    private ulong _lastObservedStoppedSequence;
+    private Exception? _eventPumpFailure;
+    private bool _eventPumpExited;
+    private bool _stopEventObservationRequired;
     private TaskCompletionSource? _callbackOperationsDrained;
     private int _callbackOperationsInFlight;
     private bool _callbackOperationsClosed;
@@ -376,6 +384,10 @@ internal sealed class NativeCaptureBackend
         try
         {
             ThrowIfDisposed();
+            var sequenceBeforeRequest = GetLastObservedNativeEventSequence();
+            var waitForStoppedEvent = _stopEventObservationRequired
+                || CurrentStatus.State != CaptureState.Stopped;
+            var stopStartedAt = Stopwatch.GetTimestamp();
             ThrowForResult(
                 _nativeApi.RequestStop(_handle),
                 "request_stop");
@@ -384,6 +396,20 @@ internal sealed class NativeCaptureBackend
                     _handle,
                     StopTimeoutMilliseconds),
                 "wait_stopped");
+            cancellationToken.ThrowIfCancellationRequested();
+            if (waitForStoppedEvent)
+            {
+                await WaitForManagedStoppedEventAsync(
+                        sequenceBeforeRequest,
+                        stopStartedAt,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                _stopEventObservationRequired = false;
+            }
+            else
+            {
+                ThrowIfEventPumpUnavailableForStop();
+            }
         }
         finally
         {
@@ -888,6 +914,7 @@ internal sealed class NativeCaptureBackend
             }
 
             ThrowForResult(result, operation);
+            _stopEventObservationRequired = true;
         }
         finally
         {
@@ -1152,66 +1179,216 @@ internal sealed class NativeCaptureBackend
     private async Task PollEventsAsync()
     {
         var detailBuffer = new byte[4_096];
-        while (!_lifetimeCancellation.IsCancellationRequested)
+        Exception? pumpFailure = null;
+        try
         {
-            try
+            while (!_lifetimeCancellation.IsCancellationRequested)
             {
-                var captureEvent = NativeCaptureEventV1.Create();
-                var result = _nativeApi.PollEvent(
-                    _handle,
-                    PollTimeoutMilliseconds,
-                    ref captureEvent,
-                    detailBuffer,
-                    checked((uint)detailBuffer.Length),
-                    out var detailRequired);
-                if (result == NativeCaptureResult.NoEvent)
+                try
                 {
-                    continue;
-                }
-
-                if (result == NativeCaptureResult.BufferTooSmall)
-                {
-                    if (detailRequired <= detailBuffer.Length
-                        || detailRequired > MaximumEventDetailBytes)
+                    var captureEvent = NativeCaptureEventV1.Create();
+                    var result = _nativeApi.PollEvent(
+                        _handle,
+                        PollTimeoutMilliseconds,
+                        ref captureEvent,
+                        detailBuffer,
+                        checked((uint)detailBuffer.Length),
+                        out var detailRequired);
+                    if (result == NativeCaptureResult.NoEvent)
                     {
-                        PublishManagedFault(
-                            "Native event detail reported an invalid required buffer size.");
+                        continue;
+                    }
+
+                    if (result == NativeCaptureResult.BufferTooSmall)
+                    {
+                        if (detailRequired <= detailBuffer.Length
+                            || detailRequired > MaximumEventDetailBytes)
+                        {
+                            pumpFailure = new InvalidDataException(
+                                "Native event detail reported an invalid required buffer size.");
+                            PublishManagedFault(pumpFailure.Message);
+                            return;
+                        }
+
+                        detailBuffer = new byte[Math.Max(1, checked((int)detailRequired))];
+                        continue;
+                    }
+
+                    if (result == NativeCaptureResult.InvalidState
+                        && _lifetimeCancellation.IsCancellationRequested)
+                    {
                         return;
                     }
 
-                    detailBuffer = new byte[Math.Max(1, checked((int)detailRequired))];
-                    continue;
-                }
+                    if (result != NativeCaptureResult.Ok)
+                    {
+                        throw new NativeCaptureException(result, "poll_event");
+                    }
 
-                if (result == NativeCaptureResult.InvalidState
-                    && _lifetimeCancellation.IsCancellationRequested)
+                    ValidateNativeEventSequence(captureEvent.Sequence);
+                    if (!ProcessEvent(captureEvent, detailBuffer))
+                    {
+                        pumpFailure = new InvalidDataException(
+                            "The managed native capture event pump stopped after an invalid event.");
+                        return;
+                    }
+
+                    ObserveProcessedNativeEvent(captureEvent);
+                }
+                catch (Exception exception) when (exception is not OperationCanceledException)
                 {
+                    if (!_lifetimeCancellation.IsCancellationRequested)
+                    {
+                        pumpFailure = exception;
+                        PublishManagedFault(exception.GetType().Name);
+                    }
+
                     return;
                 }
 
-                if (result != NativeCaptureResult.Ok)
-                {
-                    throw new NativeCaptureException(result, "poll_event");
-                }
-
-                if (!ProcessEvent(captureEvent, detailBuffer))
-                {
-                    return;
-                }
+                await Task.Yield();
             }
-            catch (Exception exception) when (exception is not OperationCanceledException)
-            {
-                if (!_lifetimeCancellation.IsCancellationRequested)
-                {
-                    PublishManagedFault(exception.GetType().Name);
-                }
-
-                return;
-            }
-
-            await Task.Yield();
+        }
+        finally
+        {
+            MarkEventPumpExited(pumpFailure);
         }
     }
+
+    private ulong GetLastObservedNativeEventSequence()
+    {
+        lock (_eventPumpObservationSync)
+        {
+            return _lastObservedNativeEventSequence;
+        }
+    }
+
+    private void ValidateNativeEventSequence(ulong sequence)
+    {
+        lock (_eventPumpObservationSync)
+        {
+            if (sequence <= _lastObservedNativeEventSequence)
+            {
+                throw new InvalidDataException(
+                    "The native capture event sequence did not advance.");
+            }
+        }
+    }
+
+    private void ObserveProcessedNativeEvent(NativeCaptureEventV1 captureEvent)
+    {
+        TaskCompletionSource? observationChanged = null;
+        var observedStopped =
+            (NativeCaptureEventKind)captureEvent.Kind
+                == NativeCaptureEventKind.StateChanged
+            && (CaptureState)captureEvent.State == CaptureState.Stopped;
+        lock (_eventPumpObservationSync)
+        {
+            _lastObservedNativeEventSequence = captureEvent.Sequence;
+            if (observedStopped)
+            {
+                _lastObservedStoppedSequence = captureEvent.Sequence;
+                observationChanged = _eventPumpObservationChanged;
+                _eventPumpObservationChanged = CreateEventPumpObservationSource();
+            }
+        }
+
+        observationChanged?.TrySetResult();
+    }
+
+    private void MarkEventPumpExited(Exception? failure)
+    {
+        TaskCompletionSource observationChanged;
+        lock (_eventPumpObservationSync)
+        {
+            _eventPumpFailure ??= failure;
+            _eventPumpExited = true;
+            observationChanged = _eventPumpObservationChanged;
+            _eventPumpObservationChanged = CreateEventPumpObservationSource();
+        }
+
+        observationChanged.TrySetResult();
+    }
+
+    private async Task WaitForManagedStoppedEventAsync(
+        ulong sequenceBeforeRequest,
+        long stopStartedAt,
+        CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            Task observationChanged;
+            lock (_eventPumpObservationSync)
+            {
+                if (_lastObservedStoppedSequence > sequenceBeforeRequest)
+                {
+                    return;
+                }
+
+                if (_eventPumpFailure is { } failure)
+                {
+                    throw new InvalidOperationException(
+                        "The managed native capture event pump faulted before observing the terminal stopped event.",
+                        failure);
+                }
+
+                if (_eventPumpExited)
+                {
+                    throw new InvalidOperationException(
+                        "The managed native capture event pump exited before observing the terminal stopped event.");
+                }
+
+                observationChanged = _eventPumpObservationChanged.Task;
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+            var remaining = TimeSpan.FromMilliseconds(StopTimeoutMilliseconds)
+                - Stopwatch.GetElapsedTime(stopStartedAt);
+            if (remaining <= TimeSpan.Zero)
+            {
+                throw CreateManagedStopTimeoutException();
+            }
+
+            try
+            {
+                await observationChanged
+                    .WaitAsync(remaining, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (TimeoutException exception)
+            {
+                throw CreateManagedStopTimeoutException(exception);
+            }
+        }
+    }
+
+    private void ThrowIfEventPumpUnavailableForStop()
+    {
+        lock (_eventPumpObservationSync)
+        {
+            if (_eventPumpFailure is { } failure)
+            {
+                throw new InvalidOperationException(
+                    "The managed native capture event pump faulted before stop completed.",
+                    failure);
+            }
+
+            if (_eventPumpExited)
+            {
+                throw new InvalidOperationException(
+                    "The managed native capture event pump exited before stop completed.");
+            }
+        }
+    }
+
+    private static TaskCompletionSource CreateEventPumpObservationSource() =>
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    private static TimeoutException CreateManagedStopTimeoutException(
+        Exception? innerException = null) =>
+        new(
+            "The managed native capture event pump did not observe the terminal stopped event within the stop timeout.",
+            innerException);
 
     private bool ProcessEvent(NativeCaptureEventV1 captureEvent, byte[] detailBuffer)
     {

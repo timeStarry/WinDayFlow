@@ -6,16 +6,22 @@ namespace WinDayFlow.App;
 
 internal static class Program
 {
+#if WDF_DEV_LIVE_CAPTURE
+    private const string DevLiveCaptureArgument = "--enable-dev-live-capture";
+#endif
     private const uint MessageBoxIconError = 0x00000010;
     private static int _startupFailureShown;
 
     internal static AppInstance? CurrentInstance { get; private set; }
+
+    internal static bool IsDevLiveCaptureRequested { get; private set; }
 
     [STAThread]
     public static void Main(string[] args)
     {
         try
         {
+            IsDevLiveCaptureRequested = IsExactDevLiveCaptureInvocation(args);
             WinRT.ComWrappersSupport.InitializeComWrappers();
             var activationArguments = AppInstance.GetCurrent().GetActivatedEventArgs();
             var registeredInstance = AppInstance.FindOrRegisterForKey("WinDayFlow.Main");
@@ -52,6 +58,17 @@ internal static class Program
             ShowStartupFailure();
             Environment.ExitCode = 1;
         }
+    }
+
+    private static bool IsExactDevLiveCaptureInvocation(string[] args)
+    {
+#if WDF_DEV_LIVE_CAPTURE
+        return args.Length == 1
+            && string.Equals(args[0], DevLiveCaptureArgument, StringComparison.Ordinal);
+#else
+        _ = args;
+        return false;
+#endif
     }
 
     internal static void WriteStartupFailure(Exception exception)

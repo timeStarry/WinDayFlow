@@ -8,7 +8,13 @@ endif()
 
 include(CTest)
 
+option(
+  WDF_ENABLE_DEV_LIVE_CAPTURE
+  "Enable the development-only live capture controller and capability bits."
+  OFF)
+
 add_library(windayflow_capture_core STATIC
+  internal/analysis_evidence_extractor.cpp
   internal/atomic_chunk_store.cpp
   internal/capture_chunk_fingerprint.cpp
   internal/capture_event_queue.cpp
@@ -33,14 +39,17 @@ target_include_directories(windayflow_capture_core
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/internal)
 target_link_libraries(windayflow_capture_core PUBLIC
-  bcrypt d3d11 dxgi mf mfplat mfreadwrite mfuuid ole32 user32 windowscodecs)
+  bcrypt d3d11 dxgi mf mfplat mfreadwrite mfuuid ole32 oleaut32 user32
+  windowscodecs)
 
 add_library(windayflow_capture SHARED
   src/capture_c_api.cpp
   src/windayflow_capture.def)
 
 target_compile_features(windayflow_capture PRIVATE cxx_std_20)
-target_compile_definitions(windayflow_capture PRIVATE WDF_CAPTURE_BUILD)
+target_compile_definitions(windayflow_capture PRIVATE
+  WDF_CAPTURE_BUILD
+  WDF_ENABLE_DEV_LIVE_CAPTURE=$<BOOL:${WDF_ENABLE_DEV_LIVE_CAPTURE}>)
 target_include_directories(windayflow_capture
   PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/internal)
@@ -81,7 +90,10 @@ if(BUILD_TESTING)
     target_include_directories(${target} PRIVATE
       ${CMAKE_CURRENT_SOURCE_DIR}/include
       ${CMAKE_CURRENT_SOURCE_DIR}/internal)
-    target_compile_definitions(${target} PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_compile_definitions(${target} PRIVATE
+      NOMINMAX
+      WIN32_LEAN_AND_MEAN
+      WDF_ENABLE_DEV_LIVE_CAPTURE=$<BOOL:${WDF_ENABLE_DEV_LIVE_CAPTURE}>)
     if(MSVC)
       target_compile_options(${target} PRIVATE
         /W4 /WX /permissive- /EHsc /guard:cf /utf-8)
@@ -105,6 +117,11 @@ if(BUILD_TESTING)
   add_windayflow_native_test(capture_chunk_fingerprint_tests
     tests/capture_chunk_fingerprint_tests.cpp)
   target_link_libraries(capture_chunk_fingerprint_tests PRIVATE
+    windayflow_capture_core)
+
+  add_windayflow_native_test(analysis_evidence_extractor_tests
+    tests/analysis_evidence_extractor_tests.cpp)
+  target_link_libraries(analysis_evidence_extractor_tests PRIVATE
     windayflow_capture_core)
 
   add_windayflow_native_test(capture_event_queue_tests tests/capture_event_queue_tests.cpp)
@@ -150,7 +167,9 @@ if(BUILD_TESTING)
     windayflow_capture_core)
 
   add_windayflow_native_test(capture_c_api_tests tests/capture_c_api_tests.cpp)
-  target_link_libraries(capture_c_api_tests PRIVATE windayflow_capture)
+  target_link_libraries(capture_c_api_tests PRIVATE
+    windayflow_capture
+    windayflow_capture_core)
 
   add_executable(c_header_compatibility_test
     tests/c_header_compatibility_test.c)
@@ -161,7 +180,9 @@ if(BUILD_TESTING)
   target_include_directories(c_header_compatibility_test PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include)
   target_compile_definitions(c_header_compatibility_test PRIVATE
-    NOMINMAX WIN32_LEAN_AND_MEAN)
+    NOMINMAX
+    WIN32_LEAN_AND_MEAN
+    WDF_ENABLE_DEV_LIVE_CAPTURE=$<BOOL:${WDF_ENABLE_DEV_LIVE_CAPTURE}>)
   target_link_libraries(c_header_compatibility_test PRIVATE
     windayflow_capture)
   if(MSVC)

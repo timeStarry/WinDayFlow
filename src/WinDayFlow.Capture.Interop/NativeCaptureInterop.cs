@@ -28,6 +28,9 @@ internal enum NativeCaptureResult
     EvidenceChanged = -18,
     IoFailure = -19,
     CryptoFailure = -20,
+    EvidenceInvalid = -21,
+    DecoderFailure = -22,
+    EvidenceConflict = -23,
     InternalError = -255,
 }
 
@@ -545,6 +548,36 @@ internal static class NativeCaptureMethods
         [Out] byte[] fingerprintUtf8,
         uint fingerprintUtf8Capacity,
         out uint fingerprintUtf8Required);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern NativeCaptureResult wdf_capture_extract_analysis_evidence(
+        [In] byte[] dataRootUtf8,
+        uint dataRootUtf8Length,
+        [In] byte[] canonicalChunkIdUtf8,
+        uint canonicalChunkIdUtf8Length,
+        ulong expectedVideoByteCount,
+        uint expectedFrameCount,
+        uint expectedVideoWidth,
+        uint expectedVideoHeight,
+        ulong expectedDurationMilliseconds,
+        [In] byte[] expectedSourceFingerprintUtf8,
+        uint expectedSourceFingerprintUtf8Length,
+        [Out] byte[] manifestUtf8,
+        uint manifestUtf8Capacity,
+        out uint manifestUtf8Required);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern NativeCaptureResult wdf_capture_read_analysis_evidence_frame(
+        [In] byte[] dataRootUtf8,
+        uint dataRootUtf8Length,
+        [In] byte[] canonicalChunkIdUtf8,
+        uint canonicalChunkIdUtf8Length,
+        [In] byte[] canonicalSourceFingerprintUtf8,
+        uint canonicalSourceFingerprintUtf8Length,
+        uint frameIndex,
+        [Out] byte[] frameBytes,
+        uint frameBytesCapacity,
+        out uint frameBytesRequired);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true,
         EntryPoint = "wdf_capture_destroy")]

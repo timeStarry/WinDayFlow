@@ -13,6 +13,8 @@ public sealed class OpenAiCompatibleProviderTests
 {
     private static readonly DateTimeOffset Start =
         new(2026, 7, 23, 9, 0, 0, TimeSpan.FromHours(8));
+    private static readonly string[] EditorApplicationIds = ["editor.exe"];
+    private static readonly string[] CodingTags = ["coding"];
 
     [Fact]
     public async Task AnalyzeAsyncPostsStrictStructuredRequestAndMapsResponse()
@@ -42,6 +44,17 @@ public sealed class OpenAiCompatibleProviderTests
         Assert.True(jsonSchema.GetProperty("strict").GetBoolean());
         Assert.False(
             jsonSchema.GetProperty("schema").GetProperty("additionalProperties").GetBoolean());
+        var activitiesSchema = jsonSchema
+            .GetProperty("schema")
+            .GetProperty("properties")
+            .GetProperty("activities");
+        Assert.Equal(1, activitiesSchema.GetProperty("minItems").GetInt32());
+        Assert.Equal(
+            AiAnalysisContract.MaximumActivities,
+            activitiesSchema.GetProperty("maxItems").GetInt32());
+        var systemPrompt = root.GetProperty("messages")[0].GetProperty("content").GetString();
+        Assert.Contains("first start_offset_ms must be 0", systemPrompt, StringComparison.Ordinal);
+        Assert.Contains("no time is omitted", systemPrompt, StringComparison.Ordinal);
         var content = root.GetProperty("messages")[1].GetProperty("content");
         var imagePart = content.EnumerateArray().Single(
             static part => part.GetProperty("type").GetString() == "image_url");
@@ -278,6 +291,23 @@ public sealed class OpenAiCompatibleProviderTests
         Assert.DoesNotContain("not-in-request", badReference.Message, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("empty")]
+    [InlineData("leading_gap")]
+    [InlineData("trailing_gap")]
+    [InlineData("internal_gap")]
+    public async Task IncompleteStructuredCoverageMapsToInvalidResponse(string coverage)
+    {
+        var handler = new RecordingHandler((_, _) => Task.FromResult(
+            SuccessResponse(coverage: coverage)));
+        using var provider = CreateProvider(handler);
+
+        var exception = await Assert.ThrowsAsync<AiProviderException>(() =>
+            provider.AnalyzeAsync(CreateRequest()));
+
+        Assert.Equal(AiProviderErrorCode.InvalidResponse, exception.ErrorCode);
+    }
+
     private static OpenAiCompatibleProvider CreateProvider(HttpMessageHandler handler)
     {
         return new OpenAiCompatibleProvider(
@@ -319,30 +349,42 @@ public sealed class OpenAiCompatibleProviderTests
 
     private static HttpResponseMessage SuccessResponse(
         bool addUnknownProperty = false,
-        string frameId = "frame-1")
+        string frameId = "frame-1",
+        string coverage = "complete")
     {
-        var activity = new Dictionary<string, object?>
+        IReadOnlyList<(long Start, long End)> intervals = coverage switch
         {
-            ["start_offset_ms"] = 0,
-            ["end_offset_ms"] = 60_000,
-            ["title"] = "Implement provider adapter",
-            ["summary"] = "Build and test the OpenAI-compatible boundary.",
-            ["category"] = "focused_work",
-            ["productivity"] = "focused",
-            ["application_ids"] = new[] { "editor.exe" },
-            ["tags"] = new[] { "coding" },
-            ["confidence"] = 0.9,
-            ["evidence_frame_ids"] = new[] { frameId },
+            "complete" => [(0, 60_000)],
+            "empty" => [],
+            "leading_gap" => [(1, 60_000)],
+            "trailing_gap" => [(0, 59_999)],
+            "internal_gap" => [(0, 20_000), (30_000, 60_000)],
+            _ => throw new ArgumentOutOfRangeException(nameof(coverage)),
         };
+        var activities = intervals
+            .Select(interval => new Dictionary<string, object?>
+            {
+                ["start_offset_ms"] = interval.Start,
+                ["end_offset_ms"] = interval.End,
+                ["title"] = "Implement provider adapter",
+                ["summary"] = "Build and test the OpenAI-compatible boundary.",
+                ["category"] = "focused_work",
+                ["productivity"] = "focused",
+                ["application_ids"] = EditorApplicationIds,
+                ["tags"] = CodingTags,
+                ["confidence"] = 0.9,
+                ["evidence_frame_ids"] = new[] { frameId },
+            })
+            .ToArray();
         if (addUnknownProperty)
         {
-            activity["unexpected"] = true;
+            activities[0]["unexpected"] = true;
         }
 
         var structured = JsonSerializer.Serialize(new Dictionary<string, object?>
         {
             ["schema_version"] = AiAnalysisContract.CurrentSchemaVersion,
-            ["activities"] = new[] { activity },
+            ["activities"] = activities,
         });
         var envelope = JsonSerializer.Serialize(new Dictionary<string, object?>
         {

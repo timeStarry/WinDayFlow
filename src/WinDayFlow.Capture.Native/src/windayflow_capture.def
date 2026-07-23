@@ -17,4 +17,6 @@ EXPORTS
   wdf_capture_wait_stopped
   wdf_capture_poll_event
   wdf_capture_compute_chunk_fingerprint
+  wdf_capture_extract_analysis_evidence
+  wdf_capture_read_analysis_evidence_frame
   wdf_capture_destroy

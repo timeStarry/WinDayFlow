@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.Runtime.ExceptionServices;
 using CommunityToolkit.Mvvm.ComponentModel;
 using WinDayFlow.Application.Capture;
 using WinDayFlow.Application.Settings;
@@ -39,13 +40,14 @@ public sealed partial class SettingsViewModel : ObservableObject, IDisposable
 
     public SettingsViewModel(
         AppSettingsService settingsService,
-        ICaptureService captureService)
+        ICaptureService captureService,
+        bool isExclusionEngineAvailable = false)
     {
         _settingsService = settingsService
             ?? throw new ArgumentNullException(nameof(settingsService));
         _captureService = captureService
             ?? throw new ArgumentNullException(nameof(captureService));
-        _isExclusionEngineAvailable = false;
+        _isExclusionEngineAvailable = isExclusionEngineAvailable;
         ExclusionRules = new ReadOnlyObservableCollection<ExclusionRuleItemViewModel>(
             _exclusionRules);
         _synchronizationContext = SynchronizationContext.Current;
@@ -227,13 +229,43 @@ public sealed partial class SettingsViewModel : ObservableObject, IDisposable
                 else
                 {
                     var shouldStop = ShouldStopCapture(_captureService.CurrentStatus.State);
-                    await _settingsService
-                        .SetCaptureEnabledAsync(enabled: false, token)
-                        .ConfigureAwait(false);
+                    ExceptionDispatchInfo? stopFailure = null;
                     if (shouldStop)
                     {
-                        await _captureService.StopAsync(token).ConfigureAwait(false);
+                        try
+                        {
+                            await _captureService.StopAsync(token).ConfigureAwait(false);
+                        }
+                        catch (Exception exception)
+                        {
+                            stopFailure = ExceptionDispatchInfo.Capture(exception);
+                        }
                     }
+
+                    try
+                    {
+                        // Once an explicit stop begins, persist the fail-closed intent even
+                        // when stopping or the originating UI operation is cancelled.
+                        await _settingsService
+                            .SetCaptureEnabledAsync(
+                                enabled: false,
+                                CancellationToken.None)
+                            .ConfigureAwait(false);
+                    }
+                    catch (Exception persistenceFailure)
+                    {
+                        if (stopFailure is not null)
+                        {
+                            throw new AggregateException(
+                                "Stopping capture and persisting the disabled state both failed.",
+                                stopFailure.SourceException,
+                                persistenceFailure);
+                        }
+
+                        throw;
+                    }
+
+                    stopFailure?.Throw();
                 }
             },
             CaptureErrorText,

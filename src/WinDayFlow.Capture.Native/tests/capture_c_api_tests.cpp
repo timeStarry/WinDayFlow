@@ -1,6 +1,7 @@
 #include "windayflow_capture.h"
 
 #include <Windows.h>
+#include <bcrypt.h>
 
 #include <array>
 #include <atomic>
@@ -8,14 +9,26 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <limits>
+#include <span>
 #include <string>
 #include <string_view>
 #include <thread>
 #include <vector>
 
+#include "mf_h264_chunk_writer.h"
+
 namespace {
+
+static_assert(WDF_CAPTURE_RESULT_EVIDENCE_INVALID == -21);
+static_assert(WDF_CAPTURE_RESULT_DECODER_FAILURE == -22);
+static_assert(WDF_CAPTURE_RESULT_EVIDENCE_CONFLICT == -23);
+
+using windayflow::capture::MfH264ChunkWriter;
+using windayflow::capture::MfH264ChunkWriterConfig;
 
 bool Expect(bool condition, const char* message) {
   if (condition) {
@@ -138,6 +151,164 @@ bool PollEvent(wdf_capture_handle handle,
                 "event detail byte length was incorrect");
 }
 
+std::filesystem::path UniqueEvidenceTestRoot() {
+  std::array<wchar_t, MAX_PATH + 1> temporary{};
+  const DWORD length =
+      GetTempPathW(static_cast<DWORD>(temporary.size()), temporary.data());
+  std::array<uint8_t, 16> nonce{};
+  if (length == 0 || length >= temporary.size() ||
+      BCryptGenRandom(nullptr, nonce.data(), static_cast<ULONG>(nonce.size()),
+                      BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0) {
+    return {};
+  }
+  constexpr wchar_t kHex[] = L"0123456789abcdef";
+  std::wstring suffix;
+  for (const uint8_t value : nonce) {
+    suffix.push_back(kHex[(value >> 4U) & 0x0FU]);
+    suffix.push_back(kHex[value & 0x0FU]);
+  }
+  return std::filesystem::path(temporary.data()) /
+         (L"WinDayFlow-CAbiEvidence-" + suffix);
+}
+
+class ScopedEvidenceTestRoot final {
+ public:
+  ScopedEvidenceTestRoot() : path_(UniqueEvidenceTestRoot()) {
+    std::error_code error;
+    std::filesystem::create_directories(path_, error);
+  }
+
+  ~ScopedEvidenceTestRoot() {
+    std::error_code ignored;
+    std::filesystem::remove_all(path_, ignored);
+  }
+
+  const std::filesystem::path& path() const noexcept { return path_; }
+
+ private:
+  std::filesystem::path path_;
+};
+
+std::string ToUtf8(const std::wstring& value) {
+  if (value.empty()) {
+    return {};
+  }
+  const int required = WideCharToMultiByte(
+      CP_UTF8, WC_ERR_INVALID_CHARS, value.data(), static_cast<int>(value.size()),
+      nullptr, 0, nullptr, nullptr);
+  if (required <= 0) {
+    return {};
+  }
+  std::string encoded(static_cast<size_t>(required), '\0');
+  return WideCharToMultiByte(
+             CP_UTF8, WC_ERR_INVALID_CHARS, value.data(),
+             static_cast<int>(value.size()), encoded.data(), required, nullptr,
+             nullptr) == required
+             ? encoded
+             : std::string();
+}
+
+bool WriteBytes(const std::filesystem::path& path,
+                std::span<const uint8_t> bytes) {
+  std::ofstream output(path, std::ios::binary | std::ios::trunc);
+  output.write(reinterpret_cast<const char*>(bytes.data()),
+               static_cast<std::streamsize>(bytes.size()));
+  return output.good();
+}
+
+std::vector<uint8_t> MakeEvidenceSourceFrame(uint8_t frame_index) {
+  constexpr uint32_t kWidth = 64;
+  constexpr uint32_t kHeight = 48;
+  std::vector<uint8_t> pixels(kWidth * kHeight * 4U);
+  for (uint32_t y = 0; y < kHeight; ++y) {
+    for (uint32_t x = 0; x < kWidth; ++x) {
+      const size_t offset = (static_cast<size_t>(y) * kWidth + x) * 4U;
+      pixels[offset] = static_cast<uint8_t>(x + frame_index * 7U);
+      pixels[offset + 1U] = static_cast<uint8_t>(y + frame_index * 11U);
+      pixels[offset + 2U] = static_cast<uint8_t>(x + y + frame_index * 13U);
+      pixels[offset + 3U] = 0xFFU;
+    }
+  }
+  return pixels;
+}
+
+bool CreateEvidenceSourceVideo(std::vector<uint8_t>* video) {
+  if (video == nullptr) {
+    return false;
+  }
+  MfH264ChunkWriterConfig config;
+  config.width = 64;
+  config.height = 48;
+  config.frame_rate_numerator = 10;
+  config.frame_rate_denominator = 1;
+  config.average_bitrate = 2'500'000;
+  MfH264ChunkWriter writer;
+  HRESULT result = writer.Begin(config);
+  for (uint32_t index = 0; SUCCEEDED(result) && index < 10U; ++index) {
+    const std::vector<uint8_t> frame =
+        MakeEvidenceSourceFrame(static_cast<uint8_t>(index));
+    result = writer.AddFrame(
+        frame, static_cast<int64_t>(index) *
+                   windayflow::capture::kMediaFoundationTicksPerSecond / 10);
+  }
+  if (SUCCEEDED(result)) {
+    result = writer.Finalize(
+        windayflow::capture::kMediaFoundationTicksPerSecond, video);
+  }
+  return SUCCEEDED(result) && !video->empty();
+}
+
+bool WriteEvidenceSourceChunk(const std::filesystem::path& root,
+                              std::string_view chunk_id,
+                              std::span<const uint8_t> video) {
+  const std::filesystem::path directory =
+      root / L"chunks" / std::wstring(chunk_id.begin(), chunk_id.end());
+  std::error_code error;
+  std::filesystem::create_directories(directory, error);
+  constexpr std::array<uint8_t, 2> kManifest{'{', '}'};
+  return !error && WriteBytes(directory / L"manifest.json", kManifest) &&
+         WriteBytes(directory / L"capture.mp4", video);
+}
+
+std::string ComputeEvidenceSourceFingerprint(std::string_view root_utf8,
+                                             std::string_view chunk_id,
+                                             size_t video_byte_count) {
+  std::array<char, WDF_CAPTURE_CHUNK_FINGERPRINT_UTF8_CAPACITY> fingerprint{};
+  uint32_t required = 0;
+  const wdf_capture_result result = wdf_capture_compute_chunk_fingerprint(
+      root_utf8.data(), static_cast<uint32_t>(root_utf8.size()),
+      chunk_id.data(), static_cast<uint32_t>(chunk_id.size()), video_byte_count,
+      fingerprint.data(), static_cast<uint32_t>(fingerprint.size()), &required);
+  return result == WDF_CAPTURE_RESULT_OK && required == fingerprint.size()
+             ? std::string(fingerprint.data(),
+                           WDF_CAPTURE_CHUNK_FINGERPRINT_UTF8_LENGTH)
+             : std::string();
+}
+
+wdf_capture_result ExtractEvidenceViaAbi(
+    std::string_view root_utf8, std::string_view chunk_id,
+    size_t video_byte_count, uint32_t expected_frame_count,
+    std::string_view fingerprint, char* manifest, uint32_t manifest_capacity,
+    uint32_t* manifest_required) {
+  return wdf_capture_extract_analysis_evidence(
+      root_utf8.data(), static_cast<uint32_t>(root_utf8.size()),
+      chunk_id.data(), static_cast<uint32_t>(chunk_id.size()), video_byte_count,
+      expected_frame_count, 64, 48, 1'000, fingerprint.data(),
+      static_cast<uint32_t>(fingerprint.size()), manifest, manifest_capacity,
+      manifest_required);
+}
+
+wdf_capture_result ReadEvidenceFrameViaAbi(
+    std::string_view root_utf8, std::string_view chunk_id,
+    std::string_view fingerprint, uint32_t frame_index, uint8_t* frame_bytes,
+    uint32_t frame_capacity, uint32_t* frame_required) {
+  return wdf_capture_read_analysis_evidence_frame(
+      root_utf8.data(), static_cast<uint32_t>(root_utf8.size()),
+      chunk_id.data(), static_cast<uint32_t>(chunk_id.size()),
+      fingerprint.data(), static_cast<uint32_t>(fingerprint.size()),
+      frame_index, frame_bytes, frame_capacity, frame_required);
+}
+
 bool TestAbiAndArgumentValidation() {
   if (!Expect(wdf_capture_get_abi_version() == WDF_CAPTURE_ABI_VERSION,
               "ABI version query was incorrect")) {
@@ -166,13 +337,28 @@ bool TestAbiAndArgumentValidation() {
                    (capabilities &
                     WDF_CAPTURE_CAPABILITY_CALLBACK_TIME_AUTHORIZATION_INVALIDATION) !=
                        0 &&
-                   (capabilities & WDF_CAPTURE_CAPABILITY_SCREEN_CAPTURE) == 0 &&
-                  (capabilities & WDF_CAPTURE_CAPABILITY_H264_CHUNKS) == 0 &&
                   (capabilities &
                    WDF_CAPTURE_CAPABILITY_EVIDENCE_EXTRACTION) == 0,
               "foundation capabilities were incorrect")) {
     return false;
   }
+  const wdf_capture_capabilities live_capabilities =
+      capabilities & (WDF_CAPTURE_CAPABILITY_SCREEN_CAPTURE |
+                      WDF_CAPTURE_CAPABILITY_H264_CHUNKS |
+                      WDF_CAPTURE_CAPABILITY_EVIDENCE_EXTRACTION);
+#if WDF_ENABLE_DEV_LIVE_CAPTURE
+  if (!Expect(live_capabilities ==
+                  (WDF_CAPTURE_CAPABILITY_SCREEN_CAPTURE |
+                   WDF_CAPTURE_CAPABILITY_H264_CHUNKS),
+              "development live-capture capabilities were not enabled")) {
+    return false;
+  }
+#else
+  if (!Expect(live_capabilities == 0,
+              "production live-capture capabilities were enabled")) {
+    return false;
+  }
+#endif
 
   wdf_capture_config_v1 config = ValidConfig();
   wdf_capture_handle handle = 0;
@@ -328,11 +514,16 @@ bool TestLifecycleIsPrivacyGatedAndUnavailable() {
   std::string detail;
   if (!PollEvent(handle, &event, &detail) ||
       !Expect(event.sequence == 1 &&
+#if WDF_ENABLE_DEV_LIVE_CAPTURE
+                  event.state == WDF_CAPTURE_STATE_STOPPED &&
+                  event.reason == WDF_CAPTURE_REASON_NONE &&
+#else
                   event.state == WDF_CAPTURE_STATE_UNAVAILABLE &&
                   event.reason == WDF_CAPTURE_REASON_BACKEND_UNAVAILABLE &&
+#endif
                   event.persistence_generation == 1 &&
                   event.target_epoch == 0,
-              "initial unavailable event was incorrect")) {
+              "initial activation-mode event was incorrect")) {
     wdf_capture_destroy(&handle);
     return false;
   }
@@ -361,6 +552,15 @@ bool TestLifecycleIsPrivacyGatedAndUnavailable() {
     return false;
   }
 
+#if WDF_ENABLE_DEV_LIVE_CAPTURE
+  if (!Expect(wdf_capture_request_stop(handle) == WDF_CAPTURE_RESULT_OK,
+              "stopped development controller rejected stop") ||
+      !Expect(wdf_capture_wait_stopped(handle, 0) == WDF_CAPTURE_RESULT_OK,
+              "stopped development controller did not remain stopped")) {
+    wdf_capture_destroy(&handle);
+    return false;
+  }
+#else
   wdf_capture_privacy_context_v1 legacy_during_stop =
       PrivacyContext(WDF_CAPTURE_POLICY_ALLOW, 3);
   wdf_capture_runtime_authorization_v1 runtime_during_stop =
@@ -392,6 +592,7 @@ bool TestLifecycleIsPrivacyGatedAndUnavailable() {
     wdf_capture_destroy(&handle);
     return false;
   }
+#endif
 
   const wdf_capture_handle stale = handle;
   return Expect(wdf_capture_destroy(&handle) == WDF_CAPTURE_RESULT_OK &&
@@ -808,6 +1009,12 @@ bool TestCallbackTimeAuthorizationInvalidationContract() {
 }
 
 bool TestCommandAdmissionAuthenticityAndOwnership() {
+#if WDF_ENABLE_DEV_LIVE_CAPTURE
+  // The disabled build exercises one-shot admission without starting a real
+  // Desktop Duplication worker. Enabled-mode lifecycle is covered by the
+  // controller tests and the development-bundle smoke test.
+  return true;
+#else
   wdf_capture_config_v1 config = ValidConfig();
   wdf_capture_handle first = 0;
   wdf_capture_handle second = 0;
@@ -984,9 +1191,13 @@ bool TestCommandAdmissionAuthenticityAndOwnership() {
   wdf_capture_destroy(&first);
   wdf_capture_destroy(&second);
   return valid;
+#endif
 }
 
 bool TestCommandAdmissionInvalidationAndConcurrency() {
+#if WDF_ENABLE_DEV_LIVE_CAPTURE
+  return true;
+#else
   wdf_capture_config_v1 config = ValidConfig();
   wdf_capture_handle handle = 0;
   if (wdf_capture_create(&config, &handle) != WDF_CAPTURE_RESULT_OK) {
@@ -1208,9 +1419,13 @@ bool TestCommandAdmissionInvalidationAndConcurrency() {
              "destroyed admission crossed recreated instance");
   wdf_capture_destroy(&recreated);
   return valid;
+#endif
 }
 
 bool TestCommandAdmissionDestroyRace() {
+#if WDF_ENABLE_DEV_LIVE_CAPTURE
+  return true;
+#else
   wdf_capture_config_v1 config = ValidConfig();
   for (int iteration = 0; iteration < 32; ++iteration) {
     wdf_capture_handle handle = 0;
@@ -1260,6 +1475,7 @@ bool TestCommandAdmissionDestroyRace() {
     }
   }
   return true;
+#endif
 }
 
 bool TestCallbackInvalidationDestroyRace() {
@@ -1477,6 +1693,173 @@ bool TestEventStructureValidation() {
   return structure_rejected && timeout_rejected;
 }
 
+bool TestAnalysisEvidenceBufferAndErrorContracts() {
+  ScopedEvidenceTestRoot root;
+  const std::string root_utf8 = ToUtf8(root.path().native());
+  std::vector<uint8_t> video;
+  constexpr std::string_view kRealChunk = "c-abi-real";
+  constexpr std::string_view kInvalidChunk = "c-abi-invalid-count";
+  constexpr std::string_view kCorruptChunk = "c-abi-corrupt";
+  constexpr std::array<uint8_t, 8> kCorruptVideo{1, 2, 3, 4, 5, 6, 7, 8};
+  if (!Expect(!root.path().empty() && !root_utf8.empty(),
+              "evidence C ABI test root setup failed") ||
+      !Expect(CreateEvidenceSourceVideo(&video),
+              "evidence C ABI source encoding failed") ||
+      !Expect(WriteEvidenceSourceChunk(root.path(), kRealChunk, video) &&
+                  WriteEvidenceSourceChunk(root.path(), kInvalidChunk, video) &&
+                  WriteEvidenceSourceChunk(root.path(), kCorruptChunk,
+                                           kCorruptVideo),
+              "evidence C ABI source publication failed")) {
+    return false;
+  }
+
+  const std::string fingerprint = ComputeEvidenceSourceFingerprint(
+      root_utf8, kRealChunk, video.size());
+  const std::string invalid_fingerprint = ComputeEvidenceSourceFingerprint(
+      root_utf8, kInvalidChunk, video.size());
+  const std::string corrupt_fingerprint = ComputeEvidenceSourceFingerprint(
+      root_utf8, kCorruptChunk, kCorruptVideo.size());
+  if (!Expect(fingerprint.size() ==
+                  WDF_CAPTURE_CHUNK_FINGERPRINT_UTF8_LENGTH &&
+                  invalid_fingerprint.size() ==
+                      WDF_CAPTURE_CHUNK_FINGERPRINT_UTF8_LENGTH &&
+                  corrupt_fingerprint.size() ==
+                      WDF_CAPTURE_CHUNK_FINGERPRINT_UTF8_LENGTH,
+              "evidence C ABI source fingerprinting failed")) {
+    return false;
+  }
+
+  uint32_t manifest_required = 99;
+  if (!Expect(ExtractEvidenceViaAbi(root_utf8, kRealChunk, video.size(), 10,
+                                    fingerprint, nullptr, 0,
+                                    &manifest_required) ==
+                  WDF_CAPTURE_RESULT_BUFFER_TOO_SMALL &&
+                  manifest_required > 1 &&
+                  manifest_required <=
+                      WDF_CAPTURE_ANALYSIS_EVIDENCE_MANIFEST_UTF8_CAPACITY,
+              "evidence manifest sizing contract was incorrect")) {
+    return false;
+  }
+  const uint32_t expected_manifest_required = manifest_required;
+  std::vector<char> short_manifest(expected_manifest_required, 'x');
+  manifest_required = 0;
+  if (!Expect(ExtractEvidenceViaAbi(
+                  root_utf8, kRealChunk, video.size(), 10, fingerprint,
+                  short_manifest.data(), expected_manifest_required - 1U,
+                  &manifest_required) == WDF_CAPTURE_RESULT_BUFFER_TOO_SMALL &&
+                  manifest_required == expected_manifest_required &&
+                  short_manifest.front() == '\0',
+              "short evidence manifest buffer was not cleared and resized")) {
+    return false;
+  }
+  std::vector<char> manifest(expected_manifest_required, 'x');
+  manifest_required = 0;
+  if (!Expect(ExtractEvidenceViaAbi(
+                  root_utf8, kRealChunk, video.size(), 10, fingerprint,
+                  manifest.data(), static_cast<uint32_t>(manifest.size()),
+                  &manifest_required) == WDF_CAPTURE_RESULT_OK &&
+                  manifest_required == expected_manifest_required &&
+                  manifest.back() == '\0' &&
+                  std::string_view(manifest.data()).find(fingerprint) !=
+                      std::string_view::npos,
+              "exact evidence manifest buffer could not be read")) {
+    return false;
+  }
+
+  uint32_t frame_required = 99;
+  if (!Expect(ReadEvidenceFrameViaAbi(root_utf8, kRealChunk, fingerprint, 0,
+                                     nullptr, 0, &frame_required) ==
+                  WDF_CAPTURE_RESULT_BUFFER_TOO_SMALL &&
+                  frame_required >= 4 &&
+                  frame_required <=
+                      WDF_CAPTURE_ANALYSIS_EVIDENCE_FRAME_MAX_BYTES,
+              "evidence frame sizing contract was incorrect")) {
+    return false;
+  }
+  const uint32_t expected_frame_required = frame_required;
+  std::vector<uint8_t> short_frame(expected_frame_required, 0x7FU);
+  frame_required = 0;
+  if (!Expect(ReadEvidenceFrameViaAbi(
+                  root_utf8, kRealChunk, fingerprint, 0, short_frame.data(),
+                  expected_frame_required - 1U, &frame_required) ==
+                  WDF_CAPTURE_RESULT_BUFFER_TOO_SMALL &&
+                  frame_required == expected_frame_required &&
+                  short_frame.front() == 0,
+              "short evidence frame buffer was not cleared and resized")) {
+    return false;
+  }
+  std::vector<uint8_t> frame(expected_frame_required, 0);
+  frame_required = 0;
+  if (!Expect(ReadEvidenceFrameViaAbi(
+                  root_utf8, kRealChunk, fingerprint, 0, frame.data(),
+                  static_cast<uint32_t>(frame.size()), &frame_required) ==
+                  WDF_CAPTURE_RESULT_OK &&
+                  frame_required == expected_frame_required &&
+                  frame.front() == 0xFFU && frame[1] == 0xD8U &&
+                  frame[frame.size() - 2U] == 0xFFU && frame.back() == 0xD9U,
+              "exact evidence frame buffer could not be read")) {
+    return false;
+  }
+
+  std::array<char, 32> failed_manifest{};
+  failed_manifest.fill('x');
+  manifest_required = 99;
+  if (!Expect(ExtractEvidenceViaAbi(
+                  root_utf8, kInvalidChunk, video.size(), 9,
+                  invalid_fingerprint, failed_manifest.data(),
+                  static_cast<uint32_t>(failed_manifest.size()),
+                  &manifest_required) == WDF_CAPTURE_RESULT_EVIDENCE_INVALID &&
+                  manifest_required == 0 && failed_manifest.front() == '\0',
+              "invalid evidence did not preserve its stable C ABI contract")) {
+    return false;
+  }
+
+  failed_manifest.fill('x');
+  manifest_required = 99;
+  if (!Expect(ExtractEvidenceViaAbi(
+                  root_utf8, kCorruptChunk, kCorruptVideo.size(), 1,
+                  corrupt_fingerprint, failed_manifest.data(),
+                  static_cast<uint32_t>(failed_manifest.size()),
+                  &manifest_required) == WDF_CAPTURE_RESULT_DECODER_FAILURE &&
+                  manifest_required == 0 && failed_manifest.front() == '\0',
+              "decoder failure did not preserve its stable C ABI contract")) {
+    return false;
+  }
+
+  frame[frame.size() / 2U] ^= 1U;
+  const std::filesystem::path published_frame =
+      root.path() / L"evidence" / L"evidence-v1" / L"c-abi-real" /
+      std::wstring(fingerprint.begin(), fingerprint.end()) /
+      L"frame-0000.jpg";
+  if (!Expect(WriteBytes(published_frame, frame),
+              "published evidence conflict setup failed")) {
+    return false;
+  }
+  failed_manifest.fill('x');
+  manifest_required = 99;
+  if (!Expect(ExtractEvidenceViaAbi(
+                  root_utf8, kRealChunk, video.size(), 10, fingerprint,
+                  failed_manifest.data(),
+                  static_cast<uint32_t>(failed_manifest.size()),
+                  &manifest_required) ==
+                      WDF_CAPTURE_RESULT_EVIDENCE_CONFLICT &&
+                  manifest_required == 0 && failed_manifest.front() == '\0',
+              "evidence conflict did not preserve its stable C ABI contract")) {
+    return false;
+  }
+
+  std::array<uint8_t, 32> failed_frame{};
+  failed_frame.fill(0x7FU);
+  frame_required = 99;
+  return Expect(ReadEvidenceFrameViaAbi(
+                    root_utf8, kRealChunk, fingerprint, 0,
+                    failed_frame.data(),
+                    static_cast<uint32_t>(failed_frame.size()),
+                    &frame_required) == WDF_CAPTURE_RESULT_EVIDENCE_CONFLICT &&
+                    frame_required == 0 && failed_frame.front() == 0,
+                "failed evidence frame read did not clear caller output");
+}
+
 }  // namespace
 
 int main() {
@@ -1494,7 +1877,8 @@ int main() {
       !TestLegacyAndRuntimeRevisionNamespacesCannotMix() ||
       !TestStaleHandleCannotTargetRecreatedInstance() ||
       !TestConcurrentPollAndDestroyAreSafe() ||
-      !TestEventStructureValidation()) {
+      !TestEventStructureValidation() ||
+      !TestAnalysisEvidenceBufferAndErrorContracts()) {
     return 1;
   }
   std::cout << "capture C ABI tests passed\n";

@@ -350,6 +350,65 @@ public sealed class SqliteCaptureAnalysisStore : ICaptureChunkStore, IAnalysisJo
         return job;
     }
 
+    async Task<bool> IAnalysisJobStore.HasCompletedAnalysisAsync(
+        string captureChunkId,
+        string analysisVersion,
+        string inputFingerprint,
+        CancellationToken cancellationToken)
+    {
+        CaptureChunk.ValidateIdentifier(captureChunkId);
+        ValidateAnalysisVersion(analysisVersion);
+        var fingerprint = new CaptureChunkFingerprint(inputFingerprint);
+        cancellationToken.ThrowIfCancellationRequested();
+
+        await using var connection = await _connectionFactory
+            .OpenConnectionAsync(cancellationToken)
+            .ConfigureAwait(false);
+        await using var transaction = connection.BeginTransaction(deferred: true);
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT
+                EXISTS (
+                    SELECT 1
+                    FROM analysis_jobs
+                    WHERE capture_chunk_id = $capture_chunk_id
+                        AND analysis_version = $analysis_version
+                        AND input_fingerprint = $input_fingerprint
+                        AND state = $completed_state),
+                EXISTS (
+                    SELECT 1
+                    FROM analysis_jobs
+                    WHERE capture_chunk_id = $capture_chunk_id
+                        AND analysis_version = $analysis_version
+                        AND input_fingerprint <> $input_fingerprint);
+            """;
+        command.Parameters.AddWithValue("$capture_chunk_id", captureChunkId);
+        command.Parameters.AddWithValue("$analysis_version", analysisVersion);
+        command.Parameters.AddWithValue("$input_fingerprint", fingerprint.Value);
+        command.Parameters.AddWithValue("$completed_state", (int)AnalysisJobState.Completed);
+
+        await using var reader = await command
+            .ExecuteReaderAsync(cancellationToken)
+            .ConfigureAwait(false);
+        if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            throw new InvalidDataException(
+                "The completed analysis query returned no result.");
+        }
+
+        var hasExactFingerprint = reader.GetInt32(0) != 0;
+        var hasMismatchedFingerprint = reader.GetInt32(1) != 0;
+        await reader.DisposeAsync().ConfigureAwait(false);
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        if (hasMismatchedFingerprint)
+        {
+            throw new CaptureChunkConflictException(captureChunkId);
+        }
+
+        return hasExactFingerprint;
+    }
+
     private void EnsureContained(EvidenceRelativePath relativePath)
     {
         var platformRelativePath = relativePath.Value.Replace(
@@ -1091,6 +1150,22 @@ public sealed class SqliteCaptureAnalysisStore : ICaptureChunkStore, IAnalysisJo
         if (jobId == Guid.Empty)
         {
             throw new ArgumentException("An analysis job identifier cannot be empty.", nameof(jobId));
+        }
+    }
+
+    private static void ValidateAnalysisVersion(string analysisVersion)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(analysisVersion);
+        if (analysisVersion.Length > AnalysisJob.MaximumAnalysisVersionLength
+            || !string.Equals(
+                analysisVersion,
+                analysisVersion.Trim(),
+                StringComparison.Ordinal)
+            || analysisVersion.Any(char.IsControl))
+        {
+            throw new ArgumentException(
+                "The analysis version is invalid.",
+                nameof(analysisVersion));
         }
     }
 

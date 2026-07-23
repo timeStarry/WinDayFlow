@@ -50,6 +50,9 @@ enum {
   WDF_CAPTURE_RESULT_EVIDENCE_CHANGED = -18,
   WDF_CAPTURE_RESULT_IO_FAILURE = -19,
   WDF_CAPTURE_RESULT_CRYPTO_FAILURE = -20,
+  WDF_CAPTURE_RESULT_EVIDENCE_INVALID = -21,
+  WDF_CAPTURE_RESULT_DECODER_FAILURE = -22,
+  WDF_CAPTURE_RESULT_EVIDENCE_CONFLICT = -23,
   WDF_CAPTURE_RESULT_INTERNAL_ERROR = -255
 };
 
@@ -155,6 +158,9 @@ enum {
 #define WDF_CAPTURE_DISPLAY_DEVICE_KEY_UTF8_MAX_LENGTH 93U
 #define WDF_CAPTURE_CHUNK_FINGERPRINT_UTF8_LENGTH 64U
 #define WDF_CAPTURE_CHUNK_FINGERPRINT_UTF8_CAPACITY 65U
+#define WDF_CAPTURE_ANALYSIS_EVIDENCE_MANIFEST_UTF8_MAX_LENGTH 65536U
+#define WDF_CAPTURE_ANALYSIS_EVIDENCE_MANIFEST_UTF8_CAPACITY 65537U
+#define WDF_CAPTURE_ANALYSIS_EVIDENCE_FRAME_MAX_BYTES 2097152U
 
 #if defined(_MSC_VER) || defined(__clang__) || defined(__GNUC__)
 #pragma pack(push, 8)
@@ -465,6 +471,36 @@ wdf_capture_compute_chunk_fingerprint(
     char* fingerprint_utf8,
     uint32_t fingerprint_utf8_capacity,
     uint32_t* fingerprint_utf8_required) WDF_CAPTURE_NOEXCEPT;
+
+WDF_CAPTURE_API wdf_capture_result WDF_CAPTURE_CALL
+wdf_capture_extract_analysis_evidence(
+    const char* data_root_utf8,
+    uint32_t data_root_utf8_length,
+    const char* canonical_chunk_id_utf8,
+    uint32_t canonical_chunk_id_utf8_length,
+    uint64_t expected_video_byte_count,
+    uint32_t expected_frame_count,
+    uint32_t expected_video_width,
+    uint32_t expected_video_height,
+    uint64_t expected_duration_ms,
+    const char* expected_source_fingerprint_utf8,
+    uint32_t expected_source_fingerprint_utf8_length,
+    char* manifest_utf8,
+    uint32_t manifest_utf8_capacity,
+    uint32_t* manifest_utf8_required) WDF_CAPTURE_NOEXCEPT;
+
+WDF_CAPTURE_API wdf_capture_result WDF_CAPTURE_CALL
+wdf_capture_read_analysis_evidence_frame(
+    const char* data_root_utf8,
+    uint32_t data_root_utf8_length,
+    const char* canonical_chunk_id_utf8,
+    uint32_t canonical_chunk_id_utf8_length,
+    const char* canonical_source_fingerprint_utf8,
+    uint32_t canonical_source_fingerprint_utf8_length,
+    uint32_t frame_index,
+    uint8_t* frame_bytes,
+    uint32_t frame_bytes_capacity,
+    uint32_t* frame_bytes_required) WDF_CAPTURE_NOEXCEPT;
 
 WDF_CAPTURE_API wdf_capture_result WDF_CAPTURE_CALL
 wdf_capture_destroy(wdf_capture_handle* handle) WDF_CAPTURE_NOEXCEPT;

@@ -8,6 +8,8 @@ param(
 
     [string]$OutputRoot,
 
+    [switch]$EnableDevLiveCapture,
+
     [switch]$NoRestore
 )
 
@@ -17,6 +19,10 @@ $ErrorActionPreference = 'Stop'
 $repositoryRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 $projectDirectory = Join-Path $repositoryRoot 'src\WinDayFlow.App'
 $projectPath = Join-Path $projectDirectory 'WinDayFlow.App.csproj'
+
+if ($EnableDevLiveCapture -and $RuntimeIdentifier -ne 'win-x64') {
+    throw 'Dev live capture is currently available only for win-x64 bundles.'
+}
 
 if ([string]::IsNullOrWhiteSpace($OutputRoot)) {
     $OutputRoot = Join-Path $repositoryRoot 'artifacts\dev'
@@ -38,7 +44,8 @@ $platform = switch ($RuntimeIdentifier) {
     'win-arm64' { 'ARM64' }
 }
 $architecture = $RuntimeIdentifier.Substring('win-'.Length)
-$packageName = "WinDayFlow-dev-$architecture"
+$packageFlavor = if ($EnableDevLiveCapture) { 'dev-live' } else { 'dev' }
+$packageName = "WinDayFlow-$packageFlavor-$architecture"
 $packagePath = Join-Path $outputRootPath $packageName
 $stagingPath = Join-Path $outputRootPath ".$packageName.staging-$PID"
 $zipPath = Join-Path $outputRootPath "$packageName.zip"
@@ -53,8 +60,14 @@ else {
 }
 
 $nativeDllPath = if ($RuntimeIdentifier -eq 'win-x64') {
+    $nativeArtifactDirectory = if ($EnableDevLiveCapture) {
+        'native-dev'
+    }
+    else {
+        'native'
+    }
     Join-Path $repositoryRoot (
-        "artifacts\native\x64\$Configuration\WinDayFlow.Capture.Native.dll")
+        "artifacts\$nativeArtifactDirectory\x64\$Configuration\WinDayFlow.Capture.Native.dll")
 }
 else {
     $null
@@ -79,6 +92,8 @@ $publishArguments = @(
     '--runtime', $RuntimeIdentifier
     '--self-contained', 'true'
     '--property', "Platform=$platform"
+    '--property', "EnableDevLiveCapture=$($EnableDevLiveCapture.IsPresent.ToString().ToLowerInvariant())"
+    '--property', 'DevBundleBuild=true'
     '--output', $stagingPath
 )
 if ($NoRestore) {
@@ -95,7 +110,11 @@ try {
 
     if ($null -ne $nativeDllPath)
     {
-        & (Join-Path $PSScriptRoot 'Build-Native.ps1') -Configuration $Configuration |
+        $nativeBuildParameters = @{
+            Configuration = $Configuration
+            EnableDevLiveCapture = $EnableDevLiveCapture
+        }
+        & (Join-Path $PSScriptRoot 'Build-Native.ps1') @nativeBuildParameters |
             Out-Host
         if (-not (Test-Path -LiteralPath $nativeDllPath -PathType Leaf))
         {
@@ -225,6 +244,13 @@ try {
         CompiledXamlCount = $compiledXamlCount
         DistributionNoticeCount = $distributionSourceFiles.Count
         Distribution = 'DEVELOPMENT/TEST USE ONLY - NO LIVE USE OR THIRD-PARTY DISTRIBUTION'
+        DevLiveCapture = [bool]$EnableDevLiveCapture
+        LaunchArgument = if ($EnableDevLiveCapture) {
+            '--enable-dev-live-capture'
+        }
+        else {
+            $null
+        }
         SizeMiB = [Math]::Round($packageBytes / 1MB, 2)
     }
 }

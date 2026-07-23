@@ -2,7 +2,9 @@ using WinDayFlow.Application.Capture;
 
 namespace WinDayFlow.Capture.Interop;
 
-public sealed class UnavailableCaptureBackend : ICaptureBackend
+public sealed class UnavailableCaptureBackend
+    : ICaptureBackend,
+      ICaptureChunkCommitNotifier
 {
     private const string UnavailableDetail =
         "当前开发版本尚未接入原生录制组件。";
@@ -21,6 +23,12 @@ public sealed class UnavailableCaptureBackend : ICaptureBackend
     {
         add => _statusChanged += value;
         remove => _statusChanged -= value;
+    }
+
+    public event EventHandler<CaptureChunkCommittedEventArgs>? ChunkCommitted
+    {
+        add { }
+        remove { }
     }
 
     public Task StartAsync(

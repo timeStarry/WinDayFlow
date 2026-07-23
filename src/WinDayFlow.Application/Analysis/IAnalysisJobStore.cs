@@ -12,6 +12,12 @@ public interface IAnalysisJobStore
         Guid jobId,
         CancellationToken cancellationToken = default);
 
+    Task<bool> HasCompletedAnalysisAsync(
+        string captureChunkId,
+        string analysisVersion,
+        string inputFingerprint,
+        CancellationToken cancellationToken = default);
+
     Task<AnalysisJob?> TryClaimNextAsync(
         string leaseOwner,
         DateTimeOffset claimedAtUtc,

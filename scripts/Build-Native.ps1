@@ -9,6 +9,8 @@ param(
 
     [string]$Generator,
 
+    [switch]$EnableDevLiveCapture,
+
     [switch]$Fresh
 )
 
@@ -62,7 +64,13 @@ $vsWherePath = Join-Path ${env:ProgramFiles(x86)} `
     'Microsoft Visual Studio\Installer\vswhere.exe'
 
 if ([string]::IsNullOrWhiteSpace($BuildRoot)) {
-    $BuildRoot = Join-Path $repositoryRoot 'artifacts\native\x64'
+    $nativeArtifactDirectory = if ($EnableDevLiveCapture) {
+        'artifacts\native-dev\x64'
+    }
+    else {
+        'artifacts\native\x64'
+    }
+    $BuildRoot = Join-Path $repositoryRoot $nativeArtifactDirectory
 }
 
 $buildPath = [System.IO.Path]::GetFullPath($BuildRoot, $repositoryRoot)
@@ -210,7 +218,8 @@ $configureArguments = @(
     '-B', $buildPath,
     '-G', $Generator,
     '-A', 'x64',
-    '-D', 'BUILD_TESTING=ON'
+    '-D', 'BUILD_TESTING=ON',
+    '-D', "WDF_ENABLE_DEV_LIVE_CAPTURE=$(if ($EnableDevLiveCapture) { 'ON' } else { 'OFF' })"
 )
 if ($Fresh) {
     $configureArguments += '--fresh'
@@ -251,6 +260,7 @@ if (-not (Test-Path -LiteralPath $nativeDll -PathType Leaf)) {
     Configuration = $Configuration
     Architecture = 'x64'
     Generator = $Generator
+    DevLiveCapture = [bool]$EnableDevLiveCapture
     BuildPath = $buildPath
     NativeDll = $nativeDll
     NativeDllSha256 = (Get-FileHash -LiteralPath $nativeDll -Algorithm SHA256).Hash

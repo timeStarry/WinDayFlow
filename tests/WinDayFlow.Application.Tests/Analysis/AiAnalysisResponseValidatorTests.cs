@@ -45,6 +45,73 @@ public sealed class AiAnalysisResponseValidatorTests
     }
 
     [Fact]
+    public void ValidateAcceptsContiguousCandidatesThatCoverTheEntireRange()
+    {
+        var request = Ai.AiAnalysisContractsTests.CreateRequest();
+        var first = CreateCandidate() with
+        {
+            EndOffsetMilliseconds = 20_000,
+        };
+        var second = CreateCandidate() with
+        {
+            StartOffsetMilliseconds = 20_000,
+        };
+
+        var activities = AiAnalysisResponseValidator.Validate(
+            request,
+            CreateResponse(first, second));
+
+        Assert.Equal(2, activities.Count);
+        Assert.Equal(request.Range.Start, activities[0].Range.Start);
+        Assert.Equal(activities[0].Range.End, activities[1].Range.Start);
+        Assert.Equal(request.Range.End, activities[1].Range.End);
+    }
+
+    [Fact]
+    public void ValidateRejectsAnEmptyActivityList()
+    {
+        var request = Ai.AiAnalysisContractsTests.CreateRequest();
+
+        Assert.Throws<AiAnalysisValidationException>(() =>
+            AiAnalysisResponseValidator.Validate(request, CreateResponse()));
+    }
+
+    [Theory]
+    [InlineData(1L, 60_000L, null, null)]
+    [InlineData(0L, 59_999L, null, null)]
+    [InlineData(0L, 20_000L, 30_000L, 60_000L)]
+    public void ValidateRejectsLeadingTrailingAndInternalCoverageGaps(
+        long firstStart,
+        long firstEnd,
+        long? secondStart,
+        long? secondEnd)
+    {
+        var request = Ai.AiAnalysisContractsTests.CreateRequest();
+        AiActivityCandidate[] candidates = secondStart is null
+            ? [CreateCandidate() with
+            {
+                StartOffsetMilliseconds = firstStart,
+                EndOffsetMilliseconds = firstEnd,
+            }]
+            : new[]
+            {
+                CreateCandidate() with
+                {
+                    StartOffsetMilliseconds = firstStart,
+                    EndOffsetMilliseconds = firstEnd,
+                },
+                CreateCandidate() with
+                {
+                    StartOffsetMilliseconds = secondStart.Value,
+                    EndOffsetMilliseconds = secondEnd!.Value,
+                },
+            };
+
+        Assert.Throws<AiAnalysisValidationException>(() =>
+            AiAnalysisResponseValidator.Validate(request, CreateResponse(candidates)));
+    }
+
+    [Fact]
     public void ValidateRejectsOverlapsAndUnknownEvidenceReferences()
     {
         var request = Ai.AiAnalysisContractsTests.CreateRequest();

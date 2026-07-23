@@ -59,13 +59,26 @@ int main(void) {
        WDF_CAPTURE_CAPABILITY_DISPLAY_BOUND_COMMAND_ADMISSION) == 0 ||
       (capabilities &
        WDF_CAPTURE_CAPABILITY_CALLBACK_TIME_AUTHORIZATION_INVALIDATION) == 0 ||
-      (capabilities & WDF_CAPTURE_CAPABILITY_SCREEN_CAPTURE) != 0 ||
-      (capabilities & WDF_CAPTURE_CAPABILITY_H264_CHUNKS) != 0 ||
       (capabilities & WDF_CAPTURE_CAPABILITY_EVIDENCE_EXTRACTION) != 0) {
     fputs("C translation unit observed incomplete foundation capabilities\n",
           stderr);
     return 1;
   }
+
+#if WDF_ENABLE_DEV_LIVE_CAPTURE
+  if ((capabilities & WDF_CAPTURE_CAPABILITY_SCREEN_CAPTURE) == 0 ||
+      (capabilities & WDF_CAPTURE_CAPABILITY_H264_CHUNKS) == 0) {
+    fputs("C translation unit did not observe development live capture\n",
+          stderr);
+    return 1;
+  }
+#else
+  if ((capabilities & WDF_CAPTURE_CAPABILITY_SCREEN_CAPTURE) != 0 ||
+      (capabilities & WDF_CAPTURE_CAPABILITY_H264_CHUNKS) != 0) {
+    fputs("C translation unit observed production live capture\n", stderr);
+    return 1;
+  }
+#endif
 
   if (WDF_CAPTURE_CAPABILITY_COMMAND_ADMISSION != (1ULL << 8) ||
       WDF_CAPTURE_CAPABILITY_DISPLAY_SCOPED_AUTHORIZATION != (1ULL << 9) ||
@@ -79,12 +92,18 @@ int main(void) {
       WDF_CAPTURE_RESULT_EVIDENCE_CHANGED != -18 ||
       WDF_CAPTURE_RESULT_IO_FAILURE != -19 ||
       WDF_CAPTURE_RESULT_CRYPTO_FAILURE != -20 ||
+      WDF_CAPTURE_RESULT_EVIDENCE_INVALID != -21 ||
+      WDF_CAPTURE_RESULT_DECODER_FAILURE != -22 ||
+      WDF_CAPTURE_RESULT_EVIDENCE_CONFLICT != -23 ||
       WDF_CAPTURE_TARGET_DISPLAY_PRESENT != (1U << 1) ||
       WDF_CAPTURE_RUNTIME_AUTHORIZATION_V1_LEGACY_SIZE != 112U ||
       WDF_CAPTURE_DISPLAY_DEVICE_KEY_UTF8_CAPACITY != 96U ||
       WDF_CAPTURE_DISPLAY_DEVICE_KEY_UTF8_MAX_LENGTH != 93U ||
       WDF_CAPTURE_CHUNK_FINGERPRINT_UTF8_LENGTH != 64U ||
       WDF_CAPTURE_CHUNK_FINGERPRINT_UTF8_CAPACITY != 65U ||
+      WDF_CAPTURE_ANALYSIS_EVIDENCE_MANIFEST_UTF8_MAX_LENGTH != 65536U ||
+      WDF_CAPTURE_ANALYSIS_EVIDENCE_MANIFEST_UTF8_CAPACITY != 65537U ||
+      WDF_CAPTURE_ANALYSIS_EVIDENCE_FRAME_MAX_BYTES != 2097152U ||
       sizeof(wdf_capture_config_v1) != 80 ||
       sizeof(wdf_capture_privacy_context_v1) != 80 ||
       sizeof(wdf_capture_runtime_authorization_v1) != 224 ||
@@ -227,8 +246,31 @@ int main(void) {
         admission.persistence_generation != generation ||
         admission.target_epoch != authorization.target_epoch ||
         admission.authorization_epoch == 0 ||
-        (admission.nonce_low == 0 && admission.nonce_high == 0) ||
+        (admission.nonce_low == 0 && admission.nonce_high == 0)) {
+      fputs("C translation unit could not call the safety-core setup exports\n",
+            stderr);
+      wdf_capture_destroy(&handle);
+      return 1;
+    }
+
+#if WDF_ENABLE_DEV_LIVE_CAPTURE
+    if (wdf_capture_invalidate_runtime_authorization(
+            handle, &authorization_epoch) != WDF_CAPTURE_RESULT_OK ||
+        authorization_epoch == 0 || (authorization_epoch & 1U) != 0 ||
         wdf_capture_start_authorized(handle, &admission) !=
+            WDF_CAPTURE_RESULT_ADMISSION_REJECTED ||
+        wdf_capture_resume_authorized(handle, &admission) !=
+            WDF_CAPTURE_RESULT_ADMISSION_REJECTED ||
+        wdf_capture_revoke_runtime_authorization(handle, &generation) !=
+            WDF_CAPTURE_RESULT_OK ||
+        generation != 4 ||
+        wdf_capture_destroy(&handle) != WDF_CAPTURE_RESULT_OK || handle != 0) {
+      fputs("C translation unit could not call the dev-live safety exports\n",
+            stderr);
+      return 1;
+    }
+#else
+    if (wdf_capture_start_authorized(handle, &admission) !=
             WDF_CAPTURE_RESULT_NOT_IMPLEMENTED ||
         wdf_capture_start_authorized(handle, &admission) !=
             WDF_CAPTURE_RESULT_ADMISSION_REJECTED ||
@@ -245,6 +287,7 @@ int main(void) {
             stderr);
       return 1;
     }
+#endif
   }
 
   {
@@ -265,6 +308,51 @@ int main(void) {
         required != WDF_CAPTURE_CHUNK_FINGERPRINT_UTF8_CAPACITY ||
         fingerprint[0] != '\0') {
       fputs("C translation unit observed an incompatible fingerprint export\n",
+            stderr);
+      return 1;
+    }
+  }
+
+  {
+    static const char relative_root[] = "relative\\evidence";
+    static const char chunk_id[] = "chunk-1";
+    static const char fingerprint[] =
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    char manifest[32];
+    uint8_t frame[32];
+    uint32_t manifest_required = 99;
+    uint32_t frame_required = 99;
+    memset(manifest, 'X', sizeof(manifest));
+    memset(frame, 'X', sizeof(frame));
+    if (wdf_capture_extract_analysis_evidence(
+            relative_root,
+            (uint32_t)(sizeof(relative_root) - 1U),
+            chunk_id,
+            (uint32_t)(sizeof(chunk_id) - 1U),
+            1,
+            1,
+            64,
+            48,
+            1000,
+            fingerprint,
+            (uint32_t)(sizeof(fingerprint) - 1U),
+            manifest,
+            (uint32_t)sizeof(manifest),
+            &manifest_required) != WDF_CAPTURE_RESULT_INVALID_ARGUMENT ||
+        manifest_required != 0 || manifest[0] != '\0' ||
+        wdf_capture_read_analysis_evidence_frame(
+            relative_root,
+            (uint32_t)(sizeof(relative_root) - 1U),
+            chunk_id,
+            (uint32_t)(sizeof(chunk_id) - 1U),
+            fingerprint,
+            (uint32_t)(sizeof(fingerprint) - 1U),
+            0,
+            frame,
+            (uint32_t)sizeof(frame),
+            &frame_required) != WDF_CAPTURE_RESULT_INVALID_ARGUMENT ||
+        frame_required != 0 || frame[0] != 0) {
+      fputs("C translation unit observed incompatible evidence exports\n",
             stderr);
       return 1;
     }

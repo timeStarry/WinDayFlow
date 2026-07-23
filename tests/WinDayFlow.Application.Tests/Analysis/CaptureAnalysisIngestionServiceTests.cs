@@ -75,6 +75,100 @@ public sealed class CaptureAnalysisIngestionServiceTests
     }
 
     [Fact]
+    public async Task CompletedAnalysisAtOlderProviderRevisionRecomputesFingerprintAndSkipsEnqueue()
+    {
+        var chunk = CreateChunk("chunk-a", minuteOffset: 0);
+        var scanner = new TestManifestScanner([chunk]);
+        var store = new TestCaptureAnalysisStore();
+        store.MarkCompletedAnalysis(
+            chunk.Id,
+            CaptureAnalysisIngestionOptions.DefaultAnalysisVersion,
+            CreateFingerprint(chunk).Value);
+        var fingerprints = new TestFingerprintProvider();
+        using var settings = await CreateSettingsAsync(cloudEnabled: true);
+        using var service = new CaptureAnalysisIngestionService(
+            scanner,
+            store,
+            store,
+            fingerprints,
+            new TestProviderStore(CreateProfile(revision: 2)),
+            settings);
+
+        var result = await service.ReconcileAsync();
+
+        Assert.Equal(
+            new CaptureAnalysisIngestionResult(1, 1, 0, AnalysisReady: true),
+            result);
+        Assert.Equal(1, fingerprints.CallCount);
+        Assert.Empty(store.Jobs);
+    }
+
+    [Fact]
+    public async Task CompletedAnalysisWithChangedFingerprintFailsClosedBeforeEnqueue()
+    {
+        var chunk = CreateChunk("chunk-a", minuteOffset: 0);
+        var scanner = new TestManifestScanner([chunk]);
+        var store = new TestCaptureAnalysisStore();
+        var currentFingerprint = CreateFingerprint(chunk);
+        var changedFingerprint =
+            (currentFingerprint.Value[0] == 'A' ? "B" : "A")
+            + currentFingerprint.Value[1..];
+        store.MarkCompletedAnalysis(
+            chunk.Id,
+            CaptureAnalysisIngestionOptions.DefaultAnalysisVersion,
+            changedFingerprint);
+        var fingerprints = new TestFingerprintProvider();
+        using var settings = await CreateSettingsAsync(cloudEnabled: true);
+        using var service = new CaptureAnalysisIngestionService(
+            scanner,
+            store,
+            store,
+            fingerprints,
+            new TestProviderStore(CreateProfile(revision: 2)),
+            settings);
+
+        await Assert.ThrowsAsync<CaptureChunkConflictException>(
+            () => service.ReconcileAsync());
+
+        Assert.Equal(1, fingerprints.CallCount);
+        Assert.Empty(store.Jobs);
+    }
+
+    [Fact]
+    public async Task CompletedAnalysisAtDifferentVersionDoesNotBlockNewJob()
+    {
+        var chunk = CreateChunk("chunk-a", minuteOffset: 0);
+        var scanner = new TestManifestScanner([chunk]);
+        var store = new TestCaptureAnalysisStore();
+        store.MarkCompletedAnalysis(
+            chunk.Id,
+            CaptureAnalysisIngestionOptions.DefaultAnalysisVersion,
+            CreateFingerprint(chunk).Value);
+        var fingerprints = new TestFingerprintProvider();
+        using var settings = await CreateSettingsAsync(cloudEnabled: true);
+        using var service = new CaptureAnalysisIngestionService(
+            scanner,
+            store,
+            store,
+            fingerprints,
+            new TestProviderStore(CreateProfile(revision: 2)),
+            settings,
+            new CaptureAnalysisIngestionOptions(
+                "timeline-v2",
+                CaptureAnalysisIngestionOptions.DefaultEvidencePolicyVersion,
+                maxAttempts: 5));
+
+        var result = await service.ReconcileAsync();
+
+        Assert.Equal(
+            new CaptureAnalysisIngestionResult(1, 1, 1, AnalysisReady: true),
+            result);
+        Assert.Equal(1, fingerprints.CallCount);
+        var job = Assert.Single(store.Jobs.Values);
+        Assert.Equal("timeline-v2", job.AnalysisVersion);
+    }
+
+    [Fact]
     public async Task ProviderRevisionChangeDuringReconcileDoesNotCreateStaleJobs()
     {
         var scanner = new TestManifestScanner([CreateChunk("chunk-a", minuteOffset: 0)]);
@@ -182,6 +276,13 @@ public sealed class CaptureAnalysisIngestionServiceTests
             validatedAt);
     }
 
+    private static CaptureChunkFingerprint CreateFingerprint(CaptureChunk chunk)
+    {
+        var source = System.Security.Cryptography.SHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes(chunk.Id));
+        return new CaptureChunkFingerprint(Convert.ToHexString(source));
+    }
+
     private static async Task<AppSettingsService> CreateSettingsAsync(bool cloudEnabled)
     {
         var initial = AppSettings.Default;
@@ -230,10 +331,7 @@ public sealed class CaptureAnalysisIngestionServiceTests
         {
             cancellationToken.ThrowIfCancellationRequested();
             CallCount++;
-            var source = System.Security.Cryptography.SHA256.HashData(
-                System.Text.Encoding.UTF8.GetBytes(chunk.Id));
-            return Task.FromResult(
-                new CaptureChunkFingerprint(Convert.ToHexString(source)));
+            return Task.FromResult(CreateFingerprint(chunk));
         }
     }
 
@@ -241,10 +339,21 @@ public sealed class CaptureAnalysisIngestionServiceTests
     {
         private readonly Dictionary<string, CaptureChunk> _chunks = new(StringComparer.Ordinal);
         private readonly Dictionary<string, AnalysisJob> _jobs = new(StringComparer.Ordinal);
+        private readonly HashSet<(
+            string CaptureChunkId,
+            string AnalysisVersion,
+            string InputFingerprint)>
+            _completedAnalyses = [];
 
         public List<string> IngestOrder { get; } = [];
 
         public IReadOnlyDictionary<string, AnalysisJob> Jobs => _jobs;
+
+        public void MarkCompletedAnalysis(
+            string captureChunkId,
+            string analysisVersion,
+            string inputFingerprint) =>
+            _completedAnalyses.Add((captureChunkId, analysisVersion, inputFingerprint));
 
         public Task<CaptureChunkIngestResult> IngestCommittedAsync(
             CaptureChunk chunk,
@@ -295,6 +404,48 @@ public sealed class CaptureAnalysisIngestionServiceTests
         Task<AnalysisJob?> IAnalysisJobStore.GetAsync(
             Guid jobId,
             CancellationToken cancellationToken) => throw new NotSupportedException();
+
+        public Task<bool> HasCompletedAnalysisAsync(
+            string captureChunkId,
+            string analysisVersion,
+            string inputFingerprint,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var completed = _completedAnalyses
+                .Where(item =>
+                    string.Equals(
+                        item.CaptureChunkId,
+                        captureChunkId,
+                        StringComparison.Ordinal)
+                    && string.Equals(
+                        item.AnalysisVersion,
+                        analysisVersion,
+                        StringComparison.Ordinal))
+                .ToArray();
+            var jobs = _jobs.Values
+                .Where(job =>
+                    string.Equals(
+                        job.CaptureChunkId,
+                        captureChunkId,
+                        StringComparison.Ordinal)
+                    && string.Equals(
+                        job.AnalysisVersion,
+                        analysisVersion,
+                        StringComparison.Ordinal))
+                .Select(static job => job.InputFingerprint);
+            if (completed.Select(static item => item.InputFingerprint)
+                .Concat(jobs)
+                .Any(value => !string.Equals(
+                    value,
+                    inputFingerprint,
+                    StringComparison.Ordinal)))
+            {
+                throw new CaptureChunkConflictException(captureChunkId);
+            }
+
+            return Task.FromResult(completed.Length > 0);
+        }
 
         public Task<AnalysisJob?> TryClaimNextAsync(
             string leaseOwner,

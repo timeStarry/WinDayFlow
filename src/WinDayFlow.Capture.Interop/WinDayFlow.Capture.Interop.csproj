@@ -5,12 +5,21 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 
+  <PropertyGroup Condition="'$(EnableDevLiveCapture)' == 'true' And '$(DevBundleBuild)' == 'true'">
+    <DefineConstants>$(DefineConstants);WDF_DEV_LIVE_CAPTURE</DefineConstants>
+    <WdfNativeArtifactRoot>..\..\artifacts\native-dev</WdfNativeArtifactRoot>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(WdfNativeArtifactRoot)' == ''">
+    <WdfNativeArtifactRoot>..\..\artifacts\native</WdfNativeArtifactRoot>
+  </PropertyGroup>
+
   <ItemGroup Condition="'$(Platform)' == 'x64'">
-    <None Include="..\..\artifacts\native\x64\$(Configuration)\WinDayFlow.Capture.Native.dll"
+    <None Include="$(WdfNativeArtifactRoot)\x64\$(Configuration)\WinDayFlow.Capture.Native.dll"
           Link="WinDayFlow.Capture.Native.dll"
-          CopyToOutputDirectory="PreserveNewest"
-          CopyToPublishDirectory="PreserveNewest"
-          Condition="Exists('..\..\artifacts\native\x64\$(Configuration)\WinDayFlow.Capture.Native.dll')" />
+          CopyToOutputDirectory="Always"
+          CopyToPublishDirectory="Always"
+          Condition="Exists('$(WdfNativeArtifactRoot)\x64\$(Configuration)\WinDayFlow.Capture.Native.dll')" />
   </ItemGroup>
 
   <ItemGroup>

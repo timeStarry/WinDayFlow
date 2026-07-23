@@ -4,6 +4,41 @@ using WinDayFlow.Domain;
 
 namespace WinDayFlow.Application.Analysis;
 
+public enum AnalysisEvidenceExtractionFailureKind
+{
+    EvidenceNotFound,
+    UnsafeEvidence,
+    EvidenceTooLarge,
+    EvidenceChanged,
+    IoFailure,
+    CryptoFailure,
+    InvalidEvidence,
+    DecoderFailure,
+    EvidenceConflict,
+    NativeContractFailure,
+}
+
+public sealed class AnalysisEvidenceExtractionException : InvalidOperationException
+{
+    public AnalysisEvidenceExtractionException(
+        AnalysisEvidenceExtractionFailureKind failureKind,
+        int resultCode)
+        : base($"Analysis evidence extraction failed: {failureKind}.")
+    {
+        if (!Enum.IsDefined(failureKind))
+        {
+            throw new ArgumentOutOfRangeException(nameof(failureKind));
+        }
+
+        FailureKind = failureKind;
+        ResultCode = resultCode;
+    }
+
+    public AnalysisEvidenceExtractionFailureKind FailureKind { get; }
+
+    public int ResultCode { get; }
+}
+
 public sealed class AnalysisEvidenceBatch
 {
     private readonly ReadOnlyCollection<AiEvidenceImage> _images;

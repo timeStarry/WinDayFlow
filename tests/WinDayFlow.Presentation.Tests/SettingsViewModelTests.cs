@@ -97,6 +97,22 @@ public sealed class SettingsViewModelTests
     }
 
     [Fact]
+    public async Task ExplicitExclusionEngineAvailabilityIsProjected()
+    {
+        var repository = new TestSettingsRepository();
+        using var settings = new AppSettingsService(repository);
+        await settings.InitializeAsync();
+        var capture = new TestCaptureService(CaptureState.Stopped);
+        using var viewModel = new SettingsViewModel(
+            settings,
+            capture,
+            isExclusionEngineAvailable: true);
+
+        Assert.True(viewModel.IsExclusionEngineAvailable);
+        Assert.Contains("监视器已就绪", viewModel.ExclusionEngineStatusText);
+    }
+
+    [Fact]
     public async Task PrivacyChangePersistsFailClosedStateBeforeStoppingCapture()
     {
         var consent = CreateConsent();
@@ -508,7 +524,7 @@ public sealed class SettingsViewModelTests
             },
             StopOperation = _ =>
             {
-                Assert.False(settings.Current.CaptureEnabled);
+                Assert.True(settings.Current.CaptureEnabled);
                 return Task.CompletedTask;
             },
         };
@@ -524,6 +540,153 @@ public sealed class SettingsViewModelTests
         Assert.Equal(1, capture.StartCount);
         Assert.Equal(1, capture.StopCount);
         Assert.Equal(2, repository.SavedSettings.Count);
+    }
+
+    [Fact]
+    public async Task CaptureStopFailureStillPersistsDisabledState()
+    {
+        var initial = new AppSettings(
+            AppThemePreference.System,
+            CaptureEnabled: true,
+            CloudAnalysisEnabled: false,
+            CreateConsent());
+        var repository = new TestSettingsRepository(initial);
+        using var settings = new AppSettingsService(repository);
+        await settings.InitializeAsync();
+        var stopFailure = new InvalidOperationException("Sensitive capture detail.");
+        var capture = new TestCaptureService(CaptureState.Recording)
+        {
+            StopOperation = _ =>
+            {
+                Assert.True(settings.Current.CaptureEnabled);
+                throw stopFailure;
+            },
+        };
+        using var viewModel = new SettingsViewModel(settings, capture);
+
+        Assert.False(await viewModel.SetCaptureEnabledAsync(enabled: false));
+
+        Assert.Equal(1, capture.StopCount);
+        Assert.Equal(CaptureState.Recording, capture.CurrentStatus.State);
+        Assert.False(settings.Current.CaptureEnabled);
+        Assert.False(viewModel.CaptureEnabled);
+        Assert.Collection(
+            repository.SavedSettings,
+            saved => Assert.False(saved.CaptureEnabled));
+        Assert.Equal(1, repository.SaveAttemptCount);
+        Assert.Equal("无法更改录制状态，请稍后重试。", viewModel.ErrorMessage);
+    }
+
+    [Fact]
+    public async Task CaptureDisableWaitsForDurableStopBeforePersistingState()
+    {
+        var initial = new AppSettings(
+            AppThemePreference.System,
+            CaptureEnabled: true,
+            CloudAnalysisEnabled: false,
+            CreateConsent());
+        var repository = new TestSettingsRepository(initial);
+        using var settings = new AppSettingsService(repository);
+        await settings.InitializeAsync();
+        var stopEntered = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseStop = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var capture = new TestCaptureService(CaptureState.Recording)
+        {
+            StopOperation = async _ =>
+            {
+                stopEntered.TrySetResult();
+                await releaseStop.Task;
+            },
+        };
+        using var viewModel = new SettingsViewModel(settings, capture);
+
+        var mutation = viewModel.SetCaptureEnabledAsync(enabled: false);
+        await stopEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.True(settings.Current.CaptureEnabled);
+        Assert.Equal(0, repository.SaveAttemptCount);
+        Assert.False(mutation.IsCompleted);
+
+        releaseStop.TrySetResult();
+        Assert.True(await mutation.WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.False(settings.Current.CaptureEnabled);
+        Assert.Equal(1, repository.SaveAttemptCount);
+    }
+
+    [Fact]
+    public async Task CaptureStopCancellationPersistsDisabledStateBeforePropagating()
+    {
+        var initial = new AppSettings(
+            AppThemePreference.System,
+            CaptureEnabled: true,
+            CloudAnalysisEnabled: false,
+            CreateConsent());
+        var repository = new TestSettingsRepository(initial);
+        using var settings = new AppSettingsService(repository);
+        await settings.InitializeAsync();
+        var stopEntered = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var capture = new TestCaptureService(CaptureState.Recording)
+        {
+            StopOperation = async token =>
+            {
+                Assert.True(settings.Current.CaptureEnabled);
+                stopEntered.TrySetResult();
+                await Task.Delay(Timeout.InfiniteTimeSpan, token);
+            },
+        };
+        using var viewModel = new SettingsViewModel(settings, capture);
+        using var cancellation = new CancellationTokenSource();
+
+        var mutation = viewModel.SetCaptureEnabledAsync(
+            enabled: false,
+            cancellation.Token);
+        await stopEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => mutation);
+        Assert.Equal(1, capture.StopCount);
+        Assert.False(settings.Current.CaptureEnabled);
+        Assert.False(viewModel.CaptureEnabled);
+        Assert.Collection(
+            repository.SavedSettings,
+            saved => Assert.False(saved.CaptureEnabled));
+        Assert.Equal(1, repository.SaveAttemptCount);
+        Assert.False(viewModel.IsBusy);
+        Assert.False(viewModel.HasError);
+    }
+
+    [Fact]
+    public async Task CaptureStopAndDisablePersistenceFailuresAttemptBothOperations()
+    {
+        var initial = new AppSettings(
+            AppThemePreference.System,
+            CaptureEnabled: true,
+            CloudAnalysisEnabled: false,
+            CreateConsent());
+        var persistenceFailure = new InvalidOperationException("Sensitive storage detail.");
+        var repository = new TestSettingsRepository(initial)
+        {
+            SaveException = persistenceFailure,
+        };
+        using var settings = new AppSettingsService(repository);
+        await settings.InitializeAsync();
+        var stopFailure = new InvalidOperationException("Sensitive capture detail.");
+        var capture = new TestCaptureService(CaptureState.Recording)
+        {
+            StopOperation = _ => throw stopFailure,
+        };
+        using var viewModel = new SettingsViewModel(settings, capture);
+
+        Assert.False(await viewModel.SetCaptureEnabledAsync(enabled: false));
+
+        Assert.Equal(1, capture.StopCount);
+        Assert.Equal(1, repository.SaveAttemptCount);
+        Assert.Empty(repository.SavedSettings);
+        Assert.True(settings.Current.CaptureEnabled);
+        Assert.Equal("无法更改录制状态，请稍后重试。", viewModel.ErrorMessage);
     }
 
     [Fact]
@@ -853,6 +1016,8 @@ public sealed class SettingsViewModelTests
         public Task FirstSaveStarted => _firstSaveStarted.Task;
 
         public List<AppSettings> SavedSettings { get; } = [];
+
+        public int SaveAttemptCount => Volatile.Read(ref _saveCallCount);
 
         public Task<AppSettings> GetAsync(CancellationToken cancellationToken = default)
         {

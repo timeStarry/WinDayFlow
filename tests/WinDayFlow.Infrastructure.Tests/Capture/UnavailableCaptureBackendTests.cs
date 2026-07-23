@@ -15,6 +15,7 @@ public sealed class UnavailableCaptureBackendTests
         Assert.Equal(DateTimeOffset.UnixEpoch, service.CurrentStatus.ChangedAt);
         Assert.Equal("当前开发版本尚未接入原生录制组件。", service.CurrentStatus.Detail);
         Assert.False(service.CurrentStatus.IsOperational);
+        Assert.IsAssignableFrom<ICaptureChunkCommitNotifier>(service);
     }
 
     [Fact]

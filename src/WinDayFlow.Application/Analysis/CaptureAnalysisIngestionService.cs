@@ -159,6 +159,17 @@ public sealed class CaptureAnalysisIngestionService : IDisposable
                 var fingerprint = await _fingerprintProvider
                     .ComputeAsync(chunk, cancellationToken)
                     .ConfigureAwait(false);
+                if (await _jobStore
+                    .HasCompletedAnalysisAsync(
+                        chunk.Id,
+                        _options.AnalysisVersion,
+                        fingerprint.Value,
+                        cancellationToken)
+                    .ConfigureAwait(false))
+                {
+                    continue;
+                }
+
                 if (!await EvidenceStillMatchesAsync(chunk, cancellationToken)
                     .ConfigureAwait(false))
                 {

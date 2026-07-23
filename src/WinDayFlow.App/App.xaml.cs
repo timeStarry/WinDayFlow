@@ -1,7 +1,9 @@
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.Windows.AppLifecycle;
+using WinDayFlow.App.Services;
 using WinDayFlow.Application.Ai;
 using WinDayFlow.Application.Capture;
 using WinDayFlow.Application.Settings;
@@ -20,54 +22,107 @@ namespace WinDayFlow.App;
 
 public partial class App : Microsoft.UI.Xaml.Application
 {
+    private static readonly TimeSpan HostStopTimeout = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan ShutdownCleanupBudget = TimeSpan.FromSeconds(10);
+
     private readonly IHost _host;
+#if WDF_DEV_LIVE_CAPTURE
+    private readonly DevLiveCaptureHostedService? _devLiveCaptureLifetime;
+#else
+    private readonly IAsyncDisposable? _devLiveCaptureLifetime;
+#endif
     private MainWindow? _window;
+    private AppWindow? _appWindow;
+    private CaptureAwareWindowCloseCoordinator? _windowCloseCoordinator;
 
     public App()
     {
         InitializeComponent();
 
-        _host = Host.CreateDefaultBuilder()
-            .ConfigureServices(services =>
+#if WDF_DEV_LIVE_CAPTURE
+        DevLiveCaptureHostedService? devLiveCaptureLifetime = null;
+#else
+        IAsyncDisposable? devLiveCaptureLifetime = null;
+#endif
+        try
+        {
+            var hostBuilder = Host.CreateDefaultBuilder();
+            hostBuilder.ConfigureServices(services =>
+                {
+                    var connectionFactory = new SqliteConnectionFactory(
+                        Path.Combine(DataDirectoryPath, "windayflow.db"));
+                    var isExclusionEngineAvailable = false;
+
+                    services.AddSingleton(TimeProvider.System);
+                    services.AddSingleton(connectionFactory);
+                    services.AddSingleton<SqliteDatabaseInitializer>();
+                    services.AddSingleton<IAppSettingsRepository,
+                        SqliteAppSettingsRepository>();
+#if WDF_DEV_LIVE_CAPTURE
+                    if (Program.IsDevLiveCaptureRequested)
+                    {
+                        devLiveCaptureLifetime = services.AddDevLiveCapture(
+                            DataDirectoryPath);
+                        isExclusionEngineAvailable = true;
+                    }
+                    else
+#endif
+                    {
+                        AddUnavailableCaptureServices(services);
+                    }
+                    services.AddSingleton<AppSettingsService>();
+                    services.AddSingleton<WindowsDpapiCredentialProtector>();
+                    services.AddSingleton<SqliteAiProviderProfileStore>();
+                    services.AddSingleton<IAiProviderProfileStore>(static provider =>
+                        provider.GetRequiredService<SqliteAiProviderProfileStore>());
+                    services.AddSingleton<OpenAiCompatibleProviderFactory>();
+                    services.AddSingleton<IAiAnalysisProviderFactory>(static provider =>
+                        provider.GetRequiredService<OpenAiCompatibleProviderFactory>());
+                    services.AddSingleton<AiProviderConfigurationService>();
+                    services.AddSingleton<SqliteTimelineRepository>();
+                    services.AddSingleton<ITimelineStore>(static provider =>
+                        provider.GetRequiredService<SqliteTimelineRepository>());
+                    services.AddSingleton<ITimelineRepository>(static provider =>
+                        provider.GetRequiredService<SqliteTimelineRepository>());
+                    services.AddSingleton<TimelineQueryService>();
+                    services.AddSingleton<TimelineCommandService>();
+                    services.AddSingleton<ICaptureService,
+                        ConsentGatedCaptureService>();
+                    services.AddAnalysisPipeline(
+                        DataDirectoryPath,
+                        static dataRoot =>
+                            new NativeAnalysisEvidenceExtractor(dataRoot));
+
+                    services.AddTransient<TimelineViewModel>();
+                    services.AddTransient(provider => new SettingsViewModel(
+                        provider.GetRequiredService<AppSettingsService>(),
+                        provider.GetRequiredService<ICaptureService>(),
+                        isExclusionEngineAvailable));
+                    services.AddTransient<AiProviderSettingsViewModel>();
+                    services.AddSingleton<CaptureStatusViewModel>();
+                    services.AddSingleton<ShellViewModel>();
+                    services.AddSingleton<MainWindow>();
+                });
+            _host = hostBuilder.Build();
+        }
+        catch (Exception buildFailure)
+        {
+            try
             {
-                var connectionFactory = new SqliteConnectionFactory(
-                    Path.Combine(DataDirectoryPath, "windayflow.db"));
+                devLiveCaptureLifetime?.DisposeAsync()
+                    .AsTask()
+                    .GetAwaiter()
+                    .GetResult();
+            }
+            catch (Exception cleanupFailure)
+            {
+                throw new AggregateException(buildFailure, cleanupFailure);
+            }
 
-                services.AddSingleton(TimeProvider.System);
-                services.AddSingleton(connectionFactory);
-                services.AddSingleton<SqliteDatabaseInitializer>();
-                services.AddSingleton<IAppSettingsRepository, SqliteAppSettingsRepository>();
-                services.AddSingleton<IAppSettingsCommitBarrier>(
-                    NoOpAppSettingsCommitBarrier.Instance);
-                services.AddSingleton<ICaptureRuntimeAuthorization>(
-                    DenyCaptureRuntimeAuthorization.Instance);
-                services.AddSingleton<AppSettingsService>();
-                services.AddSingleton<WindowsDpapiCredentialProtector>();
-                services.AddSingleton<SqliteAiProviderProfileStore>();
-                services.AddSingleton<IAiProviderProfileStore>(static provider =>
-                    provider.GetRequiredService<SqliteAiProviderProfileStore>());
-                services.AddSingleton<OpenAiCompatibleProviderFactory>();
-                services.AddSingleton<IAiAnalysisProviderFactory>(static provider =>
-                    provider.GetRequiredService<OpenAiCompatibleProviderFactory>());
-                services.AddSingleton<AiProviderConfigurationService>();
-                services.AddSingleton<SqliteTimelineRepository>();
-                services.AddSingleton<ITimelineStore>(static provider =>
-                    provider.GetRequiredService<SqliteTimelineRepository>());
-                services.AddSingleton<ITimelineRepository>(static provider =>
-                    provider.GetRequiredService<SqliteTimelineRepository>());
-                services.AddSingleton<TimelineQueryService>();
-                services.AddSingleton<TimelineCommandService>();
-                services.AddSingleton<ICaptureBackend, UnavailableCaptureBackend>();
-                services.AddSingleton<ICaptureService, ConsentGatedCaptureService>();
+            throw;
+        }
 
-                services.AddTransient<TimelineViewModel>();
-                services.AddTransient<SettingsViewModel>();
-                services.AddTransient<AiProviderSettingsViewModel>();
-                services.AddSingleton<CaptureStatusViewModel>();
-                services.AddSingleton<ShellViewModel>();
-                services.AddSingleton<MainWindow>();
-            })
-            .Build();
+        _devLiveCaptureLifetime = devLiveCaptureLifetime;
 
         UnhandledException += OnUnhandledException;
         if (Program.CurrentInstance is not null)
@@ -118,15 +173,31 @@ public partial class App : Microsoft.UI.Xaml.Application
             await _host.StartAsync();
             ApplyTheme(settings.Current.Theme);
             _window = _host.Services.GetRequiredService<MainWindow>();
+            _appWindow = _window.AppWindow;
+            _windowCloseCoordinator = new CaptureAwareWindowCloseCoordinator(
+                _host.Services.GetRequiredService<ICaptureService>().StopAsync,
+                _window.Close,
+                Program.WriteShutdownFailure);
+            _appWindow.Closing += OnAppWindowClosing;
             _window.Closed += OnWindowClosed;
             _window.Activate();
             _window.SetInitialSize();
         }
         catch (Exception exception)
         {
+            await DisposeDevLiveCaptureAfterFailureAsync();
             Program.WriteStartupFailure(exception);
             Program.ShowStartupFailure();
             throw;
+        }
+    }
+
+    private void OnAppWindowClosing(AppWindow sender, AppWindowClosingEventArgs args)
+    {
+        _ = sender;
+        if (_windowCloseCoordinator?.ShouldCancelClose() == true)
+        {
+            args.Cancel = true;
         }
     }
 
@@ -134,20 +205,28 @@ public partial class App : Microsoft.UI.Xaml.Application
     {
         var window = _window;
         _window = null;
+        var appWindow = _appWindow;
+        _appWindow = null;
+        _windowCloseCoordinator = null;
+        if (appWindow is not null)
+        {
+            appWindow.Closing -= OnAppWindowClosing;
+        }
+
         if (window is not null)
         {
             window.Closed -= OnWindowClosed;
         }
 
+        var currentInstance = Program.CurrentInstance;
         try
         {
-            if (Program.CurrentInstance is not null)
+            if (currentInstance is not null)
             {
-                Program.CurrentInstance.Activated -= OnAppInstanceActivated;
-                Program.CurrentInstance.UnregisterKey();
+                currentInstance.Activated -= OnAppInstanceActivated;
             }
 
-            await _host.StopAsync(TimeSpan.FromSeconds(5));
+            await _host.StopAsync(HostStopTimeout);
         }
         catch (Exception exception)
         {
@@ -157,16 +236,113 @@ public partial class App : Microsoft.UI.Xaml.Application
         {
             try
             {
-                _host.Dispose();
-            }
-            catch (Exception exception)
-            {
-                Program.WriteShutdownFailure(exception);
+                using var cleanupBudget = new CancellationTokenSource(
+                    ShutdownCleanupBudget);
+                await RunShutdownCleanupAsync(
+                    "Development capture cleanup",
+                    DisposeDevLiveCaptureAsync,
+                    cleanupBudget.Token);
+                await RunShutdownCleanupAsync(
+                    "Application host disposal",
+                    DisposeHostAsync,
+                    cleanupBudget.Token);
             }
             finally
             {
-                Exit();
+                try
+                {
+                    currentInstance?.UnregisterKey();
+                }
+                catch (Exception exception)
+                {
+                    Program.WriteShutdownFailure(exception);
+                }
+                finally
+                {
+                    Exit();
+                }
             }
+        }
+    }
+
+    private static void AddUnavailableCaptureServices(IServiceCollection services)
+    {
+        services.AddSingleton<IAppSettingsCommitBarrier>(
+            NoOpAppSettingsCommitBarrier.Instance);
+        services.AddSingleton<ICaptureRuntimeAuthorization>(
+            DenyCaptureRuntimeAuthorization.Instance);
+        services.AddSingleton<UnavailableCaptureBackend>();
+        services.AddSingleton<ICaptureBackend>(static provider =>
+            provider.GetRequiredService<UnavailableCaptureBackend>());
+        services.AddSingleton<ICaptureChunkCommitNotifier>(static provider =>
+            provider.GetRequiredService<UnavailableCaptureBackend>());
+    }
+
+    private ValueTask DisposeDevLiveCaptureAsync()
+    {
+        return _devLiveCaptureLifetime?.DisposeAsync() ?? ValueTask.CompletedTask;
+    }
+
+    private ValueTask DisposeHostAsync()
+    {
+        if (_host is IAsyncDisposable asyncDisposable)
+        {
+            return asyncDisposable.DisposeAsync();
+        }
+
+        _host.Dispose();
+        return ValueTask.CompletedTask;
+    }
+
+    private static async Task RunShutdownCleanupAsync(
+        string operationName,
+        Func<ValueTask> cleanupAsync,
+        CancellationToken budgetToken)
+    {
+        if (budgetToken.IsCancellationRequested)
+        {
+            return;
+        }
+
+        var cleanupTask = Task.Run(
+            async () => await cleanupAsync().ConfigureAwait(false),
+            CancellationToken.None);
+        try
+        {
+            await cleanupTask.WaitAsync(budgetToken);
+        }
+        catch (OperationCanceledException) when (budgetToken.IsCancellationRequested)
+        {
+            ObserveFailure(cleanupTask);
+            Program.WriteShutdownFailure(new TimeoutException(
+                $"{operationName} did not complete within the "
+                + $"{ShutdownCleanupBudget.TotalSeconds:g}-second shutdown cleanup budget."));
+        }
+        catch (Exception exception)
+        {
+            Program.WriteShutdownFailure(exception);
+        }
+    }
+
+    private static void ObserveFailure(Task task)
+    {
+        _ = task.ContinueWith(
+            static completed => _ = completed.Exception,
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously
+                | TaskContinuationOptions.OnlyOnFaulted,
+            TaskScheduler.Default);
+    }
+
+    private async Task DisposeDevLiveCaptureAfterFailureAsync()
+    {
+        try
+        {
+            await DisposeDevLiveCaptureAsync();
+        }
+        catch (Exception cleanupFailure)
+        {
+            Program.WriteShutdownFailure(cleanupFailure);
         }
     }
 

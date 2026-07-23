@@ -186,6 +186,176 @@ public sealed class SqliteCaptureAnalysisStoreTests
         Assert.Null(await ((IAnalysisJobStore)store).GetAsync(job.Id));
     }
 
+    [Fact]
+    public async Task CompletedAnalysisQueryOnlyMatchesCompletedJobAtSameVersionAndFingerprint()
+    {
+        using var database = new TemporaryDatabase();
+        var (_, store) = await CreateStoreAsync(database);
+        var jobStore = (IAnalysisJobStore)store;
+
+        var completedChunk = CreateChunk("chunk-completed");
+        await store.IngestCommittedAsync(completedChunk);
+        await store.EnqueueAsync(CreatePendingJob(
+            Guid.Parse("10000000-0000-0000-0000-000000000006"),
+            completedChunk.Id));
+        await CompleteNextJobAsync(store, "worker-completed");
+
+        var failedChunk = CreateChunk("chunk-failed");
+        await store.IngestCommittedAsync(failedChunk);
+        await store.EnqueueAsync(CreatePendingJob(
+            Guid.Parse("10000000-0000-0000-0000-000000000007"),
+            failedChunk.Id,
+            maxAttempts: 1));
+        var failedClaim = Assert.IsType<AnalysisJob>(await store.TryClaimNextAsync(
+            "worker-failed",
+            Now,
+            TimeSpan.FromMinutes(5)));
+        var failed = await store.TryFailAsync(
+            failedClaim.Lease!,
+            new AnalysisJobFailure(AnalysisJobErrorCode.ProviderUnavailable),
+            AnalysisFailureDisposition.Retryable,
+            Now.AddSeconds(1),
+            TimeSpan.FromSeconds(30));
+        Assert.Equal(AnalysisJobState.FailedTerminal, failed?.State);
+
+        var cancelledChunk = CreateChunk("chunk-cancelled");
+        await store.IngestCommittedAsync(cancelledChunk);
+        var cancelledJob = CreatePendingJob(
+            Guid.Parse("10000000-0000-0000-0000-000000000008"),
+            cancelledChunk.Id);
+        await store.EnqueueAsync(cancelledJob);
+        var cancelled = await store.TryCancelAsync(cancelledJob.Id, Now.AddSeconds(1));
+        Assert.Equal(AnalysisJobState.Cancelled, cancelled?.State);
+
+        var pendingChunk = CreateChunk("chunk-pending");
+        await store.IngestCommittedAsync(pendingChunk);
+        await store.EnqueueAsync(CreatePendingJob(
+            Guid.Parse("10000000-0000-0000-0000-000000000009"),
+            pendingChunk.Id));
+
+        Assert.True(await jobStore.HasCompletedAnalysisAsync(
+            completedChunk.Id,
+            "analysis-v1",
+            new string('A', 64)));
+        await Assert.ThrowsAsync<CaptureChunkConflictException>(() =>
+            jobStore.HasCompletedAnalysisAsync(
+                completedChunk.Id,
+                "analysis-v1",
+                new string('B', 64)));
+        Assert.False(await jobStore.HasCompletedAnalysisAsync(
+            completedChunk.Id,
+            "analysis-v2",
+            new string('A', 64)));
+        Assert.False(await jobStore.HasCompletedAnalysisAsync(
+            failedChunk.Id,
+            "analysis-v1",
+            new string('A', 64)));
+        Assert.False(await jobStore.HasCompletedAnalysisAsync(
+            cancelledChunk.Id,
+            "analysis-v1",
+            new string('A', 64)));
+        Assert.False(await jobStore.HasCompletedAnalysisAsync(
+            pendingChunk.Id,
+            "analysis-v1",
+            new string('A', 64)));
+    }
+
+    [Fact]
+    public async Task CompletedAnalysisQueryRejectsAnyConflictingFingerprint()
+    {
+        using var database = new TemporaryDatabase();
+        var (_, store) = await CreateStoreAsync(database);
+        var jobStore = (IAnalysisJobStore)store;
+        var chunk = CreateChunk("chunk-conflicting-completed");
+        await store.IngestCommittedAsync(chunk);
+
+        await store.EnqueueAsync(CreatePendingJob(
+            Guid.Parse("10000000-0000-0000-0000-00000000000a"),
+            chunk.Id,
+            fingerprintCharacter: 'A'));
+        await CompleteNextJobAsync(store, "worker-completed-a");
+        await store.EnqueueAsync(CreatePendingJob(
+            Guid.Parse("10000000-0000-0000-0000-00000000000b"),
+            chunk.Id,
+            fingerprintCharacter: 'B',
+            providerProfileRevision: 2));
+        await CompleteNextJobAsync(store, "worker-completed-b");
+
+        await Assert.ThrowsAsync<CaptureChunkConflictException>(() =>
+            jobStore.HasCompletedAnalysisAsync(
+                chunk.Id,
+                "analysis-v1",
+                new string('A', 64)));
+        await Assert.ThrowsAsync<CaptureChunkConflictException>(() =>
+            jobStore.HasCompletedAnalysisAsync(
+                chunk.Id,
+                "analysis-v1",
+                new string('B', 64)));
+    }
+
+    [Fact]
+    public async Task CompletedAnalysisQueryRejectsChangedFingerprintWhileEarlierRevisionIsPending()
+    {
+        using var database = new TemporaryDatabase();
+        var (_, store) = await CreateStoreAsync(database);
+        var jobStore = (IAnalysisJobStore)store;
+        var chunk = CreateChunk("chunk-pending-earlier-revision");
+        await store.IngestCommittedAsync(chunk);
+        await store.EnqueueAsync(CreatePendingJob(
+            Guid.Parse("10000000-0000-0000-0000-00000000000c"),
+            chunk.Id,
+            fingerprintCharacter: 'A',
+            providerProfileRevision: 1));
+
+        await Assert.ThrowsAsync<CaptureChunkConflictException>(() =>
+            jobStore.HasCompletedAnalysisAsync(
+                chunk.Id,
+                "analysis-v1",
+                new string('B', 64)));
+        Assert.False(await jobStore.HasCompletedAnalysisAsync(
+            chunk.Id,
+            "analysis-v1",
+            new string('A', 64)));
+    }
+
+    [Fact]
+    public async Task CompletedAnalysisQueryValidatesArgumentsAndCancellation()
+    {
+        using var database = new TemporaryDatabase();
+        var (_, store) = await CreateStoreAsync(database);
+        var jobStore = (IAnalysisJobStore)store;
+
+        await Assert.ThrowsAsync<ArgumentException>(() =>
+            jobStore.HasCompletedAnalysisAsync(
+                "INVALID",
+                "analysis-v1",
+                new string('A', 64)));
+        await Assert.ThrowsAsync<ArgumentException>(() =>
+            jobStore.HasCompletedAnalysisAsync(
+                "chunk-valid",
+                " analysis-v1",
+                new string('A', 64)));
+        await Assert.ThrowsAsync<ArgumentException>(() =>
+            jobStore.HasCompletedAnalysisAsync(
+                "chunk-valid",
+                "analysis-v1",
+                new string('A', 63)));
+        await Assert.ThrowsAsync<ArgumentException>(() =>
+            jobStore.HasCompletedAnalysisAsync(
+                "chunk-valid",
+                "analysis-v1",
+                new string('a', 64)));
+
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            jobStore.HasCompletedAnalysisAsync(
+                "chunk-valid",
+                "analysis-v1",
+                new string('A', 64),
+                cancellation.Token));
+    }
+
     [Theory]
     [InlineData(CaptureChunkAvailability.Missing)]
     [InlineData(CaptureChunkAvailability.Deleted)]
@@ -459,6 +629,34 @@ public sealed class SqliteCaptureAnalysisStoreTests
         return (factory, new SqliteCaptureAnalysisStore(factory, database.EvidenceRoot));
     }
 
+    private static async Task CompleteNextJobAsync(
+        SqliteCaptureAnalysisStore store,
+        string leaseOwner)
+    {
+        var current = Assert.IsType<AnalysisJob>(await store.TryClaimNextAsync(
+            leaseOwner,
+            Now,
+            TimeSpan.FromMinutes(5)));
+        var transitions = new[]
+        {
+            (AnalysisJobState.Claimed, AnalysisJobState.Extracting),
+            (AnalysisJobState.Extracting, AnalysisJobState.Observing),
+            (AnalysisJobState.Observing, AnalysisJobState.Summarizing),
+            (AnalysisJobState.Summarizing, AnalysisJobState.Committing),
+            (AnalysisJobState.Committing, AnalysisJobState.Completed),
+        };
+
+        for (var index = 0; index < transitions.Length; index++)
+        {
+            var (expected, next) = transitions[index];
+            current = Assert.IsType<AnalysisJob>(await store.TryTransitionAsync(
+                current.Lease!,
+                expected,
+                next,
+                Now.AddSeconds(index + 1)));
+        }
+    }
+
     private static CaptureChunk CreateChunk(
         string id,
         ulong persistenceGeneration = 1,
@@ -508,6 +706,7 @@ public sealed class SqliteCaptureAnalysisStoreTests
         Guid id,
         string chunkId,
         char fingerprintCharacter = 'A',
+        long providerProfileRevision = 1,
         string analysisVersion = "analysis-v1",
         int maxAttempts = 3,
         DateTimeOffset? createdAt = null)
@@ -516,7 +715,7 @@ public sealed class SqliteCaptureAnalysisStoreTests
             id,
             chunkId,
             ProviderId,
-            providerProfileRevision: 1,
+            providerProfileRevision,
             analysisVersion,
             new string(fingerprintCharacter, 64),
             maxAttempts,

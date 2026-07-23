@@ -40,6 +40,12 @@ public static class AiAnalysisResponseValidator
                 "The AI response schema version does not match the request.");
         }
 
+        if (response.Activities.Count == 0)
+        {
+            throw new AiAnalysisValidationException(
+                "The AI response must contain at least one activity candidate.");
+        }
+
         if (response.Activities.Count > AiAnalysisContract.MaximumActivities)
         {
             throw new AiAnalysisValidationException(
@@ -47,6 +53,8 @@ public static class AiAnalysisResponseValidator
         }
 
         ValidateTokenUsage(response.TokenUsage);
+        var rangeDurationMilliseconds = checked(
+            (long)request.Range.Duration.TotalMilliseconds);
         var frameIds = request.Images
             .Select(static image => image.FrameId)
             .ToHashSet(StringComparer.Ordinal);
@@ -59,7 +67,12 @@ public static class AiAnalysisResponseValidator
         for (var index = 0; index < response.Activities.Count; index++)
         {
             var candidate = response.Activities[index];
-            ValidateCandidate(candidate, index, request, previousEndOffset, frameIds);
+            ValidateCandidate(
+                candidate,
+                index,
+                rangeDurationMilliseconds,
+                previousEndOffset,
+                frameIds);
 
             TimeRange range;
             try
@@ -89,28 +102,34 @@ public static class AiAnalysisResponseValidator
             previousEndOffset = candidate.EndOffsetMilliseconds;
         }
 
+        if (previousEndOffset != rangeDurationMilliseconds)
+        {
+            throw new AiAnalysisValidationException(
+                "The final activity candidate must end at the analyzed range boundary.");
+        }
+
         return activities.AsReadOnly();
     }
 
     private static void ValidateCandidate(
         AiActivityCandidate candidate,
         int index,
-        AiAnalysisRequest request,
-        long previousEndOffset,
+        long rangeDurationMilliseconds,
+        long expectedStartOffset,
         HashSet<string> frameIds)
     {
         if (candidate.StartOffsetMilliseconds < 0
             || candidate.EndOffsetMilliseconds <= candidate.StartOffsetMilliseconds
-            || candidate.EndOffsetMilliseconds > request.Range.Duration.TotalMilliseconds)
+            || candidate.EndOffsetMilliseconds > rangeDurationMilliseconds)
         {
             throw new AiAnalysisValidationException(
                 $"Activity candidate {index} falls outside the analyzed range.");
         }
 
-        if (index > 0 && candidate.StartOffsetMilliseconds < previousEndOffset)
+        if (candidate.StartOffsetMilliseconds != expectedStartOffset)
         {
             throw new AiAnalysisValidationException(
-                $"Activity candidate {index} overlaps a preceding candidate.");
+                $"Activity candidate {index} does not continuously cover the analyzed range.");
         }
 
         ValidateText(candidate.Title, MaximumTitleLength, allowEmpty: false, index, "title");

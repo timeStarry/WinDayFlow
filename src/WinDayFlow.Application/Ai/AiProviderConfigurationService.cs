@@ -1,8 +1,66 @@
 using System.Diagnostics;
+using System.Runtime.CompilerServices;
+using System.Threading.Channels;
 using WinDayFlow.Application.Settings;
 using WinDayFlow.Domain;
 
 namespace WinDayFlow.Application.Ai;
+
+internal sealed class AiAnalysisSendGate
+{
+    // The settings service instance is the shared identity already held by both the
+    // configuration service and processor. All user-facing cloud toggles must flow
+    // through AiProviderConfigurationService so disable persistence uses this gate.
+    private static readonly ConditionalWeakTable<AppSettingsService, AiAnalysisSendGate>
+        Gates = new();
+
+    private readonly Channel<byte> _gate = CreateGate();
+
+    public static AiAnalysisSendGate GetFor(AppSettingsService settings)
+    {
+        ArgumentNullException.ThrowIfNull(settings);
+        return Gates.GetValue(settings, static _ => new AiAnalysisSendGate());
+    }
+
+    public async ValueTask<IDisposable> EnterAsync(CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        _ = await _gate.Reader.ReadAsync(cancellationToken).ConfigureAwait(false);
+        return new Releaser(_gate.Writer);
+    }
+
+    private static Channel<byte> CreateGate()
+    {
+        var gate = Channel.CreateBounded<byte>(new BoundedChannelOptions(1)
+        {
+            AllowSynchronousContinuations = false,
+            FullMode = BoundedChannelFullMode.Wait,
+            SingleReader = false,
+            SingleWriter = false,
+        });
+        if (!gate.Writer.TryWrite(0))
+        {
+            throw new InvalidOperationException("The AI analysis send gate could not initialize.");
+        }
+
+        return gate;
+    }
+
+    private sealed class Releaser(ChannelWriter<byte> writer) : IDisposable
+    {
+        private ChannelWriter<byte>? _writer = writer;
+
+        public void Dispose()
+        {
+            var writer = Interlocked.Exchange(ref _writer, null);
+            if (writer is not null && !writer.TryWrite(0))
+            {
+                throw new InvalidOperationException(
+                    "The AI analysis send gate was released out of order.");
+            }
+        }
+    }
+}
 
 public sealed class AiProviderConfigurationService : IDisposable
 {
@@ -26,6 +84,7 @@ public sealed class AiProviderConfigurationService : IDisposable
     private readonly IAiProviderProfileStore _store;
     private readonly IAiAnalysisProviderFactory _providerFactory;
     private readonly AppSettingsService _settings;
+    private readonly AiAnalysisSendGate _sendGate;
     private readonly TimeProvider _timeProvider;
     private readonly SemaphoreSlim _gate = new(1, 1);
     private bool _initialized;
@@ -41,6 +100,7 @@ public sealed class AiProviderConfigurationService : IDisposable
         _providerFactory = providerFactory
             ?? throw new ArgumentNullException(nameof(providerFactory));
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
+        _sendGate = AiAnalysisSendGate.GetFor(settings);
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
@@ -75,8 +135,7 @@ public sealed class AiProviderConfigurationService : IDisposable
             if (_settings.Current.CloudAnalysisEnabled
                 && (current is null || !current.IsComplete || !current.IsValidated))
             {
-                await _settings
-                    .SetCloudAnalysisEnabledAsync(false, cancellationToken)
+                await DisableCloudAnalysisAsync(cancellationToken)
                     .ConfigureAwait(false);
             }
 
@@ -128,6 +187,8 @@ public sealed class AiProviderConfigurationService : IDisposable
                 model,
                 TimeSpan.FromSeconds(requestTimeoutSeconds));
             var credentialUpdate = CreateCredentialUpdate(
+                previous,
+                profile,
                 replacementApiKey,
                 clearApiKey);
             var willHaveApiKey = credentialUpdate.Kind switch
@@ -249,9 +310,16 @@ public sealed class AiProviderConfigurationService : IDisposable
                     "The current AI provider must pass a connection test before cloud analysis can be enabled.");
             }
 
-            await _settings
-                .SetCloudAnalysisEnabledAsync(enabled, cancellationToken)
-                .ConfigureAwait(false);
+            if (enabled)
+            {
+                await _settings
+                    .SetCloudAnalysisEnabledAsync(true, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            else
+            {
+                await DisableCloudAnalysisAsync(cancellationToken).ConfigureAwait(false);
+            }
         }
         finally
         {
@@ -270,6 +338,8 @@ public sealed class AiProviderConfigurationService : IDisposable
     }
 
     private static AiProviderCredentialUpdate CreateCredentialUpdate(
+        AiProviderProfileSnapshot? previous,
+        AiProviderProfile profile,
         string? replacementApiKey,
         bool clearApiKey)
     {
@@ -285,9 +355,28 @@ public sealed class AiProviderConfigurationService : IDisposable
             return AiProviderCredentialUpdate.Clear;
         }
 
-        return string.IsNullOrEmpty(replacementApiKey)
-            ? AiProviderCredentialUpdate.Preserve
-            : AiProviderCredentialUpdate.Replace(replacementApiKey);
+        if (!string.IsNullOrEmpty(replacementApiKey))
+        {
+            return AiProviderCredentialUpdate.Replace(replacementApiKey);
+        }
+
+        return previous is not null
+            && HasSameOrigin(previous.Profile.BaseEndpoint, profile.BaseEndpoint)
+                ? AiProviderCredentialUpdate.Preserve
+                : AiProviderCredentialUpdate.Clear;
+    }
+
+    private static bool HasSameOrigin(Uri left, Uri right)
+    {
+        return string.Equals(
+                left.Scheme,
+                right.Scheme,
+                StringComparison.OrdinalIgnoreCase)
+            && string.Equals(
+                left.IdnHost,
+                right.IdnHost,
+                StringComparison.OrdinalIgnoreCase)
+            && left.Port == right.Port;
     }
 
     private AiAnalysisRequest CreateConnectionTestRequest()
@@ -310,12 +399,12 @@ public sealed class AiProviderConfigurationService : IDisposable
 
     private async Task DisableCloudAnalysisAsync(CancellationToken cancellationToken)
     {
-        if (_settings.Current.CloudAnalysisEnabled)
-        {
-            await _settings
-                .SetCloudAnalysisEnabledAsync(false, cancellationToken)
-                .ConfigureAwait(false);
-        }
+        using var sendGate = await _sendGate
+            .EnterAsync(cancellationToken)
+            .ConfigureAwait(false);
+        await _settings
+            .SetCloudAnalysisEnabledAsync(false, cancellationToken)
+            .ConfigureAwait(false);
     }
 
     private void ThrowIfReadyForUse()

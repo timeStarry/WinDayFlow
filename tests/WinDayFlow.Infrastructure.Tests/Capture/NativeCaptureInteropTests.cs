@@ -334,7 +334,7 @@ public sealed class NativeCaptureInteropTests
     }
 
     [Fact]
-    public void ProbeNegotiatesTheRealNativeFoundation()
+    public void ProbeNegotiatesTheSelectedNativeFlavor()
     {
         var probe = NativeCaptureBackend.Probe();
         if (!RequireNativeBinary(probe))
@@ -358,12 +358,20 @@ public sealed class NativeCaptureInteropTests
             NativeCaptureCapabilities.DisplayScopedAuthorization));
         Assert.True(probe.Capabilities.HasFlag(
             NativeCaptureCapabilities.DisplayBoundCommandAdmission));
+#if WDF_DEV_LIVE_CAPTURE
+        Assert.True(probe.Capabilities.HasFlag(NativeCaptureCapabilities.ScreenCapture));
+        Assert.True(probe.Capabilities.HasFlag(NativeCaptureCapabilities.H264Chunks));
+#else
         Assert.False(probe.Capabilities.HasFlag(NativeCaptureCapabilities.ScreenCapture));
+        Assert.False(probe.Capabilities.HasFlag(NativeCaptureCapabilities.H264Chunks));
+#endif
+        Assert.False(probe.Capabilities.HasFlag(
+            NativeCaptureCapabilities.EvidenceExtraction));
         Assert.Null(probe.Failure);
     }
 
     [Fact]
-    public async Task FoundationBackendPollsItsInitialEventButRemainsUnavailable()
+    public async Task FoundationBackendPollsTheSelectedFlavorInitialEvent()
     {
         var probe = NativeCaptureBackend.Probe();
         if (!RequireNativeBinary(probe))
@@ -378,6 +386,12 @@ public sealed class NativeCaptureInteropTests
             () => backend.CurrentStatus.Sequence > 0,
             TimeSpan.FromSeconds(5));
 
+#if WDF_DEV_LIVE_CAPTURE
+        Assert.True(backend.SupportsScreenCapture);
+        Assert.Equal(CaptureState.Stopped, backend.CurrentStatus.State);
+        Assert.Equal(CaptureReasonCode.None, backend.CurrentStatus.Reason);
+        Assert.True(backend.CurrentStatus.Sequence > 0);
+#else
         Assert.False(backend.SupportsScreenCapture);
         Assert.Equal(CaptureState.Unavailable, backend.CurrentStatus.State);
         Assert.Equal(CaptureReasonCode.BackendUnavailable, backend.CurrentStatus.Reason);
@@ -401,6 +415,7 @@ public sealed class NativeCaptureInteropTests
             authorization.Target.TargetEpoch);
         Assert.Null(resumeAdmission);
         await Assert.ThrowsAsync<NotSupportedException>(() => backend.StopAsync());
+#endif
     }
 
     [Fact]
@@ -940,6 +955,204 @@ public sealed class NativeCaptureInteropTests
     }
 
     [Fact]
+    public async Task StopWaitsForTheManagedPumpToConsumeChunkBeforeStopped()
+    {
+        using var directory = new TemporaryDirectory();
+        using var nativeApi = new FakeNativeCaptureApi();
+        using var backend = CreateBackend(directory.Path, nativeApi);
+        var persistenceGeneration = await backend.UpdateRuntimeAuthorizationAsync(
+            CreateAllowedRuntimeAuthorization(runtimePolicyRevision: 2));
+        var committed = new TaskCompletionSource<NativeCaptureChunkCommitted>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        backend.ChunkCommitted += (_, eventArgs) =>
+            committed.TrySetResult(eventArgs.Chunk);
+        nativeApi.BlockNextPollEvent();
+        await nativeApi.PollEventBlocked.WaitAsync(TimeSpan.FromSeconds(2));
+        nativeApi.AfterRequestStop = () =>
+        {
+            nativeApi.Enqueue(
+                sequence: 1,
+                NativeCaptureEventKind.ChunkCommitted,
+                CaptureState.Recording,
+                detail: "chunks/stop-race.mp4",
+                persistenceGeneration: persistenceGeneration,
+                targetEpoch: 1);
+            nativeApi.Enqueue(
+                sequence: 2,
+                NativeCaptureEventKind.StateChanged,
+                CaptureState.Stopped,
+                detail: "stopped",
+                reason: CaptureReasonCode.UserStopped,
+                persistenceGeneration: persistenceGeneration);
+        };
+
+        var stop = backend.StopAsync();
+        try
+        {
+            await nativeApi.RequestStopCalled.WaitAsync(TimeSpan.FromSeconds(2));
+            await Task.Delay(100);
+            Assert.False(stop.IsCompleted);
+        }
+        finally
+        {
+            nativeApi.ReleasePollEvent();
+        }
+
+        var chunk = await committed.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        await stop.WaitAsync(TimeSpan.FromSeconds(2));
+
+        Assert.Equal("chunks/stop-race.mp4", chunk.ArtifactIdentifier);
+        Assert.Equal(CaptureState.Stopped, backend.CurrentStatus.State);
+        Assert.NotEqual(CaptureState.Faulted, backend.CurrentStatus.State);
+    }
+
+    [Fact]
+    public async Task StopFailsWhenTheManagedEventPumpFaultsBeforeStopped()
+    {
+        using var directory = new TemporaryDirectory();
+        using var nativeApi = new FakeNativeCaptureApi();
+        using var backend = CreateBackend(directory.Path, nativeApi);
+        nativeApi.BlockNextPollEvent();
+        await nativeApi.PollEventBlocked.WaitAsync(TimeSpan.FromSeconds(2));
+        nativeApi.ForcedPollEventResult = NativeCaptureResult.InternalError;
+
+        var stop = backend.StopAsync();
+        try
+        {
+            await nativeApi.RequestStopCalled.WaitAsync(TimeSpan.FromSeconds(2));
+        }
+        finally
+        {
+            nativeApi.ReleasePollEvent();
+        }
+
+        var failure = await Assert.ThrowsAsync<InvalidOperationException>(
+            async () => await stop.WaitAsync(TimeSpan.FromSeconds(2)));
+        Assert.Contains("event pump faulted", failure.Message, StringComparison.Ordinal);
+        Assert.IsType<NativeCaptureException>(failure.InnerException);
+        Assert.Equal(CaptureState.Faulted, backend.CurrentStatus.State);
+    }
+
+    [Fact]
+    public async Task StopFailsWhenTheManagedEventPumpExitsBeforeStopped()
+    {
+        using var directory = new TemporaryDirectory();
+        using var nativeApi = new FakeNativeCaptureApi();
+        using var backend = CreateBackend(directory.Path, nativeApi);
+        nativeApi.BlockNextPollEvent();
+        await nativeApi.PollEventBlocked.WaitAsync(TimeSpan.FromSeconds(2));
+        nativeApi.ForcedPollEventException = new OperationCanceledException(
+            "unexpected poll exit");
+
+        var stop = backend.StopAsync();
+        try
+        {
+            await nativeApi.RequestStopCalled.WaitAsync(TimeSpan.FromSeconds(2));
+        }
+        finally
+        {
+            nativeApi.ReleasePollEvent();
+        }
+
+        var failure = await Assert.ThrowsAsync<InvalidOperationException>(
+            async () => await stop.WaitAsync(TimeSpan.FromSeconds(2)));
+        Assert.Contains("event pump exited", failure.Message, StringComparison.Ordinal);
+        Assert.Null(failure.InnerException);
+    }
+
+    [Fact]
+    public async Task StopManagedPumpWaitObservesCallerCancellation()
+    {
+        using var directory = new TemporaryDirectory();
+        using var nativeApi = new FakeNativeCaptureApi();
+        using var backend = CreateBackend(directory.Path, nativeApi);
+        nativeApi.BlockNextPollEvent();
+        await nativeApi.PollEventBlocked.WaitAsync(TimeSpan.FromSeconds(2));
+        using var cancellation = new CancellationTokenSource();
+
+        var stop = backend.StopAsync(cancellation.Token);
+        try
+        {
+            await nativeApi.RequestStopCalled.WaitAsync(TimeSpan.FromSeconds(2));
+            cancellation.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(
+                async () => await stop.WaitAsync(TimeSpan.FromSeconds(2)));
+        }
+        finally
+        {
+            nativeApi.ReleasePollEvent();
+        }
+    }
+
+    [Fact]
+    public async Task RepeatedStopDoesNotRequireAnotherNativeStoppedEvent()
+    {
+        using var directory = new TemporaryDirectory();
+        using var nativeApi = new FakeNativeCaptureApi();
+        using var backend = CreateBackend(directory.Path, nativeApi);
+        nativeApi.AfterRequestStop = () => nativeApi.Enqueue(
+            sequence: 1,
+            NativeCaptureEventKind.StateChanged,
+            CaptureState.Stopped,
+            detail: "stopped",
+            reason: CaptureReasonCode.UserStopped);
+
+        await backend.StopAsync().WaitAsync(TimeSpan.FromSeconds(2));
+        await backend.StopAsync().WaitAsync(TimeSpan.FromSeconds(2));
+
+        Assert.Equal(2, nativeApi.RequestStopCallCount);
+        Assert.Equal(CaptureState.Stopped, backend.CurrentStatus.State);
+    }
+
+    [Fact]
+    public async Task SuccessfulStartRearmsTheManagedStoppedBarrier()
+    {
+        using var directory = new TemporaryDirectory();
+        using var nativeApi = new FakeNativeCaptureApi();
+        using var backend = CreateBackend(directory.Path, nativeApi);
+        nativeApi.AfterRequestStop = () => nativeApi.Enqueue(
+            sequence: 1,
+            NativeCaptureEventKind.StateChanged,
+            CaptureState.Stopped,
+            detail: "initial stop",
+            reason: CaptureReasonCode.UserStopped);
+        await backend.StopAsync().WaitAsync(TimeSpan.FromSeconds(2));
+        var authorization = CreateAllowedRuntimeAuthorization(runtimePolicyRevision: 2);
+        var persistenceGeneration = await backend.UpdateRuntimeAuthorizationAsync(
+            authorization);
+        var admission = await backend.TryIssueCommandAdmissionAsync(
+            CaptureAdmissionOperation.Start,
+            authorization.RuntimePolicyRevision,
+            persistenceGeneration,
+            authorization.Target.TargetEpoch);
+        Assert.NotNull(admission);
+        await backend.StartAuthorizedAsync(admission.Value);
+        Assert.Equal(CaptureState.Stopped, backend.CurrentStatus.State);
+        nativeApi.BlockNextPollEvent();
+        await nativeApi.PollEventBlocked.WaitAsync(TimeSpan.FromSeconds(2));
+        nativeApi.AfterRequestStop = () => nativeApi.Enqueue(
+            sequence: 2,
+            NativeCaptureEventKind.StateChanged,
+            CaptureState.Stopped,
+            detail: "second stop",
+            reason: CaptureReasonCode.UserStopped);
+
+        var stop = backend.StopAsync();
+        try
+        {
+            await Task.Delay(100);
+            Assert.False(stop.IsCompleted);
+        }
+        finally
+        {
+            nativeApi.ReleasePollEvent();
+        }
+
+        await stop.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.Equal(CaptureState.Stopped, backend.CurrentStatus.State);
+    }
+
+    [Fact]
     public async Task DroppedNativeEventsFailClosedBeforeFurtherStateProjection()
     {
         using var directory = new TemporaryDirectory();
@@ -1283,6 +1496,7 @@ public sealed class NativeCaptureInteropTests
         private readonly Queue<FakeNativeEvent> _events = new();
         private readonly AutoResetEvent _eventAvailable = new(initialState: false);
         private readonly ManualResetEventSlim _eventPolled = new(initialState: false);
+        private readonly ManualResetEventSlim _releasePollEvent = new(initialState: false);
         private readonly ManualResetEventSlim _runtimeAuthorizationUpdateStarted =
             new(initialState: false);
         private readonly ManualResetEventSlim _releaseRuntimeAuthorizationUpdate =
@@ -1292,6 +1506,8 @@ public sealed class NativeCaptureInteropTests
         private readonly ManualResetEventSlim _releaseRuntimeAuthorizationInvalidation =
             new(initialState: false);
         private readonly TaskCompletionSource _requestStopCalled = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _pollEventBlocked = new(
             TaskCreationOptions.RunContinuationsAsynchronously);
         private bool _closed;
         private int _getCapabilitiesCallCount;
@@ -1304,6 +1520,7 @@ public sealed class NativeCaptureInteropTests
         private int _resumeAuthorizedCallCount;
         private int _operationSequence;
         private int _signalNextPoll;
+        private int _blockNextPollEvent;
         private int _blockNextRuntimeAuthorizationUpdate;
         private int _blockNextRuntimeAuthorizationInvalidation;
 
@@ -1382,6 +1599,12 @@ public sealed class NativeCaptureInteropTests
 
         public Action? AfterRuntimeAuthorizationCommit { get; set; }
 
+        public Action? AfterRequestStop { get; set; }
+
+        public NativeCaptureResult? ForcedPollEventResult { get; set; }
+
+        public Exception? ForcedPollEventException { get; set; }
+
         public Exception? DestroyException { get; init; }
 
         public Task RuntimeAuthorizationUpdateStarted => Task.Run(
@@ -1389,6 +1612,8 @@ public sealed class NativeCaptureInteropTests
 
         public Task RuntimeAuthorizationInvalidationStarted => Task.Run(
             _runtimeAuthorizationInvalidationStarted.Wait);
+
+        public Task PollEventBlocked => _pollEventBlocked.Task;
 
         public ulong? NextInvalidationAuthorizationEpoch { get; set; }
 
@@ -1626,6 +1851,9 @@ public sealed class NativeCaptureInteropTests
             Interlocked.Increment(ref _requestStopCallCount);
             RequestStopSequence = Interlocked.Increment(ref _operationSequence);
             _requestStopCalled.TrySetResult();
+            var afterRequestStop = AfterRequestStop;
+            AfterRequestStop = null;
+            afterRequestStop?.Invoke();
             return NativeCaptureResult.Ok;
         }
 
@@ -1648,6 +1876,25 @@ public sealed class NativeCaptureInteropTests
             out uint detailUtf8Required)
         {
             _ = handle;
+            if (Interlocked.Exchange(ref _blockNextPollEvent, 0) != 0)
+            {
+                _pollEventBlocked.TrySetResult();
+                _releasePollEvent.Wait();
+            }
+
+            if (ForcedPollEventResult is { } forcedResult)
+            {
+                ForcedPollEventResult = null;
+                detailUtf8Required = 0;
+                return forcedResult;
+            }
+
+            if (ForcedPollEventException is { } forcedException)
+            {
+                ForcedPollEventException = null;
+                throw forcedException;
+            }
+
             FakeNativeEvent? queued;
             lock (_eventSync)
             {
@@ -1728,14 +1975,27 @@ public sealed class NativeCaptureInteropTests
 
         public void Dispose()
         {
+            _releasePollEvent.Set();
             _releaseRuntimeAuthorizationUpdate.Set();
             _releaseRuntimeAuthorizationInvalidation.Set();
+            _releasePollEvent.Dispose();
             _runtimeAuthorizationUpdateStarted.Dispose();
             _releaseRuntimeAuthorizationUpdate.Dispose();
             _runtimeAuthorizationInvalidationStarted.Dispose();
             _releaseRuntimeAuthorizationInvalidation.Dispose();
             _eventPolled.Dispose();
             _eventAvailable.Dispose();
+        }
+
+        public void BlockNextPollEvent()
+        {
+            _releasePollEvent.Reset();
+            Interlocked.Exchange(ref _blockNextPollEvent, 1);
+        }
+
+        public void ReleasePollEvent()
+        {
+            _releasePollEvent.Set();
         }
 
         public void BlockNextRuntimeAuthorizationUpdate()

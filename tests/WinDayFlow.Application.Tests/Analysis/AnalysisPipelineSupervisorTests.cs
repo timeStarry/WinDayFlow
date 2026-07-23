@@ -413,6 +413,34 @@ public sealed class AnalysisPipelineSupervisorTests
             return Task.FromResult(job);
         }
 
+        public Task<bool> HasCompletedAnalysisAsync(
+            string captureChunkId,
+            string analysisVersion,
+            string inputFingerprint,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var matchingJobs = _jobs.Values.Where(job =>
+                string.Equals(
+                    job.CaptureChunkId,
+                    captureChunkId,
+                    StringComparison.Ordinal)
+                && string.Equals(
+                    job.AnalysisVersion,
+                    analysisVersion,
+                    StringComparison.Ordinal));
+            if (matchingJobs.Any(job => !string.Equals(
+                    job.InputFingerprint,
+                    inputFingerprint,
+                    StringComparison.Ordinal)))
+            {
+                throw new CaptureChunkConflictException(captureChunkId);
+            }
+
+            return Task.FromResult(matchingJobs.Any(job =>
+                job.State == AnalysisJobState.Completed));
+        }
+
         public Task<AnalysisJob?> TryClaimNextAsync(
             string leaseOwner,
             DateTimeOffset claimedAtUtc,
@@ -696,7 +724,21 @@ public sealed class AnalysisPipelineSupervisorTests
                 "request-1",
                 Profile.Model,
                 AiAnalysisContract.CurrentSchemaVersion,
-                activities: []));
+                activities:
+                [
+                    new AiActivityCandidate(
+                        StartOffsetMilliseconds: 0,
+                        EndOffsetMilliseconds: checked(
+                            (long)request.Range.Duration.TotalMilliseconds),
+                        "Pipeline activity",
+                        "Exercise the analysis pipeline.",
+                        "focused_work",
+                        "focused",
+                        [],
+                        ["integration"],
+                        Confidence: 0.9,
+                        ["frame-1"]),
+                ]));
         }
     }
 
