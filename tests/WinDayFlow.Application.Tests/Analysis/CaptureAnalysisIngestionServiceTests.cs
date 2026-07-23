@@ -121,6 +121,30 @@ public sealed class CaptureAnalysisIngestionServiceTests
         Assert.Empty(store.Jobs);
     }
 
+    [Fact]
+    public async Task ManifestSemanticChangeAfterHashSkipsStaleJob()
+    {
+        var original = CreateChunk("chunk-a", minuteOffset: 0);
+        var changed = CreateChunk("chunk-a", minuteOffset: 2);
+        var scanner = new SequencedManifestScanner([original], [changed]);
+        var store = new TestCaptureAnalysisStore();
+        using var settings = await CreateSettingsAsync(cloudEnabled: true);
+        using var service = new CaptureAnalysisIngestionService(
+            scanner,
+            store,
+            store,
+            new TestFingerprintProvider(),
+            new TestProviderStore(CreateProfile(revision: 2)),
+            settings);
+
+        var result = await service.ReconcileAsync();
+
+        Assert.Equal(
+            new CaptureAnalysisIngestionResult(1, 1, 0, true, 1),
+            result);
+        Assert.Empty(store.Jobs);
+    }
+
     private static CaptureChunk CreateChunk(string id, int minuteOffset)
     {
         var start = new DateTimeOffset(2026, 7, 23, 8, minuteOffset, 0, TimeSpan.Zero);
@@ -179,6 +203,20 @@ public sealed class CaptureAnalysisIngestionServiceTests
         {
             cancellationToken.ThrowIfCancellationRequested();
             return Task.FromResult(chunks);
+        }
+    }
+
+    private sealed class SequencedManifestScanner(
+        params IReadOnlyList<CaptureChunk>[] scans) : ICaptureManifestScanner
+    {
+        private int _index;
+
+        public Task<IReadOnlyList<CaptureChunk>> ScanCommittedAsync(
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var index = Math.Min(Interlocked.Increment(ref _index) - 1, scans.Length - 1);
+            return Task.FromResult(scans[index]);
         }
     }
 
