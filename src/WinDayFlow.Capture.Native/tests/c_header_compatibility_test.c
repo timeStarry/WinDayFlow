@@ -73,10 +73,18 @@ int main(void) {
       WDF_CAPTURE_CAPABILITY_CALLBACK_TIME_AUTHORIZATION_INVALIDATION !=
           (1ULL << 11) ||
       WDF_CAPTURE_RESULT_AUTHORIZATION_SUPERSEDED != -14 ||
+      WDF_CAPTURE_RESULT_EVIDENCE_NOT_FOUND != -15 ||
+      WDF_CAPTURE_RESULT_UNSAFE_EVIDENCE != -16 ||
+      WDF_CAPTURE_RESULT_EVIDENCE_TOO_LARGE != -17 ||
+      WDF_CAPTURE_RESULT_EVIDENCE_CHANGED != -18 ||
+      WDF_CAPTURE_RESULT_IO_FAILURE != -19 ||
+      WDF_CAPTURE_RESULT_CRYPTO_FAILURE != -20 ||
       WDF_CAPTURE_TARGET_DISPLAY_PRESENT != (1U << 1) ||
       WDF_CAPTURE_RUNTIME_AUTHORIZATION_V1_LEGACY_SIZE != 112U ||
       WDF_CAPTURE_DISPLAY_DEVICE_KEY_UTF8_CAPACITY != 96U ||
       WDF_CAPTURE_DISPLAY_DEVICE_KEY_UTF8_MAX_LENGTH != 93U ||
+      WDF_CAPTURE_CHUNK_FINGERPRINT_UTF8_LENGTH != 64U ||
+      WDF_CAPTURE_CHUNK_FINGERPRINT_UTF8_CAPACITY != 65U ||
       sizeof(wdf_capture_config_v1) != 80 ||
       sizeof(wdf_capture_privacy_context_v1) != 80 ||
       sizeof(wdf_capture_runtime_authorization_v1) != 224 ||
@@ -234,6 +242,29 @@ int main(void) {
         generation != 4 ||
         wdf_capture_destroy(&handle) != WDF_CAPTURE_RESULT_OK || handle != 0) {
       fputs("C translation unit could not call the safety-core exports\n",
+            stderr);
+      return 1;
+    }
+  }
+
+  {
+    static const char relative_root[] = "relative\\evidence";
+    static const char chunk_id[] = "chunk-1";
+    char fingerprint[WDF_CAPTURE_CHUNK_FINGERPRINT_UTF8_CAPACITY];
+    uint32_t required = 0;
+    memset(fingerprint, 'X', sizeof(fingerprint));
+    if (wdf_capture_compute_chunk_fingerprint(
+            relative_root,
+            (uint32_t)(sizeof(relative_root) - 1U),
+            chunk_id,
+            (uint32_t)(sizeof(chunk_id) - 1U),
+            1,
+            fingerprint,
+            (uint32_t)sizeof(fingerprint),
+            &required) != WDF_CAPTURE_RESULT_INVALID_ARGUMENT ||
+        required != WDF_CAPTURE_CHUNK_FINGERPRINT_UTF8_CAPACITY ||
+        fingerprint[0] != '\0') {
+      fputs("C translation unit observed an incompatible fingerprint export\n",
             stderr);
       return 1;
     }

@@ -22,6 +22,12 @@ internal enum NativeCaptureResult
     AdmissionRequired = -12,
     AdmissionRejected = -13,
     AuthorizationSuperseded = -14,
+    EvidenceNotFound = -15,
+    UnsafeEvidence = -16,
+    EvidenceTooLarge = -17,
+    EvidenceChanged = -18,
+    IoFailure = -19,
+    CryptoFailure = -20,
     InternalError = -255,
 }
 
@@ -528,6 +534,17 @@ internal static class NativeCaptureMethods
         [Out] byte[] detailUtf8,
         uint detailUtf8Capacity,
         out uint detailUtf8Required);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern NativeCaptureResult wdf_capture_compute_chunk_fingerprint(
+        [In] byte[] dataRootUtf8,
+        uint dataRootUtf8Length,
+        [In] byte[] canonicalChunkIdUtf8,
+        uint canonicalChunkIdUtf8Length,
+        ulong expectedVideoByteCount,
+        [Out] byte[] fingerprintUtf8,
+        uint fingerprintUtf8Capacity,
+        out uint fingerprintUtf8Required);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true,
         EntryPoint = "wdf_capture_destroy")]

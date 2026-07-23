@@ -44,6 +44,12 @@ enum {
   WDF_CAPTURE_RESULT_ADMISSION_REQUIRED = -12,
   WDF_CAPTURE_RESULT_ADMISSION_REJECTED = -13,
   WDF_CAPTURE_RESULT_AUTHORIZATION_SUPERSEDED = -14,
+  WDF_CAPTURE_RESULT_EVIDENCE_NOT_FOUND = -15,
+  WDF_CAPTURE_RESULT_UNSAFE_EVIDENCE = -16,
+  WDF_CAPTURE_RESULT_EVIDENCE_TOO_LARGE = -17,
+  WDF_CAPTURE_RESULT_EVIDENCE_CHANGED = -18,
+  WDF_CAPTURE_RESULT_IO_FAILURE = -19,
+  WDF_CAPTURE_RESULT_CRYPTO_FAILURE = -20,
   WDF_CAPTURE_RESULT_INTERNAL_ERROR = -255
 };
 
@@ -147,6 +153,8 @@ enum {
 #define WDF_CAPTURE_RUNTIME_AUTHORIZATION_V1_LEGACY_SIZE 112U
 #define WDF_CAPTURE_DISPLAY_DEVICE_KEY_UTF8_CAPACITY 96U
 #define WDF_CAPTURE_DISPLAY_DEVICE_KEY_UTF8_MAX_LENGTH 93U
+#define WDF_CAPTURE_CHUNK_FINGERPRINT_UTF8_LENGTH 64U
+#define WDF_CAPTURE_CHUNK_FINGERPRINT_UTF8_CAPACITY 65U
 
 #if defined(_MSC_VER) || defined(__clang__) || defined(__GNUC__)
 #pragma pack(push, 8)
@@ -446,6 +454,17 @@ WDF_CAPTURE_API wdf_capture_result WDF_CAPTURE_CALL wdf_capture_poll_event(
     char* detail_utf8,
     uint32_t detail_utf8_capacity,
     uint32_t* detail_utf8_required) WDF_CAPTURE_NOEXCEPT;
+
+WDF_CAPTURE_API wdf_capture_result WDF_CAPTURE_CALL
+wdf_capture_compute_chunk_fingerprint(
+    const char* data_root_utf8,
+    uint32_t data_root_utf8_length,
+    const char* canonical_chunk_id_utf8,
+    uint32_t canonical_chunk_id_utf8_length,
+    uint64_t expected_video_byte_count,
+    char* fingerprint_utf8,
+    uint32_t fingerprint_utf8_capacity,
+    uint32_t* fingerprint_utf8_required) WDF_CAPTURE_NOEXCEPT;
 
 WDF_CAPTURE_API wdf_capture_result WDF_CAPTURE_CALL
 wdf_capture_destroy(wdf_capture_handle* handle) WDF_CAPTURE_NOEXCEPT;
