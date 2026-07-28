@@ -5,6 +5,12 @@ using Xunit;
 
 namespace WinDayFlow.Infrastructure.Tests.Capture;
 
+[CollectionDefinition(
+    nameof(WindowsCaptureWindowTitleReaderTimingGroup),
+    DisableParallelization = true)]
+public sealed class WindowsCaptureWindowTitleReaderTimingGroup;
+
+[Collection(nameof(WindowsCaptureWindowTitleReaderTimingGroup))]
 public sealed class WindowsCaptureWindowTitleReaderTests
 {
     private const ulong WindowHandle = 0x1234;
@@ -147,6 +153,9 @@ public sealed class WindowsCaptureWindowTitleReaderTests
         Assert.True(nativeApi.Entered.Wait(TimeSpan.FromSeconds(2)));
         var expiredCompletion = Assert.IsAssignableFrom<Task>(
             reader.CurrentAttemptCompletion);
+        Assert.True(SpinWait.SpinUntil(
+            () => deadline.WaitCount == 1,
+            TimeSpan.FromSeconds(2)));
 
         deadline.ExpireLatest();
         var result = await readTask.WaitAsync(TimeSpan.FromSeconds(2));
