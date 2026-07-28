@@ -212,7 +212,6 @@ public sealed partial class CaptureStatusViewModel : ObservableObject, IDisposab
         if (status.State == CaptureState.Resuming)
         {
             CancelAutomaticRebindDelay();
-            StartAutomaticRebindDelay();
             return;
         }
 

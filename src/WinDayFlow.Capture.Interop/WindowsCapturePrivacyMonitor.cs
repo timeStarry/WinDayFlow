@@ -2235,7 +2235,8 @@ public sealed class WindowsCapturePrivacyMonitor : IAsyncDisposable
             null => false,
             CaptureState.Unavailable or
             CaptureState.Stopped or
-            CaptureState.BlockedByConsent => false,
+            CaptureState.BlockedByConsent or
+            CaptureState.Faulted => false,
             _ => true,
         };
     }

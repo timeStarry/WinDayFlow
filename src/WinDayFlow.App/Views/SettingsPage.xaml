@@ -261,8 +261,8 @@
                                 AutomationProperties.Name="应用录制范围"
                                 IsEnabled="{x:Bind ViewModel.CanChangeApplicationPrivacyMode, Mode=OneWay}"
                                 SelectionChanged="OnApplicationPrivacyModeChanged">
-                                <x:String>按前台应用保护（推荐）</x:String>
-                                <x:String>固定一个显示器，允许其中全部应用（连续录制）</x:String>
+                                <x:String>按前台应用保护（隐私优先）</x:String>
+                                <x:String>固定一个显示器，允许其中全部应用（连续性优先）</x:String>
                             </RadioButtons>
                         </Grid>
                     </Border>

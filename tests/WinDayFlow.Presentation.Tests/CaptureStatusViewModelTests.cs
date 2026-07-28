@@ -234,7 +234,7 @@ public sealed class CaptureStatusViewModelTests
         Assert.Equal(CaptureState.Paused, viewModel.State);
         Assert.Equal("隐私保护中", viewModel.StatusText);
         Assert.DoesNotContain("正在恢复录制", publishedStatusTexts);
-        Assert.Equal(2, delay.RequestCount);
+        Assert.Equal(1, delay.RequestCount);
 
         service.TransitionTo(CaptureState.Recording);
 
@@ -243,7 +243,7 @@ public sealed class CaptureStatusViewModelTests
     }
 
     [Fact]
-    public async Task PersistentAutomaticRecoveryIsShownAfterCoalescingWindow()
+    public async Task AutomaticRecoveryRemainsProtectedUntilRecordingIsConfirmed()
     {
         var service = new StubCaptureService(CaptureState.Recording);
         var delay = new ControlledDelay();
@@ -258,18 +258,19 @@ public sealed class CaptureStatusViewModelTests
         delay.Release();
         await protectionShown;
 
-        var recoveryShown = ObserveStateAsync(viewModel, CaptureState.Resuming);
+        var publishedStatusTexts = ObserveStatusTexts(viewModel);
         service.TransitionTo(CaptureState.Resuming);
 
         Assert.Equal(CaptureState.Paused, viewModel.State);
-        Assert.Equal(2, delay.RequestCount);
+        Assert.Equal("隐私保护中", viewModel.StatusText);
+        Assert.False(viewModel.IsTransitioning);
+        Assert.Equal(1, delay.RequestCount);
+        Assert.DoesNotContain("正在恢复录制", publishedStatusTexts);
 
-        delay.Release();
-        await recoveryShown;
+        service.TransitionTo(CaptureState.Recording);
 
-        Assert.Equal(CaptureState.Resuming, viewModel.State);
-        Assert.Equal("正在恢复录制", viewModel.StatusText);
-        Assert.True(viewModel.IsTransitioning);
+        AssertRecordingPresentation(viewModel);
+        Assert.DoesNotContain("正在恢复录制", publishedStatusTexts);
     }
 
     [Theory]
