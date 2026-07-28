@@ -232,13 +232,60 @@
                     Orientation="Horizontal"
                     Spacing="8">
                     <Button
+                        x:Name="AnalysisPipelineStatusButton"
+                        AutomationProperties.HelpText="{x:Bind ViewModel.AnalysisPipelineStatusText, Mode=OneWay}"
+                        AutomationProperties.Name="{x:Bind ViewModel.AnalysisPipelineAutomationName, Mode=OneWay}"
+                        ToolTipService.ToolTip="查看后台分析状态"
+                        Visibility="{x:Bind ViewModel.HasAnalysisPipelineStatus, Mode=OneWay}">
+                        <Button.Flyout>
+                            <Flyout Placement="BottomEdgeAlignedRight">
+                                <InfoBar
+                                    x:Name="AnalysisPipelineStatusInfoBar"
+                                    AutomationProperties.LiveSetting="Polite"
+                                    IsClosable="False"
+                                    IsOpen="True"
+                                    Message="{x:Bind ViewModel.AnalysisPipelineStatusText, Mode=OneWay}"
+                                    Title="{x:Bind ViewModel.AnalysisPipelineStatusTitle, Mode=OneWay}">
+                                    <InfoBar.ActionButton>
+                                        <Button
+                                            Command="{x:Bind ViewModel.RetryAnalysisPipelineCommand}"
+                                            AutomationProperties.Name="立即重试后台分析"
+                                            Visibility="{x:Bind ViewModel.HasAnalysisPipelineFault, Mode=OneWay}">
+                                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                                <SymbolIcon Symbol="Refresh" />
+                                                <TextBlock Text="立即重试" />
+                                            </StackPanel>
+                                        </Button>
+                                    </InfoBar.ActionButton>
+                                </InfoBar>
+                            </Flyout>
+                        </Button.Flyout>
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <ProgressRing
+                                x:Name="AnalysisPipelineProgressRing"
+                                Width="16"
+                                Height="16"
+                                IsActive="{x:Bind ViewModel.IsAnalysisPipelineRunning, Mode=OneWay}" />
+                            <FontIcon
+                                x:Name="AnalysisPipelineStatusIcon"
+                                FontSize="14"
+                                Glyph="&#xE73E;" />
+                            <TextBlock
+                                x:Name="AnalysisPipelineStatusLabel"
+                                VerticalAlignment="Center"
+                                Text="{x:Bind ViewModel.AnalysisPipelineCompactStatusText, Mode=OneWay}" />
+                        </StackPanel>
+                    </Button>
+                    <Button
                         x:Name="CreateActivityButton"
                         Click="OnCreateActivity"
                         AutomationProperties.Name="新建活动"
                         ToolTipService.ToolTip="新建活动">
                         <StackPanel Orientation="Horizontal" Spacing="8">
                             <SymbolIcon Symbol="Add" />
-                            <TextBlock Text="新建活动" />
+                            <TextBlock
+                                x:Name="CreateActivityButtonLabel"
+                                Text="新建活动" />
                         </StackPanel>
                     </Button>
                     <Button

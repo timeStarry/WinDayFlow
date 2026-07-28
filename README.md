@@ -257,7 +257,16 @@ The code path now includes dev-live recording composition, strict ingestion and
 restart recovery for both `authorized-foreground-display` and
 `authorized-display-continuous` manifests, root-bound native evidence extraction,
 background analysis supervision, atomic Timeline commit, and visible
-unprocessed/job failure states.
+unprocessed/job failure states. Timeline's command area also exposes a compact
+background-analysis indicator whose details distinguish checking, running,
+waiting-for-configuration, recently completed, partially incomplete, and
+pipeline-wide fault states without exposing exception text or request data.
+Pipeline-wide faults can request an immediate background run; row-level retries
+differentiate stale UI state, missing local evidence, and the absolute attempt
+limit instead of reporting every rejection as a system failure. Consecutive
+supervisor batches remain visibly Running until the final batch, avoiding an
+Idle/Running status flash, and their results are accumulated across the drain
+cycle so a final no-work confirmation cannot hide earlier failures.
 The remaining implementation priority is to exercise startup intent, the real
 dev-live path, and privacy transitions on Windows, then fix any failures found
 by that smoke. New Daily, Weekly, Journal, Chat, export,

@@ -110,8 +110,9 @@ public sealed class TimelineAnalysisRefreshTests
             await WaitUntilAsync(() => context.PendingCount > 0);
 
             Assert.Empty(viewModel.Entries);
-            context.RunAll();
-            await WaitUntilAsync(() => viewModel.Entries.Count == 1);
+            await RunContextUntilAsync(
+                context,
+                () => viewModel.Entries.Count == 1);
 
             Assert.True(changedOnCapturedContext);
         }
@@ -168,6 +169,245 @@ public sealed class TimelineAnalysisRefreshTests
         Assert.Equal(0, statusSource.SubscriberCount);
         Assert.Equal(1, timelineStore.RequestCount);
         Assert.Equal(1, intervalRepository.RequestCount);
+    }
+
+    [Fact]
+    public void PipelineFaultIsVisibleAndCanRequestAnImmediateRun()
+    {
+        var timelineStore = new StubTimelineStore();
+        var intervalRepository = new StubUnprocessedIntervalRepository();
+        var statusSource = new StubAnalysisPipelineStatusSource();
+        var scheduler = new StubAnalysisPipelineScheduler();
+        using var viewModel = CreateViewModel(
+            timelineStore,
+            intervalRepository,
+            statusSource,
+            scheduler: scheduler);
+
+        statusSource.PublishStatus(
+            AnalysisPipelineActivityState.Faulted,
+            AnalysisPipelineFaultCode.PipelineRunFailed);
+
+        Assert.True(viewModel.HasAnalysisPipelineStatus);
+        Assert.True(viewModel.HasAnalysisPipelineFault);
+        Assert.False(viewModel.IsAnalysisPipelineRunning);
+        Assert.Equal("后台分析暂时不可用", viewModel.AnalysisPipelineStatusTitle);
+        Assert.Contains("现有录制和时间线数据未丢失", viewModel.AnalysisPipelineStatusText);
+        Assert.True(viewModel.RetryAnalysisPipelineCommand.CanExecute(null));
+
+        viewModel.RetryAnalysisPipelineCommand.Execute(null);
+
+        Assert.Equal(1, scheduler.RequestCount);
+    }
+
+    [Fact]
+    public void ConstructorResnapshotsPipelineStatusAfterSubscribing()
+    {
+        var statusSource = new StubAnalysisPipelineStatusSource
+        {
+            TransitionToFaultWhenSubscriberIsAdded = true,
+        };
+
+        using var viewModel = CreateViewModel(
+            new StubTimelineStore(),
+            new StubUnprocessedIntervalRepository(),
+            statusSource);
+
+        Assert.True(viewModel.HasAnalysisPipelineFault);
+        Assert.Equal("后台分析暂时不可用", viewModel.AnalysisPipelineStatusTitle);
+    }
+
+    [Fact]
+    public async Task StatusOnlyChangeDoesNotReloadTimelineRepositories()
+    {
+        var timelineStore = new StubTimelineStore();
+        var intervalRepository = new StubUnprocessedIntervalRepository();
+        var statusSource = new StubAnalysisPipelineStatusSource();
+        using var viewModel = CreateViewModel(
+            timelineStore,
+            intervalRepository,
+            statusSource);
+        await viewModel.InitializeAsync();
+
+        statusSource.PublishStatus(AnalysisPipelineActivityState.Running);
+        await Task.Delay(350);
+
+        Assert.True(viewModel.IsAnalysisPipelineRunning);
+        Assert.Equal("分析中", viewModel.AnalysisPipelineCompactStatusText);
+        Assert.Equal(1, timelineStore.RequestCount);
+        Assert.Equal(1, intervalRepository.RequestCount);
+    }
+
+    [Fact]
+    public void StalePipelineNotificationCannotOverwriteNewerState()
+    {
+        var statusSource = new StubAnalysisPipelineStatusSource();
+        using var viewModel = CreateViewModel(
+            new StubTimelineStore(),
+            new StubUnprocessedIntervalRepository(),
+            statusSource);
+
+        var stale = statusSource.PublishStatus(
+            AnalysisPipelineActivityState.Faulted,
+            AnalysisPipelineFaultCode.PipelineRunFailed);
+        statusSource.PublishStatus(AnalysisPipelineActivityState.Running);
+        statusSource.PublishNotification(stale);
+
+        Assert.True(viewModel.IsAnalysisPipelineRunning);
+        Assert.False(viewModel.HasAnalysisPipelineFault);
+        Assert.Equal("分析中", viewModel.AnalysisPipelineCompactStatusText);
+    }
+
+    [Fact]
+    public void PipelineStatusDistinguishesWaitingFailuresAndRecovery()
+    {
+        var statusSource = new StubAnalysisPipelineStatusSource();
+        using var viewModel = CreateViewModel(
+            new StubTimelineStore(),
+            new StubUnprocessedIntervalRepository(),
+            statusSource);
+
+        Assert.Equal("正在检查分析状态", viewModel.AnalysisPipelineStatusTitle);
+        Assert.Equal("检查中", viewModel.AnalysisPipelineCompactStatusText);
+
+        statusSource.PublishStatus(
+            AnalysisPipelineActivityState.Idle,
+            summary: CreateRunSummary(
+                scannedChunkCount: 3,
+                analysisReady: false));
+
+        Assert.Equal("录制内容等待分析", viewModel.AnalysisPipelineStatusTitle);
+        Assert.Equal("等待分析", viewModel.AnalysisPipelineCompactStatusText);
+        Assert.Contains("3 个本地录制分片", viewModel.AnalysisPipelineStatusText);
+        Assert.Contains("不会发送", viewModel.AnalysisPipelineStatusText);
+        Assert.DoesNotContain("分析服务已就绪", viewModel.AnalysisPipelineStatusText);
+        Assert.False(viewModel.HasAnalysisPipelineWarning);
+
+        statusSource.PublishStatus(
+            AnalysisPipelineActivityState.Idle,
+            summary: CreateRunSummary(
+                scannedChunkCount: 3,
+                analysisReady: true,
+                completedJobCount: 1,
+                retryableFailureCount: 2,
+                terminalFailureCount: 1));
+
+        Assert.True(viewModel.HasAnalysisPipelineWarning);
+        Assert.False(viewModel.HasSuccessfulAnalysisPipelineRun);
+        Assert.Equal(
+            "最近一次后台分析有未完成内容",
+            viewModel.AnalysisPipelineStatusTitle);
+        Assert.Contains("1 个录制块已完成", viewModel.AnalysisPipelineStatusText);
+        Assert.Contains("2 个等待重试", viewModel.AnalysisPipelineStatusText);
+        Assert.Contains("1 个分析未完成", viewModel.AnalysisPipelineStatusText);
+
+        statusSource.PublishStatus(
+            AnalysisPipelineActivityState.Idle,
+            summary: CreateRunSummary(
+                scannedChunkCount: 3,
+                analysisReady: true,
+                completedJobCount: 2));
+
+        Assert.False(viewModel.HasAnalysisPipelineFault);
+        Assert.False(viewModel.HasAnalysisPipelineWarning);
+        Assert.True(viewModel.HasSuccessfulAnalysisPipelineRun);
+        Assert.Equal("最近一次后台分析已完成", viewModel.AnalysisPipelineStatusTitle);
+        Assert.False(viewModel.RetryAnalysisPipelineCommand.CanExecute(null));
+    }
+
+    [Fact]
+    public void PipelineSummaryUsesTheInjectedLocalTimeZone()
+    {
+        var localTimeZone = TimeZoneInfo.CreateCustomTimeZone(
+            "timeline-test-utc-plus-eight",
+            TimeSpan.FromHours(8),
+            "UTC+08",
+            "UTC+08");
+        var timeProvider = new FixedTimeProvider(Now, localTimeZone);
+        var statusSource = new StubAnalysisPipelineStatusSource();
+        using var viewModel = CreateViewModel(
+            new StubTimelineStore(),
+            new StubUnprocessedIntervalRepository(),
+            statusSource,
+            timeProvider: timeProvider);
+
+        var status = statusSource.PublishStatus(
+            AnalysisPipelineActivityState.Idle,
+            summary: CreateRunSummary(
+                scannedChunkCount: 0,
+                analysisReady: true));
+        var expectedTime = TimeZoneInfo
+            .ConvertTime(status.ChangedAtUtc, localTimeZone)
+            .ToString("t", System.Globalization.CultureInfo.CurrentCulture);
+
+        Assert.Contains(expectedTime, viewModel.AnalysisPipelineStatusText);
+    }
+
+    [Fact]
+    public async Task PipelineStatusUsesTheCapturedSynchronizationContext()
+    {
+        var statusSource = new StubAnalysisPipelineStatusSource();
+        var context = new QueuedSynchronizationContext();
+        var previousContext = SynchronizationContext.Current;
+        TimelineViewModel viewModel;
+        try
+        {
+            SynchronizationContext.SetSynchronizationContext(context);
+            viewModel = CreateViewModel(
+                new StubTimelineStore(),
+                new StubUnprocessedIntervalRepository(),
+                statusSource);
+        }
+        finally
+        {
+            SynchronizationContext.SetSynchronizationContext(previousContext);
+        }
+
+        using (viewModel)
+        {
+            await Task.Run(() => statusSource.PublishStatus(
+                AnalysisPipelineActivityState.Faulted,
+                AnalysisPipelineFaultCode.SchedulerFailed));
+
+            Assert.False(viewModel.HasAnalysisPipelineFault);
+            Assert.True(context.PendingCount > 0);
+
+            context.RunAll();
+
+            Assert.True(viewModel.HasAnalysisPipelineFault);
+            Assert.Contains("后台分析调度", viewModel.AnalysisPipelineStatusText);
+        }
+    }
+
+    [Fact]
+    public void PipelineRetryFailureUsesAStableUserFacingError()
+    {
+        var statusSource = new StubAnalysisPipelineStatusSource();
+        var scheduler = new StubAnalysisPipelineScheduler
+        {
+            Failure = new InvalidOperationException("scheduler-test"),
+        };
+        using var viewModel = CreateViewModel(
+            new StubTimelineStore(),
+            new StubUnprocessedIntervalRepository(),
+            statusSource,
+            scheduler: scheduler);
+        statusSource.PublishStatus(
+            AnalysisPipelineActivityState.Faulted,
+            AnalysisPipelineFaultCode.SchedulerFailed);
+
+        viewModel.RetryAnalysisPipelineCommand.Execute(null);
+
+        Assert.Equal(1, scheduler.RequestCount);
+        Assert.Equal(
+            "无法立即重试后台分析，请稍后再试。",
+            viewModel.MutationErrorMessage);
+
+        scheduler.Failure = null;
+        viewModel.RetryAnalysisPipelineCommand.Execute(null);
+
+        Assert.Equal(2, scheduler.RequestCount);
+        Assert.False(viewModel.HasMutationError);
     }
 
     [Fact]
@@ -323,8 +563,13 @@ public sealed class TimelineAnalysisRefreshTests
         Assert.Equal(0, statusSource.SubscriberCount);
     }
 
-    [Fact]
-    public async Task RejectedRetryShowsStableMutationError()
+    [Theory]
+    [InlineData(AnalysisJobRetryOutcome.NotFound)]
+    [InlineData(AnalysisJobRetryOutcome.StateNotRetryable)]
+    [InlineData(AnalysisJobRetryOutcome.StaleJob)]
+    [InlineData(AnalysisJobRetryOutcome.AnalysisAlreadyCompleted)]
+    public async Task StaleRetryOutcomeRefreshesWithoutReportingSystemFailure(
+        AnalysisJobRetryOutcome outcome)
     {
         var timelineStore = new StubTimelineStore();
         var intervalRepository = new StubUnprocessedIntervalRepository
@@ -334,7 +579,7 @@ public sealed class TimelineAnalysisRefreshTests
         var retryStore = new StubAnalysisJobStore
         {
             RetryResult = new AnalysisJobRetryResult(
-                AnalysisJobRetryOutcome.StateNotRetryable,
+                outcome,
                 Job: null),
         };
         var scheduler = new StubAnalysisPipelineScheduler();
@@ -349,11 +594,47 @@ public sealed class TimelineAnalysisRefreshTests
         await viewModel.RetryAnalysisCommand.ExecuteAsync(
             Assert.Single(viewModel.UnprocessedIntervals));
 
-        Assert.Equal(
-            "无法重新安排分析，请稍后重试。",
-            viewModel.MutationErrorMessage);
+        Assert.False(viewModel.HasMutationError);
         Assert.Equal(0, scheduler.RequestCount);
-        Assert.Equal(1, intervalRepository.RequestCount);
+        Assert.Equal(2, intervalRepository.RequestCount);
+        Assert.False(viewModel.IsSaving);
+    }
+
+    [Theory]
+    [InlineData(
+        AnalysisJobRetryOutcome.EvidenceUnavailable,
+        "本地录制证据已不可用，无法重试分析。")]
+    [InlineData(
+        AnalysisJobRetryOutcome.AttemptLimitReached,
+        "此录制内容已达到重试次数上限。")]
+    [InlineData((AnalysisJobRetryOutcome)999, "无法重新安排分析，请稍后重试。")]
+    public async Task RetryRejectionReportsTheSpecificStableReason(
+        AnalysisJobRetryOutcome outcome,
+        string expectedMessage)
+    {
+        var intervalRepository = new StubUnprocessedIntervalRepository
+        {
+            Current = [CreateInterval(UnprocessedIntervalState.Failed)],
+        };
+        var retryStore = new StubAnalysisJobStore
+        {
+            RetryResult = new AnalysisJobRetryResult(outcome, Job: null),
+        };
+        var scheduler = new StubAnalysisPipelineScheduler();
+        using var viewModel = CreateViewModel(
+            new StubTimelineStore(),
+            intervalRepository,
+            new StubAnalysisPipelineStatusSource(),
+            retryStore,
+            scheduler);
+        await viewModel.InitializeAsync();
+
+        await viewModel.RetryAnalysisCommand.ExecuteAsync(
+            Assert.Single(viewModel.UnprocessedIntervals));
+
+        Assert.Equal(expectedMessage, viewModel.MutationErrorMessage);
+        Assert.Equal(0, scheduler.RequestCount);
+        Assert.Equal(2, intervalRepository.RequestCount);
         Assert.False(viewModel.IsSaving);
     }
 
@@ -362,9 +643,10 @@ public sealed class TimelineAnalysisRefreshTests
         StubUnprocessedIntervalRepository intervalRepository,
         StubAnalysisPipelineStatusSource statusSource,
         StubAnalysisJobStore? retryStore = null,
-        StubAnalysisPipelineScheduler? scheduler = null)
+        StubAnalysisPipelineScheduler? scheduler = null,
+        TimeProvider? timeProvider = null)
     {
-        var timeProvider = new FixedTimeProvider(Now);
+        timeProvider ??= new FixedTimeProvider(Now);
         retryStore ??= new StubAnalysisJobStore();
         scheduler ??= new StubAnalysisPipelineScheduler();
         return new TimelineViewModel(
@@ -373,7 +655,32 @@ public sealed class TimelineAnalysisRefreshTests
             intervalRepository,
             statusSource,
             new AnalysisJobRetryService(retryStore, scheduler, timeProvider),
+            scheduler,
             timeProvider);
+    }
+
+    private static AnalysisPipelineRunSummary CreateRunSummary(
+        int scannedChunkCount,
+        bool analysisReady,
+        int completedJobCount = 0,
+        int retryableFailureCount = 0,
+        int terminalFailureCount = 0)
+    {
+        return new AnalysisPipelineRunSummary(
+            RecoveredLeaseCount: 0,
+            new CaptureAnalysisIngestionResult(
+                scannedChunkCount,
+                CreatedChunkCount: 0,
+                CreatedJobCount: 0,
+                analysisReady),
+            ProcessedJobCount: completedJobCount
+                + retryableFailureCount
+                + terminalFailureCount,
+            completedJobCount,
+            retryableFailureCount,
+            terminalFailureCount,
+            LeaseLostCount: 0,
+            MoreWorkPossible: false);
     }
 
     private static UnprocessedInterval CreateInterval(
@@ -426,6 +733,24 @@ public sealed class TimelineAnalysisRefreshTests
             if (DateTime.UtcNow >= deadline)
             {
                 throw new TimeoutException("The expected timeline state was not observed.");
+            }
+
+            await Task.Delay(20);
+        }
+    }
+
+    private static async Task RunContextUntilAsync(
+        QueuedSynchronizationContext context,
+        Func<bool> condition)
+    {
+        var deadline = DateTime.UtcNow + Timeout;
+        while (!condition())
+        {
+            context.RunAll();
+            if (DateTime.UtcNow >= deadline)
+            {
+                throw new TimeoutException(
+                    "The expected synchronization-context state was not observed.");
             }
 
             await Task.Delay(20);
@@ -502,6 +827,7 @@ public sealed class TimelineAnalysisRefreshTests
     {
         private readonly object _sync = new();
         private EventHandler<AnalysisPipelineStatusChangedEventArgs>? _statusChanged;
+        private bool _subscriberTransitionApplied;
         private AnalysisPipelineStatus _current = new(
             Sequence: 0,
             DataRevision: 0,
@@ -511,6 +837,8 @@ public sealed class TimelineAnalysisRefreshTests
             FaultCode: null);
 
         public int SubscriberCount { get; private set; }
+
+        public bool TransitionToFaultWhenSubscriberIsAdded { get; init; }
 
         public AnalysisPipelineStatus Current
         {
@@ -529,6 +857,18 @@ public sealed class TimelineAnalysisRefreshTests
             {
                 lock (_sync)
                 {
+                    if (TransitionToFaultWhenSubscriberIsAdded
+                        && !_subscriberTransitionApplied)
+                    {
+                        _subscriberTransitionApplied = true;
+                        _current = _current with
+                        {
+                            Sequence = _current.Sequence + 1,
+                            State = AnalysisPipelineActivityState.Faulted,
+                            FaultCode = AnalysisPipelineFaultCode.PipelineRunFailed,
+                        };
+                    }
+
                     _statusChanged += value;
                     SubscriberCount++;
                 }
@@ -545,6 +885,20 @@ public sealed class TimelineAnalysisRefreshTests
 
         public void PublishDataRevision(long dataRevision)
         {
+            var current = Current;
+            PublishStatus(
+                current.State,
+                current.FaultCode,
+                current.LastRunSummary,
+                dataRevision);
+        }
+
+        public AnalysisPipelineStatus PublishStatus(
+            AnalysisPipelineActivityState state,
+            AnalysisPipelineFaultCode? faultCode = null,
+            AnalysisPipelineRunSummary? summary = null,
+            long? dataRevision = null)
+        {
             AnalysisPipelineStatus previous;
             AnalysisPipelineStatus current;
             EventHandler<AnalysisPipelineStatusChangedEventArgs>? handler;
@@ -554,8 +908,11 @@ public sealed class TimelineAnalysisRefreshTests
                 current = previous with
                 {
                     Sequence = previous.Sequence + 1,
-                    DataRevision = dataRevision,
+                    DataRevision = dataRevision ?? previous.DataRevision,
+                    State = state,
                     ChangedAtUtc = Now.AddSeconds(previous.Sequence + 1),
+                    LastRunSummary = summary ?? previous.LastRunSummary,
+                    FaultCode = faultCode,
                 };
                 _current = current;
                 handler = _statusChanged;
@@ -564,6 +921,22 @@ public sealed class TimelineAnalysisRefreshTests
             handler?.Invoke(
                 this,
                 new AnalysisPipelineStatusChangedEventArgs(previous, current));
+            return current;
+        }
+
+        public void PublishNotification(AnalysisPipelineStatus status)
+        {
+            EventHandler<AnalysisPipelineStatusChangedEventArgs>? handler;
+            AnalysisPipelineStatus current;
+            lock (_sync)
+            {
+                current = _current;
+                handler = _statusChanged;
+            }
+
+            handler?.Invoke(
+                this,
+                new AnalysisPipelineStatusChangedEventArgs(current, status));
         }
     }
 
@@ -574,9 +947,15 @@ public sealed class TimelineAnalysisRefreshTests
 
         public int RequestCount => Volatile.Read(ref _requestCount);
 
+        public Exception? Failure { get; set; }
+
         public void RequestRun()
         {
             Interlocked.Increment(ref _requestCount);
+            if (Failure is not null)
+            {
+                throw Failure;
+            }
         }
     }
 
@@ -692,9 +1071,12 @@ public sealed class TimelineAnalysisRefreshTests
         }
     }
 
-    private sealed class FixedTimeProvider(DateTimeOffset utcNow) : TimeProvider
+    private sealed class FixedTimeProvider(
+        DateTimeOffset utcNow,
+        TimeZoneInfo? localTimeZone = null) : TimeProvider
     {
-        public override TimeZoneInfo LocalTimeZone => TimeZoneInfo.Utc;
+        public override TimeZoneInfo LocalTimeZone =>
+            localTimeZone ?? TimeZoneInfo.Utc;
 
         public override DateTimeOffset GetUtcNow() => utcNow;
     }

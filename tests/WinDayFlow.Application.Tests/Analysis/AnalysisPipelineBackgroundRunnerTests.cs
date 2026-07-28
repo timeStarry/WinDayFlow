@@ -62,15 +62,148 @@ public sealed class AnalysisPipelineBackgroundRunnerTests
     [Fact]
     public async Task MoreWorkPossibleContinuesWithoutAnotherWake()
     {
+        var firstSummary = new AnalysisPipelineRunSummary(
+            RecoveredLeaseCount: 1,
+            new CaptureAnalysisIngestionResult(
+                ScannedChunkCount: 4,
+                CreatedChunkCount: 2,
+                CreatedJobCount: 2,
+                AnalysisReady: true,
+                UnstableChunkCount: 1),
+            ProcessedJobCount: 3,
+            CompletedJobCount: 1,
+            RetryableFailureCount: 1,
+            TerminalFailureCount: 1,
+            LeaseLostCount: 0,
+            MoreWorkPossible: true);
+        var finalBatchSummary = new AnalysisPipelineRunSummary(
+            RecoveredLeaseCount: 0,
+            new CaptureAnalysisIngestionResult(
+                ScannedChunkCount: 4,
+                CreatedChunkCount: 0,
+                CreatedJobCount: 0,
+                AnalysisReady: true),
+            ProcessedJobCount: 0,
+            CompletedJobCount: 0,
+            RetryableFailureCount: 0,
+            TerminalFailureCount: 0,
+            LeaseLostCount: 0,
+            MoreWorkPossible: false);
         var recorder = new RunRecorder(
-            call => Task.FromResult(CreateSummary(moreWorkPossible: call == 1)));
+            call => Task.FromResult(
+                call == 1 ? firstSummary : finalBatchSummary));
         await using var harness = await CreateHarnessAsync(recorder.RunAsync);
+        using var statuses = new StatusRecorder(harness.StatusSource);
 
         await harness.Runner.StartAsync();
 
         Assert.Equal(1, await recorder.ReadCallAsync());
         Assert.Equal(2, await recorder.ReadCallAsync());
         Assert.Equal(2, recorder.CallCount);
+
+        var firstRunning = await statuses.ReadAsync();
+        var firstBatchCompleted = await statuses.ReadAsync();
+        var secondRunning = await statuses.ReadAsync();
+        var completed = await statuses.ReadAsync();
+        Assert.Equal(
+            AnalysisPipelineActivityState.Running,
+            firstRunning.State);
+        Assert.Equal(
+            AnalysisPipelineActivityState.Running,
+            firstBatchCompleted.State);
+        Assert.Same(firstSummary, firstBatchCompleted.LastRunSummary);
+        Assert.Equal(
+            AnalysisPipelineActivityState.Running,
+            secondRunning.State);
+        Assert.Equal(AnalysisPipelineActivityState.Idle, completed.State);
+        Assert.NotNull(completed.LastRunSummary);
+        Assert.Equal(
+            firstBatchCompleted.DataRevision,
+            completed.DataRevision);
+        Assert.False(completed.LastRunSummary.MoreWorkPossible);
+        Assert.Equal(1, completed.LastRunSummary.RecoveredLeaseCount);
+        Assert.Equal(4, completed.LastRunSummary.Ingestion.ScannedChunkCount);
+        Assert.Equal(2, completed.LastRunSummary.Ingestion.CreatedChunkCount);
+        Assert.Equal(2, completed.LastRunSummary.Ingestion.CreatedJobCount);
+        Assert.Equal(0, completed.LastRunSummary.Ingestion.UnstableChunkCount);
+        Assert.Equal(3, completed.LastRunSummary.ProcessedJobCount);
+        Assert.Equal(1, completed.LastRunSummary.CompletedJobCount);
+        Assert.Equal(1, completed.LastRunSummary.RetryableFailureCount);
+        Assert.Equal(1, completed.LastRunSummary.TerminalFailureCount);
+        Assert.Equal(0, completed.LastRunSummary.LeaseLostCount);
+    }
+
+    [Fact]
+    public async Task FailureEndsConsecutiveBatchAggregation()
+    {
+        var firstSummary = CreateSummary(
+            moreWorkPossible: true,
+            processedJobCount: 1,
+            completedJobCount: 1);
+        var recoveredSummary = CreateSummary(
+            moreWorkPossible: false,
+            processedJobCount: 1,
+            terminalFailureCount: 1);
+        var recorder = new RunRecorder(call => call switch
+        {
+            1 => Task.FromResult(firstSummary),
+            2 => Task.FromException<AnalysisPipelineRunSummary>(
+                new IOException("drain cycle failure")),
+            _ => Task.FromResult(recoveredSummary),
+        });
+        await using var harness = await CreateHarnessAsync(recorder.RunAsync);
+        using var statuses = new StatusRecorder(harness.StatusSource);
+
+        await harness.Runner.StartAsync();
+
+        Assert.Equal(AnalysisPipelineActivityState.Running, (await statuses.ReadAsync()).State);
+        Assert.Equal(AnalysisPipelineActivityState.Running, (await statuses.ReadAsync()).State);
+        Assert.Equal(AnalysisPipelineActivityState.Running, (await statuses.ReadAsync()).State);
+        Assert.Equal(AnalysisPipelineActivityState.Faulted, (await statuses.ReadAsync()).State);
+
+        harness.Runner.RequestRun();
+
+        Assert.Equal(AnalysisPipelineActivityState.Running, (await statuses.ReadAsync()).State);
+        var recovered = await statuses.ReadAsync();
+        Assert.Equal(AnalysisPipelineActivityState.Idle, recovered.State);
+        var recoveredRunSummary = Assert.IsType<AnalysisPipelineRunSummary>(
+            recovered.LastRunSummary);
+        Assert.Same(recoveredSummary, recoveredRunSummary);
+        Assert.Equal(0, recoveredRunSummary.CompletedJobCount);
+        Assert.Equal(1, recoveredRunSummary.TerminalFailureCount);
+    }
+
+    [Fact]
+    public async Task SeparateWakeStartsANewRunSummary()
+    {
+        var firstSummary = CreateSummary(
+            moreWorkPossible: false,
+            processedJobCount: 1,
+            completedJobCount: 1);
+        var secondSummary = CreateSummary(
+            moreWorkPossible: false,
+            processedJobCount: 1,
+            retryableFailureCount: 1);
+        var recorder = new RunRecorder(call => Task.FromResult(
+            call == 1 ? firstSummary : secondSummary));
+        await using var harness = await CreateHarnessAsync(recorder.RunAsync);
+        using var statuses = new StatusRecorder(harness.StatusSource);
+
+        await harness.Runner.StartAsync();
+
+        Assert.Equal(AnalysisPipelineActivityState.Running, (await statuses.ReadAsync()).State);
+        Assert.Same(firstSummary, (await statuses.ReadAsync()).LastRunSummary);
+
+        harness.Runner.RequestRun();
+
+        Assert.Equal(AnalysisPipelineActivityState.Running, (await statuses.ReadAsync()).State);
+        var secondRun = await statuses.ReadAsync();
+        Assert.Equal(AnalysisPipelineActivityState.Idle, secondRun.State);
+        var secondRunSummary = Assert.IsType<AnalysisPipelineRunSummary>(
+            secondRun.LastRunSummary);
+        Assert.Same(secondSummary, secondRunSummary);
+        Assert.Equal(0, secondRunSummary.CompletedJobCount);
+        Assert.Equal(1, secondRunSummary.RetryableFailureCount);
     }
 
     [Fact]
@@ -400,13 +533,17 @@ public sealed class AnalysisPipelineBackgroundRunnerTests
     }
 
     private static AnalysisPipelineRunSummary CreateSummary(
-        bool moreWorkPossible) => new(
+        bool moreWorkPossible,
+        int processedJobCount = 0,
+        int completedJobCount = 0,
+        int retryableFailureCount = 0,
+        int terminalFailureCount = 0) => new(
         RecoveredLeaseCount: 0,
         new CaptureAnalysisIngestionResult(0, 0, 0, AnalysisReady: false),
-        ProcessedJobCount: 0,
-        CompletedJobCount: 0,
-        RetryableFailureCount: 0,
-        TerminalFailureCount: 0,
+        ProcessedJobCount: processedJobCount,
+        CompletedJobCount: completedJobCount,
+        RetryableFailureCount: retryableFailureCount,
+        TerminalFailureCount: terminalFailureCount,
         LeaseLostCount: 0,
         moreWorkPossible);
 

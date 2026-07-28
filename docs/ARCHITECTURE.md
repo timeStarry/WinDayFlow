@@ -1774,10 +1774,19 @@ Current implementation status follows the end-to-end order:
    atomically commits normalized Timeline entries with completion. Retry,
    timeout, cancellation, lease recovery, stale responses, completed-version
    idempotency, and user-edit protection use persisted state.
-6. **Expose truth in the UI: partially implemented.** Timeline projects
-   unprocessed chunks, job attempts/failures, and editable normalized results;
-   provider configuration is available in Settings. Final recording-state and
-   retry affordance smoke remains acceptance work.
+6. **Expose truth in the UI: implemented, acceptance smoke pending.** Timeline
+   projects unprocessed chunks, job attempts/failures, and editable normalized
+   results; provider configuration is available in Settings. A compact command-
+   area indicator opens stable checking, running, waiting, recent-summary, and
+   fault details. Pipeline-wide faults can wake the existing scheduler, while
+   row-level retry outcomes distinguish stale UI state, unavailable evidence,
+   and attempt exhaustion. Consecutive supervisor batches remain Running rather
+   than flashing Idle between batches; the visible run summary accumulates
+   batch results until the queue is drained, while data revisions still advance
+   only for batches that persist changes. The narrow toolbar collapses commands
+   to stable icon widths and constrains the status Flyout to available width.
+   Final recording-state, accessibility, and clean-profile retry smoke remains
+   acceptance work.
 
 P0 acceptance requires one clean-profile Windows x64 run to demonstrate all of
 the following:

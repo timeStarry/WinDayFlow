@@ -212,6 +212,7 @@ public sealed class AnalysisPipelineBackgroundRunner :
     {
         await Task.Yield();
         var runImmediately = true;
+        var aggregateWithPrevious = false;
 
         while (!cancellationToken.IsCancellationRequested)
         {
@@ -245,8 +246,11 @@ public sealed class AnalysisPipelineBackgroundRunner :
                         "The analysis pipeline supervisor returned no run summary.");
                 }
 
-                _statusSource.PublishIdle(summary);
+                _statusSource.PublishRunCompleted(
+                    summary,
+                    aggregateWithPrevious);
                 runImmediately = summary.MoreWorkPossible;
+                aggregateWithPrevious = runImmediately;
             }
             catch (OperationCanceledException)
                 when (cancellationToken.IsCancellationRequested)
@@ -260,6 +264,7 @@ public sealed class AnalysisPipelineBackgroundRunner :
                 _statusSource.PublishFaulted(
                     AnalysisPipelineFaultCode.PipelineRunFailed);
                 runImmediately = false;
+                aggregateWithPrevious = false;
             }
         }
     }

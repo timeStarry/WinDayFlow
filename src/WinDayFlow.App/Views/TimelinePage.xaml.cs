@@ -17,6 +17,11 @@ public sealed partial class TimelinePage : Page
     private const double WideLayoutMinWidth = 800;
     private const double MediumLayoutMinWidth = 680;
     private const double NarrowEntryLayoutMaxWidth = 640;
+    private const double AnalysisStatusButtonWidth = 128;
+    private const double CompactToolbarButtonWidth = 40;
+    private const double AnalysisStatusFlyoutMaxWidth = 360;
+    private const double AnalysisStatusFlyoutHorizontalMargin = 32;
+    private const double AnalysisStatusFlyoutMinimumWidth = 80;
     private const string EditorFallbackErrorText = "无法保存活动，请稍后重试。";
     private const string DeleteFallbackErrorText = "无法删除活动，请刷新时间线后重试。";
 
@@ -334,6 +339,25 @@ public sealed partial class TimelinePage : Page
                 ? Visibility.Visible
                 : Visibility.Collapsed;
 
+        AnalysisPipelineStatusInfoBar.Severity = ViewModel.HasAnalysisPipelineFault
+            ? InfoBarSeverity.Error
+            : ViewModel.HasAnalysisPipelineWarning
+                ? InfoBarSeverity.Warning
+                : ViewModel.HasSuccessfulAnalysisPipelineRun
+                    ? InfoBarSeverity.Success
+                    : InfoBarSeverity.Informational;
+        AnalysisPipelineProgressRing.Visibility = ViewModel.IsAnalysisPipelineRunning
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+        AnalysisPipelineStatusIcon.Visibility = ViewModel.IsAnalysisPipelineRunning
+            ? Visibility.Collapsed
+            : Visibility.Visible;
+        AnalysisPipelineStatusIcon.Glyph = ViewModel.HasAnalysisPipelineFault
+            ? "\uE783"
+            : ViewModel.HasAnalysisPipelineWarning
+                ? "\uE7BA"
+                : "\uE73E";
+
         ErrorInfoBar.Message = ViewModel.ErrorMessage;
         EmptyState.Title = ViewModel.HasActiveFilters
             ? "没有匹配的活动"
@@ -358,6 +382,11 @@ public sealed partial class TimelinePage : Page
         }
 
         DetailSplitView.OpenPaneLength = Math.Min(DetailPanePreferredWidth, width);
+        AnalysisPipelineStatusInfoBar.Width = Math.Min(
+            AnalysisStatusFlyoutMaxWidth,
+            Math.Max(
+                AnalysisStatusFlyoutMinimumWidth,
+                width - AnalysisStatusFlyoutHorizontalMargin));
 
         var layout = width >= WideLayoutMinWidth
             ? TimelineLayout.Wide
@@ -528,6 +557,18 @@ public sealed partial class TimelinePage : Page
         Grid.SetColumn(TimelineActionPanel, isNarrow ? 0 : 1);
         Grid.SetColumnSpan(TimelineActionPanel, isNarrow ? 2 : 1);
         TimelineActionPanel.HorizontalAlignment = HorizontalAlignment.Right;
+        AnalysisPipelineStatusButton.Width = isNarrow
+            ? CompactToolbarButtonWidth
+            : AnalysisStatusButtonWidth;
+        CreateActivityButton.Width = isNarrow
+            ? CompactToolbarButtonWidth
+            : double.NaN;
+        AnalysisPipelineStatusLabel.Visibility = isNarrow
+            ? Visibility.Collapsed
+            : Visibility.Visible;
+        CreateActivityButtonLabel.Visibility = isNarrow
+            ? Visibility.Collapsed
+            : Visibility.Visible;
     }
 
     private void PrepareCreateEditor()

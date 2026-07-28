@@ -14,6 +14,12 @@ public sealed partial class TimelineViewModel : ObservableObject, IDisposable
     private const string SaveErrorText = "无法保存活动，请检查内容后重试。";
     private const string DeleteErrorText = "无法删除活动，请刷新时间线后重试。";
     private const string RetryAnalysisErrorText = "无法重新安排分析，请稍后重试。";
+    private const string RetryAnalysisEvidenceUnavailableText =
+        "本地录制证据已不可用，无法重试分析。";
+    private const string RetryAnalysisAttemptLimitText =
+        "此录制内容已达到重试次数上限。";
+    private const string RetryAnalysisPipelineErrorText =
+        "无法立即重试后台分析，请稍后再试。";
     private static readonly TimeSpan AnalysisRefreshDebounceDelay =
         TimeSpan.FromMilliseconds(200);
 
@@ -22,23 +28,27 @@ public sealed partial class TimelineViewModel : ObservableObject, IDisposable
     private readonly IUnprocessedIntervalRepository? _unprocessedIntervalRepository;
     private readonly IAnalysisPipelineStatusSource? _analysisPipelineStatusSource;
     private readonly AnalysisJobRetryService? _analysisJobRetryService;
+    private readonly IAnalysisPipelineScheduler? _analysisPipelineScheduler;
     private readonly TimeProvider _timeProvider;
     private readonly SynchronizationContext? _synchronizationContext;
     private readonly SemaphoreSlim _mutationGate = new(1, 1);
     private readonly CancellationTokenSource _lifetimeCancellation = new();
     private readonly object _analysisRefreshSync = new();
+    private readonly object _analysisStatusSync = new();
     private IReadOnlyList<TimelineEntry> _dayEntries = [];
     private CancellationTokenSource? _loadCancellation;
     private AnalysisRefreshRequest? _analysisRefreshRequest;
     private long _loadVersion;
     private long _analysisRefreshVersion;
     private long _observedAnalysisDataRevision;
+    private long _observedAnalysisStatusSequence;
     private int _explicitLoadCount;
     private int _silentRefreshPending;
     private DateOnly _selectedDate;
     private string _searchText = string.Empty;
     private ActivityCategory? _selectedCategory;
     private ProductivityKind? _selectedProductivity;
+    private AnalysisPipelineStatus? _analysisPipelineStatus;
     private bool _isDisposed;
 
     [ObservableProperty]
@@ -78,6 +88,7 @@ public sealed partial class TimelineViewModel : ObservableObject, IDisposable
             unprocessedIntervalRepository: null,
             analysisPipelineStatusSource: null,
             analysisJobRetryService: null,
+            analysisPipelineScheduler: null,
             timeProvider,
             initialize: true)
     {
@@ -95,6 +106,7 @@ public sealed partial class TimelineViewModel : ObservableObject, IDisposable
                     nameof(unprocessedIntervalRepository)),
             analysisPipelineStatusSource: null,
             analysisJobRetryService: null,
+            analysisPipelineScheduler: null,
             timeProvider,
             initialize: true)
     {
@@ -111,6 +123,7 @@ public sealed partial class TimelineViewModel : ObservableObject, IDisposable
             unprocessedIntervalRepository: null,
             analysisPipelineStatusSource: null,
             analysisJobRetryService: null,
+            analysisPipelineScheduler: null,
             timeProvider,
             initialize: true)
     {
@@ -130,6 +143,7 @@ public sealed partial class TimelineViewModel : ObservableObject, IDisposable
                     nameof(unprocessedIntervalRepository)),
             analysisPipelineStatusSource: null,
             analysisJobRetryService: null,
+            analysisPipelineScheduler: null,
             timeProvider,
             initialize: true)
     {
@@ -154,6 +168,34 @@ public sealed partial class TimelineViewModel : ObservableObject, IDisposable
                     nameof(analysisPipelineStatusSource)),
             analysisJobRetryService
                 ?? throw new ArgumentNullException(nameof(analysisJobRetryService)),
+            analysisPipelineScheduler: null,
+            timeProvider,
+            initialize: true)
+    {
+    }
+
+    public TimelineViewModel(
+        TimelineQueryService queryService,
+        TimelineCommandService commandService,
+        IUnprocessedIntervalRepository unprocessedIntervalRepository,
+        IAnalysisPipelineStatusSource analysisPipelineStatusSource,
+        AnalysisJobRetryService analysisJobRetryService,
+        IAnalysisPipelineScheduler analysisPipelineScheduler,
+        TimeProvider? timeProvider = null)
+        : this(
+            queryService,
+            commandService
+                ?? throw new ArgumentNullException(nameof(commandService)),
+            unprocessedIntervalRepository
+                ?? throw new ArgumentNullException(
+                    nameof(unprocessedIntervalRepository)),
+            analysisPipelineStatusSource
+                ?? throw new ArgumentNullException(
+                    nameof(analysisPipelineStatusSource)),
+            analysisJobRetryService
+                ?? throw new ArgumentNullException(nameof(analysisJobRetryService)),
+            analysisPipelineScheduler
+                ?? throw new ArgumentNullException(nameof(analysisPipelineScheduler)),
             timeProvider,
             initialize: true)
     {
@@ -165,6 +207,7 @@ public sealed partial class TimelineViewModel : ObservableObject, IDisposable
         IUnprocessedIntervalRepository? unprocessedIntervalRepository,
         IAnalysisPipelineStatusSource? analysisPipelineStatusSource,
         AnalysisJobRetryService? analysisJobRetryService,
+        IAnalysisPipelineScheduler? analysisPipelineScheduler,
         TimeProvider? timeProvider,
         bool initialize)
     {
@@ -175,16 +218,17 @@ public sealed partial class TimelineViewModel : ObservableObject, IDisposable
         _unprocessedIntervalRepository = unprocessedIntervalRepository;
         _analysisPipelineStatusSource = analysisPipelineStatusSource;
         _analysisJobRetryService = analysisJobRetryService;
+        _analysisPipelineScheduler = analysisPipelineScheduler;
         _timeProvider = timeProvider ?? TimeProvider.System;
         _synchronizationContext = SynchronizationContext.Current;
         _selectedDate = GetToday();
 
         if (_analysisPipelineStatusSource is not null)
         {
-            _observedAnalysisDataRevision =
-                _analysisPipelineStatusSource.Current.DataRevision;
             _analysisPipelineStatusSource.StatusChanged +=
                 OnAnalysisPipelineStatusChanged;
+            MergeInitialAnalysisPipelineStatus(
+                _analysisPipelineStatusSource.Current);
         }
     }
 
@@ -262,6 +306,83 @@ public sealed partial class TimelineViewModel : ObservableObject, IDisposable
 
     public bool HasMutationError => MutationErrorMessage.Length > 0;
 
+    public bool HasAnalysisPipelineStatus => _analysisPipelineStatus is not null;
+
+    public bool IsAnalysisPipelineRunning =>
+        _analysisPipelineStatus?.State == AnalysisPipelineActivityState.Running;
+
+    public bool HasAnalysisPipelineFault =>
+        _analysisPipelineStatus?.State == AnalysisPipelineActivityState.Faulted;
+
+    public bool HasAnalysisPipelineWarning =>
+        _analysisPipelineStatus is
+        {
+            State: AnalysisPipelineActivityState.Idle,
+            LastRunSummary: { } summary,
+        }
+        && (summary.RetryableFailureCount > 0
+            || summary.TerminalFailureCount > 0
+            || summary.LeaseLostCount > 0);
+
+    public bool HasSuccessfulAnalysisPipelineRun =>
+        _analysisPipelineStatus is
+        {
+            State: AnalysisPipelineActivityState.Idle,
+            LastRunSummary.CompletedJobCount: > 0,
+        }
+        && !HasAnalysisPipelineWarning;
+
+    public string AnalysisPipelineStatusTitle =>
+        _analysisPipelineStatus switch
+        {
+            null => string.Empty,
+            { State: AnalysisPipelineActivityState.Running } =>
+                "正在更新时间线",
+            { State: AnalysisPipelineActivityState.Faulted } =>
+                "后台分析暂时不可用",
+            { LastRunSummary: null } =>
+                "正在检查分析状态",
+            { LastRunSummary: { } } when HasAnalysisPipelineWarning =>
+                "最近一次后台分析有未完成内容",
+            {
+                LastRunSummary:
+                {
+                    Ingestion.AnalysisReady: false,
+                    Ingestion.ScannedChunkCount: > 0,
+                },
+            } => "录制内容等待分析",
+            { LastRunSummary.Ingestion.AnalysisReady: false } =>
+                "分析尚未启用",
+            { LastRunSummary.CompletedJobCount: > 0 } =>
+                "最近一次后台分析已完成",
+            _ => "分析服务已就绪",
+        };
+
+    public string AnalysisPipelineStatusText =>
+        BuildAnalysisPipelineStatusText(_analysisPipelineStatus);
+
+    public string AnalysisPipelineCompactStatusText =>
+        _analysisPipelineStatus switch
+        {
+            null => string.Empty,
+            { State: AnalysisPipelineActivityState.Running } => "分析中",
+            { State: AnalysisPipelineActivityState.Faulted } => "分析异常",
+            { LastRunSummary: null } => "检查中",
+            { LastRunSummary: { } } when HasAnalysisPipelineWarning =>
+                "部分未完成",
+            { LastRunSummary.Ingestion.AnalysisReady: false } => "等待分析",
+            _ => "分析就绪",
+        };
+
+    public string AnalysisPipelineAutomationName => HasAnalysisPipelineStatus
+        ? $"后台分析状态：{AnalysisPipelineCompactStatusText}。选择查看详情。"
+        : string.Empty;
+
+    public bool CanRetryAnalysisPipeline =>
+        !_isDisposed
+        && HasAnalysisPipelineFault
+        && _analysisPipelineScheduler is not null;
+
     public bool CanMutateSelectedEntry => SelectedEntry is not null && !IsSaving;
 
     [RelayCommand(AllowConcurrentExecutions = true)]
@@ -333,10 +454,24 @@ public sealed partial class TimelineViewModel : ObservableObject, IDisposable
             var result = await _analysisJobRetryService
                 .RetryAsync(latestJobId, operation.Token)
                 .ConfigureAwait(true);
-            if (!result.Accepted)
+            switch (result.Outcome)
             {
-                MutationErrorMessage = RetryAnalysisErrorText;
-                return;
+                case AnalysisJobRetryOutcome.Scheduled:
+                case AnalysisJobRetryOutcome.AlreadyScheduled:
+                case AnalysisJobRetryOutcome.NotFound:
+                case AnalysisJobRetryOutcome.StateNotRetryable:
+                case AnalysisJobRetryOutcome.StaleJob:
+                case AnalysisJobRetryOutcome.AnalysisAlreadyCompleted:
+                    break;
+                case AnalysisJobRetryOutcome.EvidenceUnavailable:
+                    MutationErrorMessage = RetryAnalysisEvidenceUnavailableText;
+                    break;
+                case AnalysisJobRetryOutcome.AttemptLimitReached:
+                    MutationErrorMessage = RetryAnalysisAttemptLimitText;
+                    break;
+                default:
+                    MutationErrorMessage = RetryAnalysisErrorText;
+                    break;
             }
 
             await RequestSilentRefreshAsync(
@@ -368,6 +503,25 @@ public sealed partial class TimelineViewModel : ObservableObject, IDisposable
             && !IsSaving
             && _analysisJobRetryService is not null
             && interval?.CanRetry == true;
+    }
+
+    [RelayCommand(CanExecute = nameof(CanRetryAnalysisPipeline))]
+    private void RetryAnalysisPipeline()
+    {
+        if (!CanRetryAnalysisPipeline || _analysisPipelineScheduler is null)
+        {
+            return;
+        }
+
+        try
+        {
+            MutationErrorMessage = string.Empty;
+            _analysisPipelineScheduler.RequestRun();
+        }
+        catch (Exception)
+        {
+            MutationErrorMessage = RetryAnalysisPipelineErrorText;
+        }
     }
 
     public async Task<bool> CreateManualEntryAsync(
@@ -541,6 +695,7 @@ public sealed partial class TimelineViewModel : ObservableObject, IDisposable
 
         analysisRefreshRequest?.Cancel();
         RetryAnalysisCommand.NotifyCanExecuteChanged();
+        RetryAnalysisPipelineCommand.NotifyCanExecuteChanged();
     }
 
     private async Task LoadDateAsync(DateOnly date, CancellationToken cancellationToken)
@@ -644,13 +799,143 @@ public sealed partial class TimelineViewModel : ObservableObject, IDisposable
         AnalysisPipelineStatusChangedEventArgs eventArgs)
     {
         _ = sender;
-        if (_isDisposed
-            || !TryAdvanceAnalysisDataRevision(eventArgs.Current.DataRevision))
+        if (_isDisposed)
+        {
+            return;
+        }
+
+        PublishAnalysisPipelineStatus(eventArgs.Current);
+        if (!TryAdvanceAnalysisDataRevision(eventArgs.Current.DataRevision))
         {
             return;
         }
 
         ScheduleSilentRefresh(AnalysisRefreshDebounceDelay);
+    }
+
+    private void PublishAnalysisPipelineStatus(AnalysisPipelineStatus status)
+    {
+        if (_synchronizationContext is not null
+            && SynchronizationContext.Current != _synchronizationContext)
+        {
+            _synchronizationContext.Post(
+                static state =>
+                {
+                    var update = ((TimelineViewModel ViewModel,
+                        AnalysisPipelineStatus Status))state!;
+                    update.ViewModel.ApplyAnalysisPipelineStatus(update.Status);
+                },
+                (this, status));
+            return;
+        }
+
+        ApplyAnalysisPipelineStatus(status);
+    }
+
+    private void MergeInitialAnalysisPipelineStatus(AnalysisPipelineStatus status)
+    {
+        lock (_analysisStatusSync)
+        {
+            if (_analysisPipelineStatus is null
+                || status.Sequence >= _observedAnalysisStatusSequence)
+            {
+                _observedAnalysisStatusSequence = status.Sequence;
+                _analysisPipelineStatus = status;
+            }
+        }
+
+        _ = TryAdvanceAnalysisDataRevision(status.DataRevision);
+    }
+
+    private void ApplyAnalysisPipelineStatus(AnalysisPipelineStatus status)
+    {
+        lock (_analysisStatusSync)
+        {
+            if (_isDisposed
+                || status.Sequence <= _observedAnalysisStatusSequence)
+            {
+                return;
+            }
+
+            _observedAnalysisStatusSequence = status.Sequence;
+            _analysisPipelineStatus = status;
+        }
+
+        OnPropertyChanged(nameof(HasAnalysisPipelineStatus));
+        OnPropertyChanged(nameof(IsAnalysisPipelineRunning));
+        OnPropertyChanged(nameof(HasAnalysisPipelineFault));
+        OnPropertyChanged(nameof(HasAnalysisPipelineWarning));
+        OnPropertyChanged(nameof(HasSuccessfulAnalysisPipelineRun));
+        OnPropertyChanged(nameof(AnalysisPipelineStatusTitle));
+        OnPropertyChanged(nameof(AnalysisPipelineStatusText));
+        OnPropertyChanged(nameof(AnalysisPipelineCompactStatusText));
+        OnPropertyChanged(nameof(AnalysisPipelineAutomationName));
+        OnPropertyChanged(nameof(CanRetryAnalysisPipeline));
+        RetryAnalysisPipelineCommand.NotifyCanExecuteChanged();
+    }
+
+    private string BuildAnalysisPipelineStatusText(
+        AnalysisPipelineStatus? status)
+    {
+        if (status is null)
+        {
+            return string.Empty;
+        }
+
+        if (status.State == AnalysisPipelineActivityState.Running)
+        {
+            return "正在扫描本地录制分片、提取证据并更新时间线。";
+        }
+
+        if (status.State == AnalysisPipelineActivityState.Faulted)
+        {
+            return status.FaultCode switch
+            {
+                AnalysisPipelineFaultCode.SchedulerFailed =>
+                    "后台分析调度暂时中断；现有录制和时间线数据未丢失，可以立即重试。",
+                _ =>
+                    "后台分析未完成；现有录制和时间线数据未丢失，可以立即重试。",
+            };
+        }
+
+        var summary = status.LastRunSummary;
+        if (summary is null)
+        {
+            return "正在检查分析设置和待处理的本地录制分片。";
+        }
+
+        var checkedAt = TimeZoneInfo
+            .ConvertTime(status.ChangedAtUtc, _timeProvider.LocalTimeZone)
+            .ToString("t", System.Globalization.CultureInfo.CurrentCulture);
+        if (!summary.Ingestion.AnalysisReady)
+        {
+            return summary.Ingestion.ScannedChunkCount > 0
+                ? $"已发现 {summary.Ingestion.ScannedChunkCount} 个本地录制分片；在你启用云分析并验证提供方前不会发送。最近检查 {checkedAt}。"
+                : $"云分析未启用或提供方尚未验证；录制内容保留在本机且不会发送。最近检查 {checkedAt}。";
+        }
+
+        var resultParts = new List<string>();
+        AddCount(resultParts, summary.CompletedJobCount, "个录制块已完成");
+        AddCount(resultParts, summary.RetryableFailureCount, "个等待重试");
+        AddCount(resultParts, summary.TerminalFailureCount, "个分析未完成");
+        AddCount(resultParts, summary.LeaseLostCount, "个由后续运行接管");
+        AddCount(resultParts, summary.Ingestion.CreatedJobCount, "个新任务已创建");
+        AddCount(resultParts, summary.Ingestion.UnstableChunkCount, "个分片仍在写入");
+
+        return resultParts.Count == 0
+            ? $"没有新的录制内容需要处理。最近检查 {checkedAt}。"
+            : $"最近一次运行：{string.Join("，", resultParts)}。检查时间 {checkedAt}。";
+    }
+
+    private static void AddCount(
+        List<string> parts,
+        int count,
+        string description)
+    {
+        if (count > 0)
+        {
+            parts.Add($"{count} {description}");
+        }
     }
 
     private bool TryAdvanceAnalysisDataRevision(long dataRevision)

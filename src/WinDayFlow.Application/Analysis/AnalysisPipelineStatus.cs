@@ -85,7 +85,9 @@ public sealed class AnalysisPipelineStatusSource : IAnalysisPipelineStatusSource
         });
     }
 
-    internal void PublishIdle(AnalysisPipelineRunSummary summary)
+    internal void PublishRunCompleted(
+        AnalysisPipelineRunSummary summary,
+        bool aggregateWithPrevious)
     {
         ArgumentNullException.ThrowIfNull(summary);
         Publish((current, changedAtUtc) => current with
@@ -94,9 +96,14 @@ public sealed class AnalysisPipelineStatusSource : IAnalysisPipelineStatusSource
             DataRevision = HasPersistedChanges(summary)
                 ? checked(current.DataRevision + 1)
                 : current.DataRevision,
-            State = AnalysisPipelineActivityState.Idle,
+            State = summary.MoreWorkPossible
+                ? AnalysisPipelineActivityState.Running
+                : AnalysisPipelineActivityState.Idle,
             ChangedAtUtc = changedAtUtc,
-            LastRunSummary = summary,
+            LastRunSummary = aggregateWithPrevious
+                && current.LastRunSummary is { } previous
+                    ? Aggregate(previous, summary)
+                    : summary,
             FaultCode = null,
         });
     }
@@ -171,5 +178,37 @@ public sealed class AnalysisPipelineStatusSource : IAnalysisPipelineStatusSource
             || summary.Ingestion.CreatedChunkCount > 0
             || summary.Ingestion.CreatedJobCount > 0
             || summary.ProcessedJobCount > 0;
+    }
+
+    private static AnalysisPipelineRunSummary Aggregate(
+        AnalysisPipelineRunSummary previous,
+        AnalysisPipelineRunSummary current)
+    {
+        return new AnalysisPipelineRunSummary(
+            RecoveredLeaseCount: checked(
+                previous.RecoveredLeaseCount + current.RecoveredLeaseCount),
+            new CaptureAnalysisIngestionResult(
+                ScannedChunkCount: current.Ingestion.ScannedChunkCount,
+                CreatedChunkCount: checked(
+                    previous.Ingestion.CreatedChunkCount
+                    + current.Ingestion.CreatedChunkCount),
+                CreatedJobCount: checked(
+                    previous.Ingestion.CreatedJobCount
+                    + current.Ingestion.CreatedJobCount),
+                AnalysisReady: current.Ingestion.AnalysisReady,
+                UnstableChunkCount: current.Ingestion.UnstableChunkCount),
+            ProcessedJobCount: checked(
+                previous.ProcessedJobCount + current.ProcessedJobCount),
+            CompletedJobCount: checked(
+                previous.CompletedJobCount + current.CompletedJobCount),
+            RetryableFailureCount: checked(
+                previous.RetryableFailureCount
+                + current.RetryableFailureCount),
+            TerminalFailureCount: checked(
+                previous.TerminalFailureCount
+                + current.TerminalFailureCount),
+            LeaseLostCount: checked(
+                previous.LeaseLostCount + current.LeaseLostCount),
+            MoreWorkPossible: current.MoreWorkPossible);
     }
 }
