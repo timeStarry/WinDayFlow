@@ -429,6 +429,7 @@ public sealed class WindowsCapturePrivacyMonitorTests
     [InlineData(CaptureState.Paused)]
     [InlineData(CaptureState.Resuming)]
     [InlineData(CaptureState.Stopping)]
+    [InlineData(CaptureState.Faulted)]
     public async Task AllowAllApplicationsPinnedStateIgnoresForegroundSwitch(
         CaptureState captureState)
     {
@@ -547,7 +548,6 @@ public sealed class WindowsCapturePrivacyMonitorTests
     [InlineData(CaptureState.Stopped)]
     [InlineData(CaptureState.Unavailable)]
     [InlineData(CaptureState.BlockedByConsent)]
-    [InlineData(CaptureState.Faulted)]
     public async Task AllowAllApplicationsNonCapturingStateSelectsANewDisplay(
         CaptureState captureState)
     {
