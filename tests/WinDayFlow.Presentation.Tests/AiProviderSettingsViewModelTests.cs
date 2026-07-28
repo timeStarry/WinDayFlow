@@ -40,7 +40,7 @@ public sealed class AiProviderSettingsViewModelTests
 
         Assert.True(await viewModel.SetCloudAnalysisEnabledAsync(true));
         Assert.True(viewModel.CloudAnalysisEnabled);
-        Assert.Contains("新证据", viewModel.CloudAnalysisStatusText, StringComparison.Ordinal);
+        Assert.Contains("待分析证据和新证据", viewModel.CloudAnalysisStatusText, StringComparison.Ordinal);
 
         Assert.True(await viewModel.SaveAsync(
             initial.Profile.DisplayName,

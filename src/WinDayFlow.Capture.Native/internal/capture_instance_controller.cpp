@@ -51,6 +51,31 @@ wdf_capture_result MapAdmissionResult(
   }
 }
 
+const char* WorkerExitDetail(CaptureWorkerExitReason reason) noexcept {
+  switch (reason) {
+    case CaptureWorkerExitReason::kStopped:
+      return "Capture worker stopped and joined.";
+    case CaptureWorkerExitReason::kAuthorizationLost:
+      return "Capture worker exited because runtime authorization was lost.";
+    case CaptureWorkerExitReason::kInvalidConfiguration:
+      return "Capture worker exited because its configuration was invalid.";
+    case CaptureWorkerExitReason::kDeviceFailure:
+      return "Capture worker exited because display acquisition failed.";
+    case CaptureWorkerExitReason::kEncoderFailure:
+      return "Capture worker exited because video encoding failed.";
+    case CaptureWorkerExitReason::kStorageFailure:
+      return "Capture worker exited because chunk storage failed.";
+    case CaptureWorkerExitReason::kEventPublicationFailure:
+      return "Capture worker exited because status publication failed.";
+    case CaptureWorkerExitReason::kCompensationFailure:
+      return "Capture worker exited because chunk rollback failed.";
+    case CaptureWorkerExitReason::kNotRun:
+    case CaptureWorkerExitReason::kInternalFailure:
+    default:
+      return "Capture worker exited because an internal failure occurred.";
+  }
+}
+
 }  // namespace
 
 struct CaptureInstanceController::RunRecord {
@@ -125,7 +150,11 @@ CaptureInstanceController::UpdateRuntimeAuthorization(
   const PrivacyDecision decision =
       EvaluatePrivacyContext(authorization.privacy);
   const wdf_capture_reason pause_reason =
-      decision.allowed ? WDF_CAPTURE_REASON_NONE : decision.reason;
+      decision.allowed
+          ? state_ == WDF_CAPTURE_STATE_PAUSING
+                ? WDF_CAPTURE_REASON_NONE
+                : WDF_CAPTURE_REASON_POLICY_BLOCKED
+          : decision.reason;
   if (shutting_down_ || state_ == WDF_CAPTURE_STATE_STOPPING ||
       !PauseForAuthorizationChangeUnderLock(pause_reason)) {
     return CaptureSafetyUpdateResult::kRevokedDuringUpdate;
@@ -141,7 +170,11 @@ CaptureSafetyUpdateResult CaptureInstanceController::UpdatePrivacyContext(
   std::lock_guard lock(mutex_);
   const PrivacyDecision decision = EvaluatePrivacyContext(privacy);
   const wdf_capture_reason pause_reason =
-      decision.allowed ? WDF_CAPTURE_REASON_NONE : decision.reason;
+      decision.allowed
+          ? state_ == WDF_CAPTURE_STATE_PAUSING
+                ? WDF_CAPTURE_REASON_NONE
+                : WDF_CAPTURE_REASON_POLICY_BLOCKED
+          : decision.reason;
   if (shutting_down_ || state_ == WDF_CAPTURE_STATE_STOPPING ||
       !PauseForAuthorizationChangeUnderLock(pause_reason)) {
     return CaptureSafetyUpdateResult::kRevokedDuringUpdate;
@@ -454,6 +487,7 @@ wdf_capture_result CaptureInstanceController::RequestStopCore(
           run->control_event_failed = true;
         }
         run->worker_exited = true;
+        run->worker_result.reason = CaptureWorkerExitReason::kStopped;
         active_run_ = run;
       }
       safety_.InvalidatePendingCommandAdmission();
@@ -558,7 +592,8 @@ wdf_capture_result CaptureInstanceController::WaitStopped(
         if (!run->stopped_reservation.has_value() ||
             !PublishReservedStateUnderLock(
                 &*run->stopped_reservation, WDF_CAPTURE_STATE_STOPPED,
-                run->stop_reason, "Capture worker stopped and joined.")) {
+                run->stop_reason,
+                WorkerExitDetail(run->worker_result.reason))) {
           run->control_event_failed = true;
         }
         if (run->control_event_failed) {
@@ -674,7 +709,9 @@ bool CaptureInstanceController::OnWorkerCheckpoint(
                                        WDF_CAPTURE_REASON_NONE,
                                        "Capture worker ready.");
         }
-        return state_ == WDF_CAPTURE_STATE_RECORDING;
+        return state_ == WDF_CAPTURE_STATE_RECORDING ||
+               state_ == WDF_CAPTURE_STATE_PAUSING ||
+               state_ == WDF_CAPTURE_STATE_PAUSED;
       case CaptureWorkerCheckpointKind::kPaused: {
         wdf_capture_reason pause_reason = WDF_CAPTURE_REASON_USER_PAUSED;
         {
@@ -722,7 +759,7 @@ void CaptureInstanceController::OnWorkerExited(
                 : result.error;
         if (!PublishReservedErrorUnderLock(
                 &*run->error_reservation, error,
-                "Capture worker exited with a fatal error.")) {
+                WorkerExitDetail(result.reason))) {
           run->control_event_failed = true;
         }
         run->error_published = true;
@@ -798,7 +835,10 @@ bool CaptureInstanceController::PauseForAuthorizationChangeUnderLock(
   }
   if (state_ == WDF_CAPTURE_STATE_PAUSING) {
     std::lock_guard run_lock(active_run_->mutex);
-    active_run_->pause_reason = reason;
+    if (active_run_->pause_reason != WDF_CAPTURE_REASON_USER_PAUSED &&
+        reason != WDF_CAPTURE_REASON_NONE) {
+      active_run_->pause_reason = reason;
+    }
     return true;
   }
   if (state_ != WDF_CAPTURE_STATE_STARTING &&

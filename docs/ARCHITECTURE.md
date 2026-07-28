@@ -4,7 +4,7 @@ Status: Architecture and product design baseline
 Project: WinDayFlow  
 Repository: https://github.com/timeStarry/WinDayFlow  
 Developer: timeStarry <timestarry@qq.com>  
-Last updated: 2026-07-20
+Last updated: 2026-07-28
 
 ## 1. Purpose
 
@@ -42,7 +42,7 @@ boundary:
 
 | Source | Adopt | Adapt | Reject |
 | --- | --- | --- | --- |
-| Dayflow | Zero-input journal semantics; contextual timeline; Daily and Weekly review; timeline-grounded work-journal questions; export; provider choice; sensitive-application exclusion | Translate review and correction workflows into native Windows information architecture, offline-first storage, explicit disclosure, navigable citations, and capability-based providers | macOS visual conventions; mandatory account or hosted-backend assumptions; default telemetry; copied branding or product assets |
+| Dayflow | Zero-input journal semantics; contextual timeline; periodic JPEG evidence; Daily and Weekly review; timeline-grounded work-journal questions; export; provider choice; sensitive-application exclusion | Translate review and correction workflows into native Windows information architecture, offline-first atomic evidence storage, explicit disclosure, navigable citations, capability-based providers, and on-demand derived video | macOS visual conventions; mandatory account or hosted-backend assumptions; default telemetry; copied branding or product assets |
 | QiDayflow | DXGI, WIC, and Media Foundation capture approach; bounded evidence; atomic chunks; persistent jobs; transaction boundaries; retry and recovery patterns; DPAPI; privacy-aware logging | Remove Flutter and MethodChannel coupling; version the native boundary; benchmark capture cadence and resource policy; integrate native Windows lifecycle, consent, and exclusion controls | Flutter Material UI; fixed navigation; hard-coded model defaults; treating an upstream sampling default as an architecture constant; behavior that obscures capture, retention, or upload state |
 | WinDayFlow | WinUI 3 Fluent shell; collapsible hamburger navigation; Windows title-bar and lifecycle behavior; accessibility; local data control; user correction as durable provenance | Evolve only through measured usability, resource, privacy, and recovery evidence | Becoming a skin over either reference or inheriting a platform convention that conflicts with Windows |
 
@@ -158,7 +158,8 @@ running, and failed jobs with retry and evidence-location actions.
 - Uses virtualization and incremental loading.
 - Supports title and summary editing, category/productivity changes, merge,
   split, deletion, and evidence review.
-- Opens a review surface with video playback, thumbnails, and a time scrubber.
+- Opens an evidence review surface with thumbnails, a time scrubber, and an
+  on-demand derived timelapse when continuous playback is useful.
 - Exports an arbitrary date range as Markdown.
 
 ### 5.2 Daily
@@ -194,7 +195,10 @@ running, and failed jobs with retry and evidence-location actions.
   diagnostic settings.
 - The current foundation persists system/light/dark theme preference, the
   capture-enabled preference, the cloud-off default, and versioned recording
-  consent before the main window is created.
+  consent before the main window is created. It also persists an application
+  privacy mode: `ProtectByForegroundApplication` is the conservative default;
+  `AllowAllApplications` is an explicit wider-scope, single-display continuity
+  choice that requires a new privacy revision and renewed consent.
 - Provider selection is capability-aware: text support does not imply vision
   support.
 - Destructive actions use explicit confirmation and show their exact scope.
@@ -212,7 +216,7 @@ Database            Microsoft.Data.Sqlite with explicit SQL
 Serialization       System.Text.Json
 HTTP                 HttpClientFactory
 Logging              Microsoft.Extensions.Logging
-Native capture       C++20, DXGI, Media Foundation, WIC
+Native capture       C++20, DXGI, Windows Graphics Capture, Media Foundation, WIC
 Native interop       Versioned C ABI v1 DLL; managed P/Invoke adapter implemented
 Packaging            MSIX plus documented unpackaged development mode
 Tests                xUnit and native C/C++ test executables
@@ -250,7 +254,7 @@ src/
 |-- WinDayFlow.Infrastructure/      SQLite, providers, logging, settings, update
 |-- WinDayFlow.Capture.Interop/     P/Invoke, fail-closed owner and quiescence
 `-- WinDayFlow.Capture.Native/      x64 C++20 DLL, C ABI, policy and safety core
-    `-- tests/                      Six native CTest executable targets
+    `-- tests/                      Eighteen native CTest executable targets
 
 tests/
 |-- WinDayFlow.Domain.Tests/
@@ -291,8 +295,9 @@ already stopped. `IAppSettingsCommitBarrier` and
 writes and lifecycle calls. Capture.Interop supplies both
 `UnavailableCaptureBackend` and `NativeCaptureBackend`. The latter negotiates
 the complete safety-capability mask, owns the opaque handle through `SafeHandle`,
-updates versioned privacy context and target-scoped runtime authorization, and
-polls bounded native events without frame callbacks. A separate synchronous
+updates versioned privacy context and either foreground-target-scoped or
+display-wide runtime authorization, and polls bounded native events without
+frame callbacks. A separate synchronous
 callback path closes native authorization admission before system-event
 callbacks return. An explicit asynchronous owner quiesces by applying Block,
 stopping, joining, and destroying in order;
@@ -306,17 +311,32 @@ invalidates managed admission and target continuity, closes native admission,
 applies a generation-bound native barrier, and asynchronously re-observes
 through one Windows event owner thread. Its hidden top-level HWND receives
 display-topology, current-session WTS, and suspend/resume notifications. The
-monitor is hosted and disposed before its owner. Dev-live adds a narrow,
-non-production policy that admits only unpackaged/classic foreground
-`WinDayFlow.App.exe` and `cmd.exe` targets with a present non-empty title. This
-basename policy is not signer proof. Image-bound publisher-signer verification,
-unique hosted-app child attribution, complete presentation notifications,
-periodic storage refresh, and real privacy-transition smoke remain production
-activation gates.
+monitor is hosted and disposed before its owner. Dev-live adds a QA-only,
+non-production policy that admits verifier-resolved classic and packaged
+foreground targets with a present executable/title and a resolved package
+state. The default mode preserves explicit exclusions; the explicitly wider
+mode suspends them while retaining independent privacy signals.
+This admission is not application trust or signer proof. Image-bound publisher-signer verification,
+unique hosted-app child attribution, complete presentation notifications, and
+real privacy-transition smoke remain production activation gates. The dev-live
+monitor now owns an independent low-frequency storage-headroom refresh; a stable
+result does not touch target continuity, while a changed or unreadable result
+closes admission before asynchronous recovery.
+The persisted application privacy mode changes how that dev-live observation is
+used. `ProtectByForegroundApplication` keeps the foreground verifier and the
+application/window exclusion policy on every target change.
+`AllowAllApplications` uses one fully resolved target to select a display, then
+holds display-wide authority across ordinary foreground changes on that same
+display. Application and window exclusions remain stored but are inactive until
+the user returns to the default mode. Lock/secure-desktop, current-session WTS,
+power, display-topology, storage, consent, and explicit user-stop boundaries are
+unchanged and remain fail closed. Neither mode changes the production-disabled
+capture posture.
 The bounded title-read, conservative window-location invalidation,
 display-scoped authorization, strict DXGI resolver, native target observer, and
 pre/post fingerprinted frame-source gates are closed. A C-ABI-owned controller
-now composes the worker with held stage permits and the DXGI/WIC/Media
+now composes the worker with held stage permits and the DXGI-first,
+AccessDenied-only Windows Graphics Capture fallback, WIC/Media
 Foundation/storage components. Production keeps that controller in disabled
 activation mode; only the separately compiled dev-live DLL enables it and adds
 `ScreenCapture | H264Chunks`. The native foundation does not reference managed
@@ -390,7 +410,9 @@ classified as focused or distracting.
 The target capture engine adapts the reviewed QiDayflow approach:
 
 - `GetForegroundWindow` and `MonitorFromWindow` locate the active display.
-- DXGI Desktop Duplication captures that display.
+- DXGI Desktop Duplication captures that display by default.
+- An explicit `DuplicateOutput` access denial selects Windows Graphics Capture
+  for the same fingerprinted monitor; other DXGI failures do not select it.
 - WIC scales into a bounded BGRA canvas.
 - Media Foundation encodes low-frame-rate H.264 MP4 chunks.
 - Media Foundation and WIC extract and JPEG-encode bounded evidence frames.
@@ -502,6 +524,14 @@ advertise or start live capture. The dev-live C ABI selects enabled mode and
 advertises only `ScreenCapture | H264Chunks` in addition to the safety
 capabilities.
 
+[ADR 0013](adr/0013-display-wide-continuous-capture.md), "User-Authorized
+Display-Wide Continuous Capture," adds the explicit application privacy-mode
+choice. It records the schema-v7/privacy-revision transition, capability bit 12,
+the compatible target flag in the unchanged 224-byte authorization structure,
+active-recording display pinning, suspended application/window exclusions, and
+the wider-scope privacy consequences. It is accepted for the dev-live QA path
+only and does not open production capture.
+
 `CaptureStatus` is a stable machine-readable contract, not just display text.
 It carries an unsigned 64-bit `Sequence`, `CaptureReasonCode`, and
 `CaptureErrorCode` in addition to state, timestamp, and optional localized
@@ -550,9 +580,21 @@ The coordinator assigns a process-local `ulong` runtime policy generation and
 never derives it from the persisted privacy revision. Once a restrictive
 Prepare or signal drops the process latch, caller cancellation cannot cancel
 the native block update.
+Changing the application privacy mode is an effective privacy-policy change.
+The settings transaction advances the privacy revision exactly once, disables
+capture, and leaves the previous consent attached to its old revision so it is
+no longer current. The runtime closes admission and completes the Stop boundary
+before the user can review the wider disclosure, grant consent for the new
+revision, and explicitly enable capture again. Stored exclusion rules are not
+deleted when `AllowAllApplications` suspends them.
 The additive 224-byte runtime-authorization contract preserves its legacy
-112-byte prefix and binds that decision to an HWND/PID/process-creation-time,
-target-epoch, and display-anchor tuple. The native-issued
+112-byte prefix. A foreground-scoped Allow binds HWND, PID, process creation
+time, target epoch, HMONITOR, and display device key. A display-wide Allow uses
+target-flag bit 2, keeps the HWND/PID/creation fields zero, and binds the target
+epoch plus the same HMONITOR/device-key display identity. The foreground-present
+and display-wide flags are mutually exclusive; both require display-present.
+Capability bit 12 proves that both sides understand these semantics without
+changing the ABI version or structure size. The native-issued
 permit adds an internal native-instance epoch and persistence generation. The
 safety core validates immutable acquisition snapshots again under a shared
 write permit, while Block or an effective revoke takes the unique side, drains
@@ -565,9 +607,20 @@ recreation, so the two revision namespaces cannot revive one another.
 
 Each accepted Windows event callback first replaces managed signals with
 FailClosed, closes managed admission, and advances the observation generation.
-It then calls the callback-safe native invalidation export, invalidates verifier
-target continuity, and wakes the worker. The native close is atomic and does not
-wait for the unique safety gate or an already-held shared persistence permit.
+In `AllowAllApplications`, Starting, Recording, Pausing, Paused, Resuming, and
+Stopping pin the authorized display. Ordinary foreground and window-object
+notifications are deliberately not accepted as revocation events in those
+states, even when focus moves to another display; they cannot move the target,
+rotate authorization or persistence generation, or discard the current partial
+chunk. After capture reaches Stopped, Unavailable, or BlockedByConsent, a
+foreground event may select the display for the next recording. Faulted remains
+pinned while the runtime owner performs terminal teardown. Desktop/session,
+power, display-topology, storage, consent, mode, and user lifecycle boundaries
+retain the immediate fail-closed path.
+An accepted invalidating event then calls the callback-safe native invalidation
+export, invalidates verifier target continuity, and wakes the worker. The native
+close is atomic and does not wait for the unique safety gate or an already-held
+shared persistence permit.
 The subsequent generation-bound Block update is the acknowledgement that drains
 the current permit boundary; a later Allow is rejected until a Block has
 confirmed the latest callback epoch.
@@ -616,6 +669,16 @@ Windows 10 1809+ signals for session unlock, input desktop, RDP/remote control,
 Windows Presentation Mode, and storage headroom. API failure or ambiguity is
 isolated per signal and becomes Unknown while later signals continue sampling;
 its own application/window fields remain Unknown and it reads no window title.
+The monitor also uses a narrow storage-only sampler on an independent
+low-frequency loop (five seconds in the current dev-live policy). The initial
+full observation establishes the baseline. Repeating the same storage decision
+does not advance a privacy generation, invalidate target observation, run the
+foreground verifier, or disturb an active pinned-display chunk. A change among
+Allow, Block, and Unknown synchronously closes managed/native admission with the
+same callback-time fail-closed contract, then wakes the normal barrier and
+full-observation worker. A recoverable storage read failure is Unknown; it is
+never reused as the prior Allow. Recovery likewise requires a fresh barrier and
+authorization. The refresh task is canceled and awaited during monitor teardown.
 The separate synchronous `WindowsCaptureTargetVerifier` now observes a stable
 foreground target, display anchor, and size-bounded identity snapshot. A pure
 typed matcher evaluates the committed application and window rule scopes
@@ -625,11 +688,15 @@ identities fail closed when a rule requires them, while Absent is a conclusive
 non-match.
 The verifier does not compose a policy decision by itself. Production leaves it
 unregistered; dev-live wires it through the monitor to the runtime owner and
-then applies a strict basename allowlist for classic `WinDayFlow.App.exe` and
-`cmd.exe` targets. Image-bound publisher-signer verification, unique hosted-app
-child attribution, complete presentation notifications, periodic storage
-refresh, and production policy remain pending. The event monitor
-supplies foreground, desktop, conservative window-object, display-topology,
+then applies a QA-only admission for fully resolved classic or packaged
+foreground targets. In `ProtectByForegroundApplication`, explicit
+application/window Block decisions are preserved. In `AllowAllApplications`,
+those two decisions are forced Allow after the initial display selection while
+the independent session, desktop, remote, presentation, storage, topology,
+power, consent, and user-intent boundaries remain effective. Image-bound
+publisher-signer verification, unique hosted-app child attribution, complete
+presentation notifications, and production policy remain pending. The event
+monitor supplies foreground, desktop, conservative window-object, display-topology,
 current-session, and power invalidation. Object events are not foreground or
 top-level identity proof, and recovery notifications only request a fresh
 barrier and sample. Production activation still requires those platform inputs
@@ -653,7 +720,9 @@ v1 foundation under `WinDayFlow.Capture.Native`. Its implemented boundary has:
   buffers and catch-all `noexcept` exports;
 - the additive 224-byte flat runtime-authorization input extended by ADR 0008,
   preserving the 112-byte ADR 0003 prefix while adding a numeric HMONITOR and
-  fixed UTF-8 display device key to the target tuple;
+  fixed UTF-8 display device key to the target tuple; ADR 0013 assigns existing
+  target-flag bit 2 to display-wide scope and does not add a field or change the
+  224-byte size;
 - the additive 64-byte command-admission output defined by ADR 0004, containing
   native instance, runtime revision, persistence generation, target epoch,
   authorization epoch, and a cryptographically random 128-bit nonce;
@@ -663,14 +732,21 @@ v1 foundation under `WinDayFlow.Capture.Native`. Its implemented boundary has:
 - callback-time authorization invalidation through capability bit 11 and a
   dedicated C ABI export, with `AUTHORIZATION_SUPERSEDED` distinguishing an old
   update rejected before commit from ordinary Stop/Revoke invalidation;
+- display-wide continuous-authorization capability bit 12, which is required
+  before a managed owner can submit the display-only target form;
 - validated capture-policy inputs and a bounded, polled event queue with
   monotonic sequence numbers, `dropped_before` gap reporting, and required-event
   reservations that protect future chunk publication, without native callbacks
   into managed or UI code;
-- a strict native target observer, strict pre/post fingerprinted DXGI Desktop
-  Duplication source with 8K pixel and 126.6 MiB packed/mapped BGRA ceilings,
+- a strict native authorization observer that revalidates the full foreground
+  tuple in the default mode or double-reads only the fixed HMONITOR/device key in
+  display-wide mode, plus a strict pre/post fingerprinted DXGI-first display
+  source with 8K pixel and 126.6 MiB packed/mapped BGRA ceilings; only
+  Desktop Duplication access denial selects the Windows Graphics Capture
+  monitor fallback, and a permanent WGC denial is terminal;
   bounded even-dimension WIC scaler, real 64 MiB fail-closed in-memory H.264
-  writer, and typed privacy-safe chunk manifest;
+  writer, and typed privacy-safe chunk manifest whose scope distinguishes
+  `authorized-foreground-display` from `authorized-display-continuous`;
 - a root-bound Media Foundation/WIC analysis-evidence extractor that accepts a
   canonical chunk identifier, uses no-follow source access and pre/post source
   fingerprints, atomically publishes a strict v1 evidence manifest, and
@@ -705,30 +781,30 @@ dev-live recorder, not a production recorder. The
 native and managed tests prove target/PID/display reuse rejection, target and
 instance epochs, persistence-generation invalidation, permit linearization,
 quiescence, timeout/failure quarantine, ABI layout, capability dependencies,
-strict no-fallback DXGI output selection, callback pre/post-commit races, and
+  strict no-cross-output DXGI resolution, AccessDenied-only WGC fallback,
+  callback pre/post-commit races, and
 Block-before-Allow acknowledgement. Native component tests additionally prove
 real in-memory H.264 encode/decode, bounded DXGI/WIC geometry, handle-bound
 whole-directory publication and retryable rollback, typed privacy-safe
 manifests, cross-instance-safe event reservation, and deterministic worker
-orchestration across Pause/Resume/Stop, every invalidation stage, topology
-rebuild, event failure, compensation retry, C ABI controller ownership,
+  orchestration across Pause/Resume/Stop, every invalidation stage, finite
+  topology rebuild and exhaustion, event failure, compensation retry, C ABI controller ownership,
 run-ID-guarded publication, and Stop single flight. They do not prove the
 end-to-end live desktop write path; that still requires a manual dev-live smoke.
 
-The complete live mask requires privacy guard, event queue, target-scoped and
-display-scoped authorization, persistence-generation barrier, deterministic
-stop, display-bound command admission, callback-time authorization
-invalidation, screen capture, and H.264 chunk capabilities. Evidence extraction
-is independent. Every build advertises eight runtime-owner foundation
-capabilities: privacy guard, event queue, target-scoped authorization,
-persistence-generation barrier, deterministic stop, display-scoped
-authorization, display-bound command admission, and callback-time authorization
-invalidation. The default build advertises none of `ScreenCapture`,
-`H264Chunks`, or `EvidenceExtraction`; its authorized Start/Resume path remains
-disabled. The dev-live native build adds `ScreenCapture | H264Chunks`, enables
-the controller, and starts the worker after valid command admission. Neither
-build advertises `EvidenceExtraction`; the strict extraction exports are
-consumed independently by the analysis adapter.
+The baseline complete live mask requires privacy guard, event queue,
+target-scoped and display-scoped authorization, persistence-generation barrier,
+deterministic stop, display-bound command admission, callback-time authorization
+invalidation, screen capture, and H.264 chunks. `AllowAllApplications`
+additionally requires display-wide continuous-authorization bit 12; a partial
+capability match fails before native update or command admission. Evidence
+extraction is independent. Every current binary advertises the eight
+runtime-owner core capabilities plus bit 12. The default build still advertises
+none of `ScreenCapture`, `H264Chunks`, or `EvidenceExtraction`; its authorized
+Start/Resume path remains disabled. The dev-live native build adds
+`ScreenCapture | H264Chunks`, enables the controller, and starts the worker after
+valid command admission. Neither build advertises `EvidenceExtraction`; the
+strict extraction exports are consumed independently by the analysis adapter.
 Legacy command-admission capability bit 8 remains defined but is not advertised
 by a display-scoped DLL. Current owners require display-bound command-admission
 bit 10, so both old-client/new-DLL and new-client/old-DLL combinations fail at
@@ -764,19 +840,47 @@ Omitting any gate selects the unavailable backend. Extra, missing, or
 differently spelled launch arguments do not activate capture.
 
 Manual dev-live acceptance also requires an unlocked local interactive desktop.
-Session lock, the secure desktop, and foreground targets outside the narrow
-`WinDayFlow.App.exe` / `cmd.exe` allowlist intentionally retain the fail-closed
-authorization state; the conservative defaults also pause for Remote Desktop
-and Windows Presentation Mode. A recording smoke must keep an allowed target in
-the foreground for longer than the default 10-second sampling interval before
-exercising graceful Stop and partial-chunk publication.
+The first pass uses default `ProtectByForegroundApplication`: unresolved targets,
+WinDayFlow itself, and explicitly excluded application/window rules retain the
+fail-closed state. Keep one stable ordinary external window in the foreground
+for at least the default 60-second chunk duration, with frames sampled at the
+current 10-second interval, before graceful Stop and publication.
+
+The second pass selects `AllowAllApplications` and must observe capture turn off,
+the privacy revision advance, and old consent become stale before renewed
+consent. After recording is completely stopped, move the WinDayFlow window to
+the test display and re-enable capture there, then switch among ordinary apps,
+WinDayFlow, and a window on another display for more than one chunk. No
+foreground-driven Pause/Resume, target movement, generation change, or
+partial-chunk loss is acceptable; the committed manifest records
+`authorized-display-continuous` and remains bound to the display selected at
+Start. This pass also confirms the warning is accurate: application/window
+exclusions remain stored but are inactive, and WinDayFlow UI can be captured.
+To select another display, wait for recording to stop completely, move the
+WinDayFlow window to that display, and Start a new recording there. A topology
+change remains fail closed rather than silently widening scope.
+
+Both passes verify session lock/secure desktop, current-session WTS, power,
+display topology, storage, consent revocation, and explicit Stop remain fail
+closed. Remote Desktop and Windows Presentation Mode continue to follow their
+separate settings. Passing either smoke is dev-live QA evidence only; it does
+not open production capture.
+
+During the continuous pass, keep storage healthy across at least three
+five-second refresh periods and confirm that privacy generation, target epoch,
+and recording state remain stable. A controlled low-headroom volume or injected
+storage-read failure must close admission on the next refresh without any
+foreground/window event; failure publishes Unknown rather than retaining Allow.
+Restored headroom must pass a new Block/observation/authorization sequence before
+recording recovers.
 
 The remaining activation gates are integration work beyond command admission,
 synchronous target observation, the bounded title worker, and conservative
 window-location invalidation. Publisher identity must be bound to the running
 image, and hosted windows must be attributed to one real child application.
-Display-topology, current-session WTS, and suspend/resume invalidation now exist;
-presentation notifications and periodic storage refresh remain missing. The
+Display-topology, current-session WTS, suspend/resume invalidation, and the
+independent low-frequency storage-headroom refresh now exist; presentation
+notifications remain missing. The
 selected HMONITOR/device key now has both a strict resolver and a frame source
 that revalidates the complete binding before and after acquisition. The
 controller-owned worker now composes target observation and a fresh permit
@@ -896,13 +1000,16 @@ keys must not enter logs or native events.
 
 Together with ADR 0007, this foundation closes the stable synchronous
 observation and bounded-title portions of the ADR 0003 target gate. Dev-live
-uses them under its restricted classic-process policy, but production live use
+uses them under its QA-only verifier-resolved classic/packaged target admission.
+The default application-protection mode forces the WinDayFlow process
+fail-closed; the explicitly consented all-applications mode suspends that
+application-level protection on the selected display. Production live use
 remains blocked until all of the following are implemented and tested together:
 
 - primary publisher-signer verification bound to the running image;
 - unique child-application attribution for hosted Windows surfaces;
-- production policy integration beyond the dev-live basename allowlist,
-  complete presentation notifications, and periodic storage refresh;
+- production policy integration beyond the dev-live QA target admission,
+  and complete presentation notifications;
 - clean-profile startup-intent, evidence-Pause, sticky user Pause/Stop, and
   repeated recovery smoke; and
 - clean-profile real acquisition, encoding, temporary output, atomic
@@ -924,6 +1031,25 @@ nonzero and the event reports `OBJID_WINDOW` with `CHILDID_SELF`. These
 predicates do not prove that the HWND is top-level or foreground. The callback
 carries only a stable change kind; it does not read HWND titles, process
 identity, settings, exclusion policy, or capture lifecycle state.
+
+Event eligibility is mode-dependent. `ProtectByForegroundApplication` accepts
+foreground and relevant window-object events, immediately revoking the old
+target before asynchronous re-observation. After `AllowAllApplications` has
+established a display-wide target, ordinary foreground and window-object events
+do not invalidate authority, advance persistence generation, or pause the
+worker merely because HWND/PID/title or the foreground display changed while
+capture is Starting, Recording, Pausing, Paused, Resuming, or Stopping. This is
+the behavior that prevents visible "restoring recording" churn and preserves an
+in-progress chunk during ordinary application and cross-display focus switches.
+The capture source stays on the display selected at Start; other displays are
+not admitted. Once capture is Stopped, Unavailable, or BlockedByConsent,
+foreground events may establish the display for the next recording. Faulted is
+terminal and stays pinned during teardown. Desktop/security boundaries,
+current-session WTS, power, `WM_DISPLAYCHANGE`, storage, consent/mode changes,
+and user Pause/Stop remain independent immediate authorization or lifecycle
+events. Changing the recording display requires
+waiting for Stop to complete, moving the WinDayFlow window to the intended
+display, and starting there.
 
 Before each accepted callback returns, the monitor replaces the coordinator's
 signals with FailClosed, closes managed admission, advances a
@@ -956,7 +1082,7 @@ receives a compensating FailClosed update under the same apply gate using the
 next revision. Quiescence cannot be reversed by an overlapping authorizing
 settings commit.
 
-`WM_DISPLAYCHANGE` invalidates target continuity and requires a fresh sample but
+`WM_DISPLAYCHANGE` invalidates display continuity and requires a fresh sample but
 does not create a lasting hold. WTS lock, disconnect, logoff, and terminate enter
 an independent session-unavailable hold; corresponding connect, logon, unlock,
 create, and desktop-ready events clear it, while remote-control changes only
@@ -981,10 +1107,11 @@ permits, but it cannot revoke a permit already held by the writer. The
 following Block barrier drains existing holders before acknowledging the
 generation; the writer must additionally recheck authority at acquisition,
 encode, metadata, rename, and committed-event boundaries. The present source
-covers conservative window-location, display-topology, current-session, and
-sleep/resume invalidation, but not presentation notifications or periodic
-storage refresh. The monitor itself does not own user intent: the Application
-service distinguishes runtime-owned resumable Pause from sticky user Pause/Stop.
+covers conservative window-location, display-topology, current-session,
+sleep/resume invalidation, and independent periodic storage-headroom changes;
+presentation notifications remain pending. The monitor itself does not own user
+intent: the Application service distinguishes runtime-owned resumable Pause from
+sticky user Pause/Stop.
 Only dev-live dependency injection registers the monitor. See ADRs 0006, 0007,
 and 0009 for the complete contract.
 
@@ -999,8 +1126,20 @@ Capture invariants:
   policies rather than hard-coded assumptions inherited from a reference.
 - Display changes, topology changes, pause, idle, error, and stop commit a
   partial chunk when it contains valid frames.
+- Chunk rollover uses the transformed frame's monotonic timestamp rather than
+  only the earlier schedule poll. When that frame reaches the configured chunk
+  duration, the worker commits the old chunk first and encodes the current frame
+  as the next chunk's first frame, without dropping it or extending the old
+  chunk by another sampling interval.
 - Files are written as partial artifacts and atomically renamed on completion.
-- Video and metadata completion are coordinated.
+- The current P0 compatibility writer coordinates MP4 and metadata completion
+  so the already-composed record-to-analysis path can be verified end to end.
+- The production storage target is individually atomic JPEG frames plus a typed
+  manifest as canonical evidence. MP4 is a rebuildable, on-demand derivative
+  for playback or provider compatibility and is never the sole source of truth.
+  Moving the writer and recovery contracts to this layout requires a separate
+  ADR, migration/compatibility coverage for existing MP4 chunks, and resource
+  benchmarks; it is deliberately outside the current P0 repair.
 - A single JPEG is bounded to 2 MiB and one analysis request is bounded to
   12 MiB of image payload by default.
 
@@ -1186,7 +1325,7 @@ Persistence rules:
 
 ### 14.1 Current Persistence Slice
 
-The implemented persistence slice uses schema version 6. Version 1 contains
+The implemented persistence slice uses schema version 7. Version 1 contains
 `schema_migrations`, `timeline_entries`, `timeline_entry_apps`, and
 `timeline_entry_tags`; version 2 adds the singleton `app_settings` row while
 preserving existing timeline data. Version 3 adds evidence-retention,
@@ -1199,8 +1338,13 @@ cover the new choices. Version 4 adds an initially empty, ordered
 revision during migration. Version 5 adds constrained `capture_chunks` and
 durable leased `analysis_jobs`; version 6 adds the active OpenAI-compatible
 provider profile, protected credential metadata, validation revision, and
-provider/job indexes, while forcing cloud analysis off during migration. The
-application completes the idempotent migrations and initializes settings and
+provider/job indexes, while forcing cloud analysis off during migration.
+Version 7 adds the constrained `capture_application_privacy_mode` setting and
+migrates every existing profile to `ProtectByForegroundApplication` (`0`)
+without changing capture state, privacy revision, or consent. A later user
+change to `AllowAllApplications` (`1`) is an effective privacy change and, unlike
+the migration, atomically advances the privacy revision and disables capture.
+The application completes the idempotent migrations and initializes settings and
 provider configuration before starting the host and creating the main window.
 Every timeline write plus its ordered child rows commits in one SQLite
 transaction. Settings writes
@@ -1218,7 +1362,8 @@ entries from this repository and supports create, edit, and delete; date-scoped
 results are searched and filtered in the ViewModel. The settings store persists
 theme, capture-enabled, cloud-analysis, consent version/timestamp/privacy
 revision, evidence-retention days, conservative exclusion/session choices, the
-current privacy revision, and typed ordered application/window rules with
+current privacy revision, application privacy mode, and typed ordered
+application/window rules with
 database constraints. Committed capture chunks, analysis jobs, and provider
 profiles are durable; unprocessed intervals project directly from chunk/job
 truth, and normalized analysis results commit into the editable Timeline. Daily,
@@ -1231,7 +1376,7 @@ the persistent, versioned recording-consent gate and defaults capture and cloud
 analysis to off. Production live capture remains unavailable; the
 OpenAI-compatible cloud provider becomes usable only after a current synthetic
 connection test, disclosure, and explicit enablement. The dev-live capture path
-is separately gated and is not a production claim. Schema version 6 stores
+is separately gated and is not a production claim. Schema version 7 stores
 manual and analyzed timeline content, settings, user-authored exclusion rules,
 capture chunks, analysis jobs, and provider profiles locally without
 application-level database encryption.
@@ -1253,9 +1398,34 @@ application-level database encryption.
   application/window rule lists. Full first-run onboarding remains Phase 1
   work. The event-driven application/window identity monitor plus
   display/session/power invalidation foundation remains inactive in production
-  and is composed only by dev-live; production attribution, presentation and
-  periodic-storage integration, clean-profile Pause/Stop/startup validation, and
-  live-desktop smoke remain Phase 1 work.
+  and is composed only by dev-live; its low-frequency storage refresh is also
+  dev-live-only today. Production attribution, presentation integration,
+  clean-profile Pause/Stop/startup validation, and live-desktop smoke remain
+  Phase 1 work.
+- Application capture scope is an explicit choice. The default
+  `ProtectByForegroundApplication` mode revalidates each foreground target and
+  enforces built-in sensitive-application policy plus ordered application/window
+  exclusions. `AllowAllApplications` is opt-in and display-wide: it temporarily
+  suspends both application and window exclusion evaluation, including
+  WinDayFlow's own-window protection, while retaining those settings for later.
+  The UI must explain that all ordinary content on the selected display can
+  enter local evidence and may later be included in an explicitly enabled cloud
+  analysis request.
+- Changing either direction advances the privacy revision, turns capture off,
+  and requires the user to accept the current disclosure again before
+  Start/Resume. Each broader-mode recording pins the display selected at Start:
+  ordinary application and cross-display focus switches neither move the target
+  nor revoke or discard a partial chunk, while lock, secure desktop,
+  current-session WTS, power, display topology, storage, consent, and user Stop
+  remain fail closed. Selecting another recording display requires waiting for
+  recording to stop completely, moving the WinDayFlow window to that display,
+  and starting again there; one run never silently expands to every monitor.
+- Dev-live refreshes only the storage-headroom decision on an independent
+  five-second cadence. An unchanged decision is a no-op and cannot by itself
+  rebuild a pinned-display target. A transition below the configured threshold
+  or an unreadable storage result closes admission immediately; unreadable is
+  Unknown, and recovery requires fresh authorization rather than restoring a
+  previous Allow.
 - The current `pause_during_screen_sharing` storage name is retained for schema
   compatibility, but the Windows UI describes only Windows Presentation Mode.
   Windows has no public, universal signal for arbitrary third-party screen
@@ -1429,14 +1599,15 @@ the user explicitly enables a future telemetry feature.
 
 ### Native
 
-- The current native foundation is exercised by seventeen CTest executables:
+- The current native foundation is exercised by eighteen CTest executables:
   `pixel_buffer_tests`, `atomic_chunk_store_tests`, `capture_policy_tests`,
   `capture_chunk_fingerprint_tests`, `analysis_evidence_extractor_tests`,
   `capture_event_queue_tests`, `capture_instance_controller_tests`,
   `capture_safety_core_tests`,
   `capture_worker_tests`, `chunk_manifest_tests`, `dxgi_output_resolver_tests`,
   `dxgi_desktop_frame_source_tests`,
-  `windows_capture_target_observer_tests`, `wic_bgra_scaler_tests`,
+  `windows_capture_target_observer_tests`,
+  `windows_graphics_capture_frame_source_tests`, `wic_bgra_scaler_tests`,
   `mf_h264_chunk_writer_tests`, `capture_c_api_tests`, and the C17
   `c_header_compatibility_test`. These tests prove the current ABI, policy,
   queue, C header, pixel/runtime safety, real in-memory H.264 round trip,
@@ -1491,11 +1662,16 @@ the user explicitly enables a future telemetry feature.
   owner-thread hidden-window/WTS/power/WinEvent registration and reverse cleanup,
   a real Windows registration smoke path, late callbacks, terminal faults,
   exact `0x800B..0x800C` registration, qualified location and topology
-  invalidation, independent session/power holds, generation phase enforcement,
-  callback pre/post-commit supersede, quiescence races, and redacted diagnostics.
+  invalidation, default foreground protection, continuous-mode foreground/object
+  suppression with active-recording display pinning, mode-transition
+  invalidation, independent session/power holds,
+  storage-only refresh cadence, stable-decision no-op behavior, Block/Unknown
+  change invalidation and recovery, refresh teardown cancellation, generation
+  phase enforcement, callback pre/post-commit supersede, quiescence races, and
+  redacted diagnostics.
 - Live-activation tests must later cover hosted-app attribution, image-bound
-  signer replacement, presentation and periodic storage integration, explicit
-  Pause/Stop behavior, writer-side native display resolution and pre/post
+  signer replacement, presentation integration, explicit Pause/Stop behavior,
+  writer-side native display resolution and pre/post
   mapping checks, held-permit phase revalidation, and stale-work rejection at
   every native persistence boundary.
 
@@ -1509,7 +1685,8 @@ the user explicitly enables a future telemetry feature.
 
 ### Infrastructure
 
-- Fresh database creation and every schema migration.
+- Fresh database creation and every schema migration, including schema-v7
+  default-mode compatibility and constrained application privacy-mode values.
 - Transaction rollback with no partial observations or timeline entries.
 - Provider fixture mapping and unknown-label fallback.
 - Provider disclosure and upload-preview construction with no network request
@@ -1539,19 +1716,23 @@ the user explicitly enables a future telemetry feature.
 ## 21. Delivery Plan
 
 Phases are release gates, not a claim of strict implementation order. As of
-2026-07-23, schema v6, consent policy v2, manual and analyzed Timeline storage,
+2026-07-28, schema v7, consent policy v2, manual and analyzed Timeline storage,
 capture chunk/job/provider persistence, provider configuration and validation,
 native bounded evidence extraction, and the hosted analysis pipeline are
-implemented. Seventeen native tests cover the C ABI, safety core, writer,
+implemented. Eighteen native tests cover the C ABI, safety core, writer,
 fingerprint, and evidence extractor, while managed integration coverage proves
 the deterministic capture-manifest-to-editable-Timeline path with a fake HTTP
 provider and restart idempotency.
 
 The x64 dev-live flavor also composes the native owner, privacy monitor, target
-verifier, real Desktop Duplication/H.264 worker, chunk notifier, and analysis
+verifier, real DXGI-first/WGC-fallback H.264 worker, chunk notifier, and analysis
 runner. It is protected by compile property, development-bundle property, and
-exact launch-argument gates, and it admits only the two documented classic
-process targets. Production remains in disabled activation mode and advertises
+exact launch-argument gates, and its QA policy admits only fully resolved
+foreground targets. The default mode preserves exclusions; the explicitly
+re-consented continuous mode converts the initial target to a single-display
+authorization and suspends application/window exclusions. Independent lifecycle
+and storage signals remain effective in both modes. Production remains in
+disabled activation mode and advertises
 no `ScreenCapture`, `H264Chunks`, or `EvidenceExtraction` bit. P0 and the Phase 1
 exit criterion are therefore not complete: a clean-profile dev-live Desktop
 Duplication and startup-intent smoke, full privacy/lifecycle transitions,
@@ -1571,10 +1752,14 @@ Current implementation status follows the end-to-end order:
 1. **Record and publish: implemented behind dev-live gates, smoke pending.** The
    native runtime owner, monitor, verifier, writer, and committed
    `chunks/<id>/capture.mp4` plus `manifest.json` path are composed. Production
-   stays disabled until the real-device and privacy-transition checks pass.
+   uses DXGI first and WGC only for explicit Desktop Duplication access denial.
+   Schema-v7 application privacy mode and ABI capability bit 12 are composed for
+   dev-live QA, but default and continuous real-device transition checks remain
+   acceptance work. Production stays disabled until those checks pass.
 2. **Discover and enqueue: implemented.** Startup and every chunk-completed wake
-   rescan committed manifests, idempotently upsert chunks, and enqueue only for
-   the current validated provider. Wake events are never the source of truth.
+   rescan committed manifests, strictly accept the two authorized foreground or
+   continuous display scope values, idempotently upsert chunks, and enqueue only
+   for the current validated provider. Wake events are never the source of truth.
 3. **Configure the LLM boundary: implemented.** Settings owns endpoint, model,
    timeout, DPAPI-protected credential, synthetic connection test, revision
    invalidation, disclosure, and explicit cloud enablement. Cloud disable is
@@ -1607,6 +1792,14 @@ the following:
 - lock, secure desktop, RDP, presentation, display change, sleep, exclusion,
   consent revocation, and shutdown stop or pause persistence before stale
   evidence can advance;
+- default application protection pauses/rebuilds on excluded or unresolved
+  foreground targets, while separately re-consented `AllowAllApplications`
+  records the display pinned at Start across ordinary application and
+  cross-display focus switches without recovery-state churn, target movement,
+  or partial-chunk loss; topology, WTS, power, storage, consent, and explicit
+  Stop still revoke or terminate fail closed, and another target display is
+  selected only after Stop completes and WinDayFlow is moved there for a new
+  Start;
 - provider authentication, rate-limit, timeout, malformed-output, storage, and
   missing-evidence failures remain visible and retryable or terminal according
   to their stable disposition; and

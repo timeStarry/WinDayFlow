@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Net;
 using System.Security.Cryptography;
 using System.Text;
@@ -25,6 +26,10 @@ public sealed class AnalysisPipelineEndToEndTests
     private const string EvidenceFrameId = "frame-0000";
     private const string GeneratedTitle = "Implement the analysis pipeline";
     private const string EditedTitle = "Review the completed analysis pipeline";
+    private const string ForegroundDisplayCaptureScope =
+        "authorized-foreground-display";
+    private const string ContinuousDisplayCaptureScope =
+        "authorized-display-continuous";
 
     private static readonly DateTimeOffset ChunkStart =
         new(2026, 7, 23, 9, 0, 0, TimeSpan.FromHours(8));
@@ -32,11 +37,157 @@ public sealed class AnalysisPipelineEndToEndTests
     private static readonly DateTimeOffset Now =
         new(2026, 7, 23, 3, 0, 0, TimeSpan.Zero);
 
-    [Fact]
-    public async Task ProviderRevisionChangeDoesNotReanalyzeCompletedChunkOrReplaceEditedTimeline()
+    private static readonly TimeSpan PipelineWaitTimeout = TimeSpan.FromSeconds(10);
+
+    [Theory]
+    [InlineData(ForegroundDisplayCaptureScope)]
+    [InlineData(ContinuousDisplayCaptureScope)]
+    public async Task CloudEnableBackfillsExistingChunkAndCommitsTimelineOnce(
+        string captureScope)
     {
         using var workspace = new TemporaryWorkspace();
-        workspace.CreateCommittedChunk(ChunkId, ChunkStart, ChunkStart.AddMinutes(1));
+        workspace.CreateCommittedChunk(
+            ChunkId,
+            ChunkStart,
+            ChunkStart.AddMinutes(1),
+            captureScope);
+
+        var timeProvider = new FixedTimeProvider(Now);
+        var connectionFactory = new SqliteConnectionFactory(workspace.DatabasePath);
+        await new SqliteDatabaseInitializer(connectionFactory, timeProvider)
+            .InitializeAsync();
+        using var settings = new AppSettingsService(
+            new SqliteAppSettingsRepository(connectionFactory),
+            timeProvider);
+        await settings.InitializeAsync();
+
+        var transport = new FakeOpenAiTransport();
+        var profileStore = new SqliteAiProviderProfileStore(connectionFactory);
+        var providerFactory = new OpenAiCompatibleProviderFactory(
+            profileStore,
+            transport.CreateHandler,
+            timeProvider);
+        using var configuration = new AiProviderConfigurationService(
+            profileStore,
+            providerFactory,
+            settings,
+            timeProvider);
+        await configuration.InitializeAsync();
+
+        var store = new SqliteCaptureAnalysisStore(
+            connectionFactory,
+            workspace.EvidenceRoot);
+        var nativeEvidence = new FakeNativeEvidenceApi(workspace.EvidenceRoot);
+        using var ingestion = new CaptureAnalysisIngestionService(
+            CreateScanner(workspace.EvidenceRoot, timeProvider),
+            store,
+            store,
+            new NativeCaptureChunkFingerprintProvider(
+                workspace.EvidenceRoot,
+                nativeEvidence),
+            profileStore,
+            settings,
+            timeProvider: timeProvider);
+        var processor = CreateProcessor(
+            store,
+            profileStore,
+            providerFactory,
+            new NativeAnalysisEvidenceExtractor(
+                workspace.EvidenceRoot,
+                nativeEvidence),
+            settings,
+            connectionFactory,
+            timeProvider,
+            "analysis-e2e-cloud-enable");
+        var supervisor = new AnalysisPipelineSupervisor(
+            store,
+            ingestion,
+            processor,
+            timeProvider: timeProvider);
+        await using var runner = new AnalysisPipelineBackgroundRunner(
+            supervisor,
+            new UnavailableCaptureBackend(),
+            settings,
+            configuration,
+            new AnalysisPipelineBackgroundRunnerOptions(TimeSpan.FromDays(1)),
+            timeProvider);
+
+        await runner.StartAsync();
+        await WaitForPipelineCountsAsync(
+            connectionFactory,
+            new PipelineCounts(1, 0, 0, 0));
+
+        Assert.False(settings.Current.CloudAnalysisEnabled);
+        Assert.Equal(0, nativeEvidence.FingerprintCallCount);
+        Assert.Empty(transport.Requests);
+
+        _ = await configuration.SaveAsync(
+            "Local integration provider",
+            "http://127.0.0.1:11434/v1",
+            "vision-e2e",
+            requestTimeoutSeconds: 30,
+            replacementApiKey: null);
+        var validated = await configuration.TestConnectionAsync();
+        await configuration.SetCloudAnalysisEnabledAsync(enabled: true);
+
+        Assert.True(validated.IsValidated);
+        Assert.True(settings.Current.CloudAnalysisEnabled);
+        await WaitForPipelineCountsAsync(
+            connectionFactory,
+            new PipelineCounts(1, 1, 1, 1));
+        await runner.StopAsync().WaitAsync(PipelineWaitTimeout);
+
+        Assert.True(nativeEvidence.FingerprintCallCount >= 1);
+        Assert.Equal(1, nativeEvidence.ExtractionCallCount);
+        Assert.Equal(1, nativeEvidence.FrameReadCallCount);
+        Assert.Equal(2, transport.Requests.Count);
+        Assert.Equal("synthetic-frame", transport.Requests[0].FrameId);
+        Assert.Equal(EvidenceFrameId, transport.Requests[1].FrameId);
+        Assert.Equal(
+            new PipelineCounts(1, 1, 1, 1),
+            await ReadPipelineCountsAsync(connectionFactory));
+
+        var timeline = new TimelineQueryService(
+            new SqliteTimelineRepository(connectionFactory));
+        var generated = Assert.Single(await timeline.GetForDayAsync(
+            DateOnly.FromDateTime(ChunkStart.DateTime)));
+        Assert.Equal(TimelineEntryOrigin.Analyzed, generated.Origin);
+        Assert.Equal(ChunkId, generated.Evidence?.CaptureChunkId);
+
+        var fingerprintCallCountAfterAnalysis = nativeEvidence.FingerprintCallCount;
+        var repeatedRun = await supervisor.RunOnceAsync();
+
+        Assert.Equal(
+            new CaptureAnalysisIngestionResult(1, 0, 0, AnalysisReady: true),
+            repeatedRun.Ingestion);
+        Assert.Equal(0, repeatedRun.ProcessedJobCount);
+        Assert.Equal(
+            fingerprintCallCountAfterAnalysis + 1,
+            nativeEvidence.FingerprintCallCount);
+        Assert.Equal(1, nativeEvidence.ExtractionCallCount);
+        Assert.Equal(1, nativeEvidence.FrameReadCallCount);
+        Assert.Equal(2, transport.Requests.Count);
+        Assert.Equal(
+            new PipelineCounts(1, 1, 1, 1),
+            await ReadPipelineCountsAsync(connectionFactory));
+        Assert.Equal(
+            generated.Id,
+            Assert.Single(await timeline.GetForDayAsync(
+                DateOnly.FromDateTime(ChunkStart.DateTime))).Id);
+    }
+
+    [Theory]
+    [InlineData(ForegroundDisplayCaptureScope)]
+    [InlineData(ContinuousDisplayCaptureScope)]
+    public async Task ProviderRevisionChangeDoesNotReanalyzeCompletedChunkOrReplaceEditedTimeline(
+        string captureScope)
+    {
+        using var workspace = new TemporaryWorkspace();
+        workspace.CreateCommittedChunk(
+            ChunkId,
+            ChunkStart,
+            ChunkStart.AddMinutes(1),
+            captureScope);
 
         var timeProvider = new FixedTimeProvider(Now);
         var connectionFactory = new SqliteConnectionFactory(workspace.DatabasePath);
@@ -367,6 +518,29 @@ public sealed class AnalysisPipelineEndToEndTests
             reader.GetInt32(3));
     }
 
+    private static async Task WaitForPipelineCountsAsync(
+        SqliteConnectionFactory connectionFactory,
+        PipelineCounts expected)
+    {
+        var startedAt = Stopwatch.GetTimestamp();
+        while (true)
+        {
+            var actual = await ReadPipelineCountsAsync(connectionFactory);
+            if (actual == expected)
+            {
+                return;
+            }
+
+            if (Stopwatch.GetElapsedTime(startedAt) >= PipelineWaitTimeout)
+            {
+                Assert.Equal(expected, actual);
+                return;
+            }
+
+            await Task.Delay(TimeSpan.FromMilliseconds(20));
+        }
+    }
+
     private sealed class FakeNativeEvidenceApi(string evidenceRoot)
         : INativeCaptureChunkFingerprintApi, INativeAnalysisEvidenceApi
     {
@@ -669,7 +843,8 @@ public sealed class AnalysisPipelineEndToEndTests
         public void CreateCommittedChunk(
             string chunkId,
             DateTimeOffset start,
-            DateTimeOffset end)
+            DateTimeOffset end,
+            string captureScope = ForegroundDisplayCaptureScope)
         {
             var chunkDirectory = Path.Combine(EvidenceRoot, "chunks", chunkId);
             Directory.CreateDirectory(chunkDirectory);
@@ -681,7 +856,7 @@ public sealed class AnalysisPipelineEndToEndTests
                 $$"""
                 {
                   "schemaVersion": 1,
-                  "captureScope": "authorized-foreground-display",
+                  "captureScope": "{{captureScope}}",
                   "chunkId": "{{chunkId}}",
                   "startTimeUnixMs": {{start.ToUnixTimeMilliseconds()}},
                   "endTimeUnixMs": {{end.ToUnixTimeMilliseconds()}},

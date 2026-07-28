@@ -16,6 +16,38 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+function Enter-DevPackageBuildLock {
+    [CmdletBinding()]
+    [OutputType([System.IO.FileStream])]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path,
+
+        [Parameter(Mandatory)]
+        [TimeSpan]$Timeout
+    )
+
+    $deadline = [DateTimeOffset]::UtcNow.Add($Timeout)
+    while ($true) {
+        try {
+            return [System.IO.File]::Open(
+                $Path,
+                [System.IO.FileMode]::OpenOrCreate,
+                [System.IO.FileAccess]::ReadWrite,
+                [System.IO.FileShare]::None)
+        }
+        catch [System.IO.IOException] {
+            if ([DateTimeOffset]::UtcNow -ge $deadline) {
+                throw [TimeoutException]::new(
+                    "Timed out waiting for another development package build: $Path",
+                    $_.Exception)
+            }
+
+            Start-Sleep -Milliseconds 250
+        }
+    }
+}
+
 $repositoryRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 $projectDirectory = Join-Path $repositoryRoot 'src\WinDayFlow.App'
 $projectPath = Join-Path $projectDirectory 'WinDayFlow.App.csproj'
@@ -85,23 +117,42 @@ $distributionRelativeFiles = @($distributionSourceFiles | ForEach-Object {
     [System.IO.Path]::GetRelativePath($repositoryRoot, $_.FullName)
 })
 
+$managedBuildArguments = @(
+    'build'
+    $projectPath
+    '--configuration', $Configuration
+    '--runtime', $RuntimeIdentifier
+    '--self-contained', 'true'
+    '--no-incremental'
+    '--property', "Platform=$platform"
+    '--property', "EnableDevLiveCapture=$($EnableDevLiveCapture.IsPresent.ToString().ToLowerInvariant())"
+    '--property', 'DevBundleBuild=true'
+)
 $publishArguments = @(
     'publish'
     $projectPath
     '--configuration', $Configuration
     '--runtime', $RuntimeIdentifier
     '--self-contained', 'true'
+    '--no-build'
     '--property', "Platform=$platform"
     '--property', "EnableDevLiveCapture=$($EnableDevLiveCapture.IsPresent.ToString().ToLowerInvariant())"
     '--property', 'DevBundleBuild=true'
     '--output', $stagingPath
 )
 if ($NoRestore) {
+    $managedBuildArguments += '--no-restore'
     $publishArguments += '--no-restore'
 }
 
+$buildLockStream = $null
 try {
     New-Item -ItemType Directory -Path $outputRootPath -Force | Out-Null
+    $buildLockDirectory = Join-Path $repositoryRoot 'artifacts'
+    New-Item -ItemType Directory -Path $buildLockDirectory -Force | Out-Null
+    $buildLockStream = Enter-DevPackageBuildLock `
+        -Path (Join-Path $buildLockDirectory '.Build-DevPackage.lock') `
+        -Timeout ([TimeSpan]::FromMinutes(10))
 
     Write-Warning (
         'DEVELOPMENT/TEST USE ONLY: the current WinUI Engineering Preview terms ' +
@@ -124,6 +175,14 @@ try {
 
     if (Test-Path -LiteralPath $stagingPath) {
         Remove-Item -LiteralPath $stagingPath -Recurse -Force
+    }
+
+    # Package and ordinary test builds share bin/obj paths. The lock serializes
+    # packagers; this rebuild replaces conditional outputs left by earlier tests.
+    # Direct dotnet build/test commands must still run separately from packaging.
+    & $dotnetPath @managedBuildArguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "dotnet build failed with exit code $LASTEXITCODE."
     }
 
     & $dotnetPath @publishArguments
@@ -260,5 +319,8 @@ finally {
     }
     if (Test-Path -LiteralPath $temporaryZipPath) {
         Remove-Item -LiteralPath $temporaryZipPath -Force
+    }
+    if ($null -ne $buildLockStream) {
+        $buildLockStream.Dispose()
     }
 }

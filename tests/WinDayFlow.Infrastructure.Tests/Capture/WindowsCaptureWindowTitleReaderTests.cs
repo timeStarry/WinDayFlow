@@ -45,18 +45,31 @@ public sealed class WindowsCaptureWindowTitleReaderTests
     {
         var nativeApi = new ControlledWindowTextBufferApi(
             WindowsCaptureWindowTextBufferReadResult.Present(5),
-            "title");
+            "title",
+            initiallyReleased: true);
         using var reader = new FailStopWindowsCaptureWindowTitleReader(nativeApi);
 
-        var stopwatch = Stopwatch.StartNew();
-        var readTask = Task.Run(() => Read(reader));
-        Assert.True(nativeApi.Entered.Wait(TimeSpan.FromSeconds(2)));
-        var result = await readTask.WaitAsync(TimeSpan.FromSeconds(2));
-        stopwatch.Stop();
+        Assert.Equal(WindowsCaptureObservationReadState.Present, Read(reader).State);
+        nativeApi.Entered.Reset();
+        nativeApi.Release.Reset();
 
-        Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(1));
-        Assert.Equal(WindowsCaptureObservationReadState.Unknown, result.State);
-        Assert.Empty(result.Value);
+        var readTask = Task.Factory.StartNew(
+            () =>
+            {
+                var stopwatch = Stopwatch.StartNew();
+                var result = Read(reader);
+                stopwatch.Stop();
+                return (Result: result, Elapsed: stopwatch.Elapsed);
+            },
+            CancellationToken.None,
+            TaskCreationOptions.LongRunning,
+            TaskScheduler.Default);
+        Assert.True(nativeApi.Entered.Wait(TimeSpan.FromSeconds(2)));
+        var measured = await readTask.WaitAsync(TimeSpan.FromSeconds(2));
+
+        Assert.True(measured.Elapsed < TimeSpan.FromSeconds(1));
+        Assert.Equal(WindowsCaptureObservationReadState.Unknown, measured.Result.State);
+        Assert.Empty(measured.Result.Value);
         Assert.Equal(WindowsCaptureWindowTitleWorkerState.Poisoned, reader.State);
 
         nativeApi.Release.Set();
@@ -157,6 +170,46 @@ public sealed class WindowsCaptureWindowTitleReaderTests
         Assert.False(expiredCompletion.IsCompleted);
         Assert.True(nativeApi.IsBufferClear);
         Assert.Equal(0, Volatile.Read(ref builtValueCount));
+    }
+
+    [Fact]
+    public async Task PoisonedReaderRestartsOnlyAfterTheExpiredWorkerQuiesces()
+    {
+        var nativeApi = new ControlledWindowTextBufferApi(
+            WindowsCaptureWindowTextBufferReadResult.Present(5),
+            "title");
+        var deadline = new ManualWindowTitleDeadline();
+        using var reader = new FailStopWindowsCaptureWindowTitleReader(
+            nativeApi,
+            deadline);
+
+        var readTask = Task.Run(() => Read(reader));
+        Assert.True(nativeApi.Entered.Wait(TimeSpan.FromSeconds(2)));
+        deadline.ExpireLatest();
+
+        var expired = await readTask.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.Equal(WindowsCaptureObservationReadState.Unknown, expired.State);
+        Assert.Equal(WindowsCaptureWindowTitleWorkerState.Poisoned, reader.State);
+
+        var stillBlocked = Read(reader);
+        Assert.Equal(
+            WindowsCaptureObservationReadState.Unknown,
+            stillBlocked.State);
+        Assert.Equal(1, nativeApi.CallCount);
+
+        nativeApi.Release.Set();
+        Assert.True(SpinWait.SpinUntil(
+            () => !reader.IsWorkerAlive,
+            TimeSpan.FromSeconds(2)));
+
+        var recovered = Read(reader);
+        Assert.Equal(
+            WindowsCaptureObservationReadState.Present,
+            recovered.State);
+        Assert.Equal("title", recovered.Value);
+        Assert.Equal(2, nativeApi.CallCount);
+        Assert.Equal(WindowsCaptureWindowTitleWorkerState.Idle, reader.State);
+        Assert.True(nativeApi.IsBufferClear);
     }
 
     [Fact]
@@ -485,6 +538,21 @@ public sealed class WindowsCaptureWindowTitleReaderTests
             () => !titleReader.IsWorkerAlive,
             TimeSpan.FromSeconds(2)));
         Assert.True(windowTextApi.IsBufferClear);
+
+        verifier.InvalidateObservation();
+        var recovered = verifier.Verify();
+
+        Assert.Equal(
+            NativeCaptureTargetIdentityState.Present,
+            recovered.Target.State);
+        Assert.Equal(
+            NativeCaptureObservationState.Present,
+            recovered.CaptureIdentity.WindowTitleObservation.State);
+        Assert.Equal("late-secret", recovered.CaptureIdentity.WindowTitle);
+        Assert.Equal(2, targetApi.Process.DisposeCount);
+        Assert.Equal(3, windowTextApi.CallCount);
+        Assert.Equal(4, deadline.CreatedDeadlineCount);
+        Assert.Equal(3, deadline.WaitCount);
     }
 
     private static WindowTitleReadResult Read(

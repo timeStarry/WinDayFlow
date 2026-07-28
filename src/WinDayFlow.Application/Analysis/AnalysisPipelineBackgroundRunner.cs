@@ -28,7 +28,9 @@ public sealed record AnalysisPipelineBackgroundRunnerOptions
         new(TimeSpan.FromMinutes(1));
 }
 
-public sealed class AnalysisPipelineBackgroundRunner : IAsyncDisposable
+public sealed class AnalysisPipelineBackgroundRunner :
+    IAnalysisPipelineScheduler,
+    IAsyncDisposable
 {
     private readonly object _sync = new();
     private readonly Func<CancellationToken, Task<AnalysisPipelineRunSummary>>
@@ -38,9 +40,11 @@ public sealed class AnalysisPipelineBackgroundRunner : IAsyncDisposable
     private readonly AiProviderConfigurationService _providerConfiguration;
     private readonly AnalysisPipelineBackgroundRunnerOptions _options;
     private readonly Func<TimeSpan, CancellationToken, Task> _delayAsync;
+    private readonly AnalysisPipelineStatusSource _statusSource;
     private readonly SemaphoreSlim _wakeSignal = new(0, 1);
     private CancellationTokenSource? _lifetimeCancellation;
     private Task? _completion;
+    private int _stoppedStatusPublished;
     private RunnerState _state;
 
     public AnalysisPipelineBackgroundRunner(
@@ -49,14 +53,16 @@ public sealed class AnalysisPipelineBackgroundRunner : IAsyncDisposable
         AppSettingsService settings,
         AiProviderConfigurationService providerConfiguration,
         AnalysisPipelineBackgroundRunnerOptions? options = null,
-        TimeProvider? timeProvider = null)
+        TimeProvider? timeProvider = null,
+        AnalysisPipelineStatusSource? statusSource = null)
         : this(
             CreateRunOnceDelegate(supervisor),
             chunkCommitNotifier,
             settings,
             providerConfiguration,
             options,
-            CreateDelayDelegate(timeProvider))
+            CreateDelayDelegate(timeProvider),
+            statusSource ?? new AnalysisPipelineStatusSource(timeProvider))
     {
     }
 
@@ -66,7 +72,8 @@ public sealed class AnalysisPipelineBackgroundRunner : IAsyncDisposable
         AppSettingsService settings,
         AiProviderConfigurationService providerConfiguration,
         AnalysisPipelineBackgroundRunnerOptions? options,
-        Func<TimeSpan, CancellationToken, Task> delayAsync)
+        Func<TimeSpan, CancellationToken, Task> delayAsync,
+        AnalysisPipelineStatusSource statusSource)
     {
         _runOnceAsync = runOnceAsync
             ?? throw new ArgumentNullException(nameof(runOnceAsync));
@@ -77,6 +84,8 @@ public sealed class AnalysisPipelineBackgroundRunner : IAsyncDisposable
             ?? throw new ArgumentNullException(nameof(providerConfiguration));
         _options = options ?? AnalysisPipelineBackgroundRunnerOptions.Default;
         _delayAsync = delayAsync ?? throw new ArgumentNullException(nameof(delayAsync));
+        _statusSource = statusSource
+            ?? throw new ArgumentNullException(nameof(statusSource));
     }
 
     public Task StartAsync(CancellationToken cancellationToken = default)
@@ -120,6 +129,7 @@ public sealed class AnalysisPipelineBackgroundRunner : IAsyncDisposable
         cancellationToken.ThrowIfCancellationRequested();
         CancellationTokenSource? lifetimeCancellation = null;
         Task? completion;
+        var stoppedWithoutStarting = false;
 
         lock (_sync)
         {
@@ -127,10 +137,9 @@ public sealed class AnalysisPipelineBackgroundRunner : IAsyncDisposable
             if (_state == RunnerState.Created)
             {
                 _state = RunnerState.Stopped;
-                return;
+                stoppedWithoutStarting = true;
             }
-
-            if (_state == RunnerState.Running)
+            else if (_state == RunnerState.Running)
             {
                 _state = RunnerState.Stopping;
                 UnsubscribeEvents();
@@ -138,6 +147,12 @@ public sealed class AnalysisPipelineBackgroundRunner : IAsyncDisposable
             }
 
             completion = _completion;
+        }
+
+        if (stoppedWithoutStarting)
+        {
+            PublishStoppedOnce();
+            return;
         }
 
         lifetimeCancellation?.Cancel();
@@ -181,10 +196,17 @@ public sealed class AnalysisPipelineBackgroundRunner : IAsyncDisposable
         }
         finally
         {
+            if (completion is null)
+            {
+                PublishStoppedOnce();
+            }
+
             lifetimeCancellation?.Dispose();
             _wakeSignal.Dispose();
         }
     }
+
+    public void RequestRun() => SignalWake();
 
     private async Task RunLoopAsync(CancellationToken cancellationToken)
     {
@@ -214,6 +236,7 @@ public sealed class AnalysisPipelineBackgroundRunner : IAsyncDisposable
 
             try
             {
+                _statusSource.PublishRunning();
                 var summary = await _runOnceAsync(cancellationToken)
                     .ConfigureAwait(false);
                 if (summary is null)
@@ -222,6 +245,7 @@ public sealed class AnalysisPipelineBackgroundRunner : IAsyncDisposable
                         "The analysis pipeline supervisor returned no run summary.");
                 }
 
+                _statusSource.PublishIdle(summary);
                 runImmediately = summary.MoreWorkPossible;
             }
             catch (OperationCanceledException)
@@ -233,6 +257,8 @@ public sealed class AnalysisPipelineBackgroundRunner : IAsyncDisposable
             {
                 Debug.WriteLine(
                     $"The analysis pipeline background run failed and will be retried after the next wake: {exception.GetType().Name}");
+                _statusSource.PublishFaulted(
+                    AnalysisPipelineFaultCode.PipelineRunFailed);
                 runImmediately = false;
             }
         }
@@ -259,6 +285,8 @@ public sealed class AnalysisPipelineBackgroundRunner : IAsyncDisposable
             {
                 Debug.WriteLine(
                     $"The analysis pipeline periodic wake failed and will be retried: {exception.GetType().Name}");
+                _statusSource.PublishFaulted(
+                    AnalysisPipelineFaultCode.SchedulerFailed);
                 await Task.Yield();
                 continue;
             }
@@ -282,6 +310,8 @@ public sealed class AnalysisPipelineBackgroundRunner : IAsyncDisposable
                     _state = RunnerState.Stopped;
                 }
             }
+
+            PublishStoppedOnce();
         }
     }
 
@@ -348,6 +378,14 @@ public sealed class AnalysisPipelineBackgroundRunner : IAsyncDisposable
         }
         catch (ObjectDisposedException)
         {
+        }
+    }
+
+    private void PublishStoppedOnce()
+    {
+        if (Interlocked.Exchange(ref _stoppedStatusPublished, 1) == 0)
+        {
+            _statusSource.PublishStopped();
         }
     }
 

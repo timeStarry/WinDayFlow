@@ -14,6 +14,11 @@
 
 namespace windayflow::capture {
 
+enum class CaptureAuthorizationScope {
+  kForegroundTarget,
+  kDisplayWide,
+};
+
 struct CaptureTargetIdentity {
   uint64_t window_handle = 0;
   uint32_t process_id = 0;
@@ -21,6 +26,8 @@ struct CaptureTargetIdentity {
   uint64_t target_epoch = 0;
   uint64_t display_monitor_handle = 0;
   std::wstring display_device_key;
+  CaptureAuthorizationScope scope =
+      CaptureAuthorizationScope::kForegroundTarget;
 
   bool operator==(const CaptureTargetIdentity& other) const;
 };

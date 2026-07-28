@@ -903,6 +903,204 @@ public sealed class SqliteCaptureAnalysisStore : ICaptureChunkStore, IAnalysisJo
         return updated;
     }
 
+    public async Task<AnalysisJobRetryResult> TryRetryAsync(
+        Guid jobId,
+        DateTimeOffset requestedAtUtc,
+        CancellationToken cancellationToken = default)
+    {
+        ValidateJobId(jobId);
+        var requestedAt = requestedAtUtc.ToUniversalTime();
+        cancellationToken.ThrowIfCancellationRequested();
+
+        await using var connection = await _connectionFactory
+            .OpenConnectionAsync(cancellationToken)
+            .ConfigureAwait(false);
+        await using var transaction = connection.BeginTransaction(deferred: false);
+        var current = await ReadAnalysisJobByIdAsync(
+                connection,
+                transaction,
+                jobId,
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (current is null)
+        {
+            return await CompleteRetryAsync(
+                    transaction,
+                    AnalysisJobRetryOutcome.NotFound,
+                    job: null,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        if (current.State is not AnalysisJobState.FailedTerminal
+            and not AnalysisJobState.FailedRetryable)
+        {
+            return await CompleteRetryAsync(
+                    transaction,
+                    AnalysisJobRetryOutcome.StateNotRetryable,
+                    current,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        Guid latestJobId;
+        CaptureChunkAvailability availability;
+        bool hasCompletedAnalysis;
+        await using (var command = connection.CreateCommand())
+        {
+            command.Transaction = transaction;
+            command.CommandText = """
+                SELECT
+                    chunks.availability,
+                    EXISTS (
+                        SELECT 1
+                        FROM analysis_jobs AS completed
+                        WHERE completed.capture_chunk_id = chunks.id
+                            AND completed.state = $completed_state),
+                    (
+                        SELECT latest.id
+                        FROM analysis_jobs AS latest
+                        WHERE latest.capture_chunk_id = chunks.id
+                        ORDER BY
+                            latest.created_at_utc_ticks DESC,
+                            latest.provider_profile_revision DESC,
+                            latest.id DESC
+                        LIMIT 1)
+                FROM capture_chunks AS chunks
+                WHERE chunks.id = $capture_chunk_id;
+                """;
+            command.Parameters.AddWithValue(
+                "$completed_state",
+                (int)AnalysisJobState.Completed);
+            command.Parameters.AddWithValue("$capture_chunk_id", current.CaptureChunkId);
+            await using var reader = await command
+                .ExecuteReaderAsync(cancellationToken)
+                .ConfigureAwait(false);
+            if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false)
+                || reader.IsDBNull(2))
+            {
+                throw new InvalidDataException(
+                    "The analysis job refers to missing retry context.");
+            }
+
+            availability = (CaptureChunkAvailability)reader.GetInt32(0);
+            hasCompletedAnalysis = reader.GetInt32(1) != 0;
+            latestJobId = Guid.Parse(reader.GetString(2));
+        }
+
+        if (latestJobId != current.Id)
+        {
+            return await CompleteRetryAsync(
+                    transaction,
+                    AnalysisJobRetryOutcome.StaleJob,
+                    current,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        if (availability != CaptureChunkAvailability.Available)
+        {
+            return await CompleteRetryAsync(
+                    transaction,
+                    AnalysisJobRetryOutcome.EvidenceUnavailable,
+                    current,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        if (hasCompletedAnalysis)
+        {
+            return await CompleteRetryAsync(
+                    transaction,
+                    AnalysisJobRetryOutcome.AnalysisAlreadyCompleted,
+                    current,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        if (current.State == AnalysisJobState.FailedRetryable
+            && current.NotBeforeUtc <= requestedAt)
+        {
+            return await CompleteRetryAsync(
+                    transaction,
+                    AnalysisJobRetryOutcome.AlreadyScheduled,
+                    current,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        if (current.Attempt == 100)
+        {
+            return await CompleteRetryAsync(
+                    transaction,
+                    AnalysisJobRetryOutcome.AttemptLimitReached,
+                    current,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        if (requestedAt < current.UpdatedAtUtc)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(requestedAtUtc),
+                "The retry request cannot predate the latest job update.");
+        }
+
+        await using (var command = connection.CreateCommand())
+        {
+            command.Transaction = transaction;
+            command.CommandText = """
+                UPDATE analysis_jobs
+                SET state = $retryable_state,
+                    max_attempts = CASE
+                        WHEN attempt >= max_attempts THEN attempt + 1
+                        ELSE max_attempts
+                    END,
+                    not_before_utc_ticks = $requested_at_utc_ticks,
+                    lease_owner = NULL,
+                    lease_token = NULL,
+                    lease_expires_at_utc_ticks = NULL,
+                    updated_at_utc_ticks = $requested_at_utc_ticks,
+                    completed_at_utc_ticks = NULL
+                WHERE id = $id
+                    AND state IN ($retryable_state, $terminal_state);
+                """;
+            command.Parameters.AddWithValue(
+                "$retryable_state",
+                (int)AnalysisJobState.FailedRetryable);
+            command.Parameters.AddWithValue(
+                "$terminal_state",
+                (int)AnalysisJobState.FailedTerminal);
+            command.Parameters.AddWithValue(
+                "$requested_at_utc_ticks",
+                ToUtcTicks(requestedAt));
+            command.Parameters.AddWithValue("$id", FormatId(current.Id));
+            var affectedRows = await command
+                .ExecuteNonQueryAsync(cancellationToken)
+                .ConfigureAwait(false);
+            if (affectedRows != 1)
+            {
+                throw new InvalidDataException(
+                    "The retry transaction did not update exactly one analysis job.");
+            }
+        }
+
+        var updated = await ReadAnalysisJobByIdAsync(
+                connection,
+                transaction,
+                current.Id,
+                cancellationToken)
+            .ConfigureAwait(false)
+            ?? throw new InvalidDataException(
+                "The retried analysis job could not be read back.");
+        return await CompleteRetryAsync(
+                transaction,
+                AnalysisJobRetryOutcome.Scheduled,
+                updated,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
     public async Task<int> RecoverExpiredLeasesAsync(
         DateTimeOffset recoveredAtUtc,
         TimeSpan retryDelay,
@@ -958,6 +1156,16 @@ public sealed class SqliteCaptureAnalysisStore : ICaptureChunkStore, IAnalysisJo
             .ConfigureAwait(false);
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
         return affectedRows;
+    }
+
+    private static async Task<AnalysisJobRetryResult> CompleteRetryAsync(
+        SqliteTransaction transaction,
+        AnalysisJobRetryOutcome outcome,
+        AnalysisJob? job,
+        CancellationToken cancellationToken)
+    {
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        return new AnalysisJobRetryResult(outcome, job);
     }
 
     private static async Task<CaptureChunk?> ReadCaptureChunkByIdAsync(

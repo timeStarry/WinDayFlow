@@ -37,14 +37,19 @@ or Win32 filesystem calls individually. The production adapter composes:
 
 - `ObserveWindowsCaptureTarget`;
 - `DxgiDesktopFrameSource`;
+- `WindowsGraphicsCaptureFrameSource`, selected only when Desktop Duplication
+  explicitly returns `E_ACCESSDENIED`;
 - `ScaleBgraFrameWithWic`;
 - `MfH264ChunkWriter`; and
 - `AtomicChunkStore` through a compensation-owning publication adapter.
 
-The adapter creates one COM apartment on the worker thread before WIC or Media
-Foundation use. It resets the writer, DXGI source, and WIC factory on that same
+The adapter creates one COM apartment on the worker thread before capture, WIC,
+or Media Foundation use. It resets the writer, DXGI/WGC sources, and WIC factory on that same
 thread before balancing `CoUninitialize`. Device/copy failures are fatal;
-topology, output-loss, and access-loss results request a bounded rebuild. A
+topology, output-loss, and true access-loss results request a bounded rebuild.
+WGC `E_ACCESSDENIED` is terminal rather than rebuildable. Rebuilds share one
+four-retry exponential-backoff budget across initialization and acquisition;
+only a successfully encoded authorized frame clears that budget. A
 rebuild finalizes an authorized partial chunk before releasing the old topology,
 so frames from two bindings cannot silently share one MP4.
 
@@ -77,6 +82,28 @@ transition even when Pause and Resume are both issued before the worker observes
 the current boolean state. Resume still transfers a fresh token by value.
 Authorization changes wake the mailbox so the worker cannot remain asleep for
 the maximum capture interval after callback-time closure.
+
+Successful acquisition initialization proves only that the authorized display
+topology was bound; it is not evidence that the worker can produce a frame. The
+worker therefore withholds the per-token `Ready` checkpoint until the first
+frame has completed Acquire, Transform, Begin, and Encode, including every
+stage's authority post-check. An acquisition timeout before that point leaves
+the controller in Starting or Resuming so it can retry, while a fatal first-
+frame failure exits the worker and follows the controller's Faulted path. Pause
+clears readiness, and each Resume token must complete its own first frame before
+publishing exactly one new `Ready` checkpoint. A topology rebuild for an
+already-ready token does not publish a duplicate checkpoint.
+
+### Chunk Boundary Ownership
+
+The schedule poll decides when to attempt acquisition, but the monotonic time
+captured after Transform decides which chunk owns the resulting frame. The
+first frame starts the chunk clock. If a later transformed frame reaches the
+configured chunk duration, the worker finalizes and commits the old chunk before
+opening a writer for that still-owned frame. The boundary frame therefore
+becomes the next chunk's first frame; it is neither dropped nor appended with a
+full extra duration to the old chunk. With the current 10-second/60-second QA
+policy this yields six frames and 60 seconds in the first complete chunk.
 
 ### Artifact and Event Transaction
 
@@ -141,9 +168,8 @@ gates.
 
 ## Verification
 
-The fourteenth native CTest executable, `capture_worker_tests`, uses a scripted
-in-memory backend and real safety core, runtime mailbox, and event queue. It
-proves:
+The native `capture_worker_tests` CTest executable uses a scripted in-memory
+backend and real safety core, runtime mailbox, and event queue. It proves:
 
 - graceful Stop partial publication and privacy-safe manifest binding;
 - Pause finalization, fresh-generation Resume, immediate Pause/Resume
@@ -155,7 +181,13 @@ proves:
 - transient rollback retry, retained permanent compensation, and explicit
   recovery;
 - prompt authorization wake from a maximum-interval wait; and
-- bounded topology rebuild before capture resumes.
+- finite, interruptible topology rebuild before capture resumes, including
+  deterministic budget exhaustion;
+- transformed boundary-frame rollover without a dropped frame or 70-second
+  first chunk;
+- no Ready checkpoint on acquisition timeout or first-frame failure; and
+- exactly one Ready after the first authorized encoded frame for Start and for
+  each fresh Resume token.
 
 The event-queue tests independently cover invalidation before the final
 validator load and invalidation after that load, making the intended

@@ -18,7 +18,10 @@ public sealed class CaptureManifestScanner : ICaptureManifestScanner
     private const uint FileShareRead = 0x00000001;
     private const uint FileShareWrite = 0x00000002;
     private const uint FileShareDelete = 0x00000004;
-    private const string ExpectedCaptureScope = "authorized-foreground-display";
+    internal const string ForegroundDisplayCaptureScope =
+        "authorized-foreground-display";
+    internal const string ContinuousDisplayCaptureScope =
+        "authorized-display-continuous";
     private const string ExpectedVideoPath = "capture.mp4";
     private const string ExpectedVideoCodec = "h264";
     private const string ExpectedVideoContainer = "mp4";
@@ -326,7 +329,7 @@ public sealed class CaptureManifestScanner : ICaptureManifestScanner
                 "video")
             || !TryReadCanonicalUInt32(root, "schemaVersion", out var schemaVersion)
             || schemaVersion != 1
-            || !TryReadExactString(root, "captureScope", ExpectedCaptureScope)
+            || !TryReadSupportedCaptureScope(root)
             || !TryReadString(root, "chunkId", out var chunkId)
             || !string.Equals(chunkId, expectedChunkId, StringComparison.Ordinal)
             || !TryReadCanonicalInt64(root, "startTimeUnixMs", out var startUnixMs)
@@ -451,6 +454,11 @@ public sealed class CaptureManifestScanner : ICaptureManifestScanner
         string expected) =>
         TryReadString(parent, propertyName, out var actual)
         && string.Equals(actual, expected, StringComparison.Ordinal);
+
+    private static bool TryReadSupportedCaptureScope(JsonElement parent) =>
+        TryReadString(parent, "captureScope", out var scope)
+        && scope is ForegroundDisplayCaptureScope
+            or ContinuousDisplayCaptureScope;
 
     private static bool TryReadCanonicalInt64(
         JsonElement parent,

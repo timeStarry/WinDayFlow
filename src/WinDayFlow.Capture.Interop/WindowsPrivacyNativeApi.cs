@@ -10,8 +10,8 @@ internal sealed class PInvokeWindowsPrivacyNativeApi : IWindowsPrivacyNativeApi
     private const int SmRemoteSession = 0x1000;
     private const int SmRemoteControl = 0x2001;
     private const int WtsInfoExLevelOne = 1;
-    private const int WtsSessionStateLock = 0;
-    private const int WtsSessionStateUnlock = 1;
+    internal const int WtsSessionStateLock = 0;
+    internal const int WtsSessionStateUnlock = 1;
 
     private static readonly int WtsSessionStateOffset = checked(
         (int)Marshal.OffsetOf<WtsInfoExPrefix>(nameof(WtsInfoExPrefix.Data))
@@ -67,16 +67,58 @@ internal sealed class PInvokeWindowsPrivacyNativeApi : IWindowsPrivacyNativeApi
 
             var rawState = Marshal.ReadInt32(buffer, WtsSessionStateOffset);
             var rawFlags = Marshal.ReadInt32(buffer, WtsSessionFlagsOffset);
-            if (!Enum.IsDefined((WtsConnectState)rawState)
-                || rawFlags is not WtsSessionStateLock and not WtsSessionStateUnlock)
+            var state = (WtsConnectState)rawState;
+            var inputDesktopRead = true;
+            var inputDesktopClear = false;
+            if (state == WtsConnectState.Active
+                && rawFlags == WtsSessionStateLock)
             {
-                return false;
+                inputDesktopRead = TryGetSecureDesktopClear(
+                    out inputDesktopClear);
             }
 
-            unlocked = rawFlags == WtsSessionStateUnlock
-                && rawState == (int)WtsConnectState.Active;
+            return TryResolveSessionUnlocked(
+                state,
+                rawFlags,
+                inputDesktopRead,
+                inputDesktopClear,
+                out unlocked);
+        }
+    }
+
+    internal static bool TryResolveSessionUnlocked(
+        WtsConnectState state,
+        int sessionFlags,
+        bool inputDesktopRead,
+        bool inputDesktopClear,
+        out bool unlocked)
+    {
+        unlocked = false;
+        if (!Enum.IsDefined(state)
+            || sessionFlags is not WtsSessionStateLock
+                and not WtsSessionStateUnlock)
+        {
+            return false;
+        }
+
+        if (state != WtsConnectState.Active)
+        {
             return true;
         }
+
+        if (sessionFlags == WtsSessionStateUnlock)
+        {
+            unlocked = true;
+            return true;
+        }
+
+        if (!inputDesktopRead)
+        {
+            return false;
+        }
+
+        unlocked = inputDesktopClear;
+        return true;
     }
 
     public bool TryGetSecureDesktopClear(out bool clear)

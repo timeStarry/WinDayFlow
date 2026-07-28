@@ -148,6 +148,8 @@ DxgiDesktopFrameResult MapDesktopDuplicationFailure(HRESULT result) noexcept {
     return DxgiDesktopFrameResult::kOk;
   }
   switch (result) {
+    case E_ACCESSDENIED:
+      return DxgiDesktopFrameResult::kAccessDenied;
     case DXGI_ERROR_WAIT_TIMEOUT:
       return DxgiDesktopFrameResult::kTimeout;
     case DXGI_ERROR_ACCESS_LOST:

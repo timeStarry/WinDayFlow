@@ -9,6 +9,12 @@ public enum NativeCaptureTargetIdentityState
     Present = 2,
 }
 
+public enum NativeCaptureAuthorizationScope
+{
+    ForegroundTarget = 0,
+    DisplayWide = 1,
+}
+
 public sealed class NativeCaptureTargetIdentity
     : IEquatable<NativeCaptureTargetIdentity>
 {
@@ -26,7 +32,8 @@ public sealed class NativeCaptureTargetIdentity
         ulong processCreationTime100ns,
         ulong targetEpoch,
         ulong displayMonitorHandle,
-        string? displayDeviceKey)
+        string? displayDeviceKey,
+        NativeCaptureAuthorizationScope scope)
     {
         State = state;
         WindowHandle = windowHandle;
@@ -35,6 +42,7 @@ public sealed class NativeCaptureTargetIdentity
         TargetEpoch = targetEpoch;
         DisplayMonitorHandle = displayMonitorHandle;
         DisplayDeviceKey = displayDeviceKey;
+        Scope = scope;
     }
 
     public static NativeCaptureTargetIdentity Unknown { get; } = new(
@@ -44,7 +52,8 @@ public sealed class NativeCaptureTargetIdentity
         0,
         0,
         0,
-        displayDeviceKey: null);
+        displayDeviceKey: null,
+        NativeCaptureAuthorizationScope.ForegroundTarget);
 
     public static NativeCaptureTargetIdentity Absent { get; } = new(
         NativeCaptureTargetIdentityState.Absent,
@@ -53,7 +62,8 @@ public sealed class NativeCaptureTargetIdentity
         0,
         0,
         0,
-        displayDeviceKey: null);
+        displayDeviceKey: null,
+        NativeCaptureAuthorizationScope.ForegroundTarget);
 
     public NativeCaptureTargetIdentityState State { get; }
 
@@ -68,6 +78,8 @@ public sealed class NativeCaptureTargetIdentity
     public ulong DisplayMonitorHandle { get; }
 
     public string? DisplayDeviceKey { get; }
+
+    public NativeCaptureAuthorizationScope Scope { get; }
 
     public static NativeCaptureTargetIdentity Present(
         ulong windowHandle,
@@ -96,7 +108,33 @@ public sealed class NativeCaptureTargetIdentity
             processCreationTime100ns,
             targetEpoch,
             displayMonitorHandle,
-            displayDeviceKey);
+            displayDeviceKey,
+            NativeCaptureAuthorizationScope.ForegroundTarget);
+    }
+
+    public static NativeCaptureTargetIdentity DisplayWide(
+        ulong targetEpoch,
+        ulong displayMonitorHandle,
+        string displayDeviceKey)
+    {
+        ArgumentOutOfRangeException.ThrowIfZero(targetEpoch);
+        ArgumentOutOfRangeException.ThrowIfZero(displayMonitorHandle);
+        if (!IsValidDisplayDeviceKey(displayDeviceKey))
+        {
+            throw new ArgumentException(
+                "A display device key must have valid bounded UTF-8 content and cannot contain control characters.",
+                nameof(displayDeviceKey));
+        }
+
+        return new NativeCaptureTargetIdentity(
+            NativeCaptureTargetIdentityState.Present,
+            0,
+            0,
+            0,
+            targetEpoch,
+            displayMonitorHandle,
+            displayDeviceKey,
+            NativeCaptureAuthorizationScope.DisplayWide);
     }
 
     public bool Equals(NativeCaptureTargetIdentity? other)
@@ -109,6 +147,7 @@ public sealed class NativeCaptureTargetIdentity
                 && ProcessCreationTime100ns == other.ProcessCreationTime100ns
                 && TargetEpoch == other.TargetEpoch
                 && DisplayMonitorHandle == other.DisplayMonitorHandle
+                && Scope == other.Scope
                 && string.Equals(
                     DisplayDeviceKey,
                     other.DisplayDeviceKey,
@@ -127,6 +166,7 @@ public sealed class NativeCaptureTargetIdentity
             ProcessCreationTime100ns,
             TargetEpoch,
             DisplayMonitorHandle,
+            Scope,
             DisplayDeviceKey is null
                 ? 0
                 : StringComparer.OrdinalIgnoreCase.GetHashCode(DisplayDeviceKey));
@@ -134,7 +174,7 @@ public sealed class NativeCaptureTargetIdentity
 
     public override string ToString()
     {
-        return $"{nameof(NativeCaptureTargetIdentity)} {{ State = {State}, Values = [REDACTED] }}";
+        return $"{nameof(NativeCaptureTargetIdentity)} {{ State = {State}, Scope = {Scope}, Values = [REDACTED] }}";
     }
 
     internal static bool IsValidDisplayDeviceKey(string? value)

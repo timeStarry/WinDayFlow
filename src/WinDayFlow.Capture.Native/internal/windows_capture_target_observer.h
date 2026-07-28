@@ -31,7 +31,14 @@ std::optional<CaptureTargetIdentity> ObserveWindowsCaptureTargetWithApi(
     IWindowsCaptureTargetObserverApi& api,
     const CaptureTargetIdentity& expected) noexcept;
 
+std::optional<CaptureTargetIdentity> ObserveWindowsCaptureAuthorizationWithApi(
+    IWindowsCaptureTargetObserverApi& api,
+    const CaptureTargetIdentity& expected) noexcept;
+
 std::optional<CaptureTargetIdentity> ObserveWindowsCaptureTarget(
+    const CaptureTargetIdentity& expected) noexcept;
+
+std::optional<CaptureTargetIdentity> ObserveWindowsCaptureAuthorization(
     const CaptureTargetIdentity& expected) noexcept;
 
 }  // namespace windayflow::capture

@@ -63,6 +63,61 @@ public sealed class DevLiveCaptureHostedServiceTests
     }
 
     [Fact]
+    public async Task HostedShutdownJoinsAnAlreadyStartedOwnerTermination()
+    {
+        var operations = new List<string>();
+        var automaticTerminationStarted = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseAutomaticTermination = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var ownerTermination = Task.Run(async () =>
+        {
+            operations.Add("owner-auto-start");
+            automaticTerminationStarted.TrySetResult();
+            await releaseAutomaticTermination.Task;
+            operations.Add("owner-auto-complete");
+        });
+        await automaticTerminationStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        var ownerJoinStarted = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var lifetime = CreateLifetime(
+            start: _ => Task.CompletedTask,
+            disposeMonitor: () =>
+            {
+                operations.Add("monitor");
+                return ValueTask.CompletedTask;
+            },
+            disposeOwner: () =>
+            {
+                operations.Add("owner-join");
+                ownerJoinStarted.TrySetResult();
+                return new ValueTask(ownerTermination);
+            });
+
+        await lifetime.StartAsync(CancellationToken.None);
+        var shutdown = lifetime.StopAsync(CancellationToken.None);
+        await ownerJoinStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(
+            ["owner-auto-start", "monitor", "owner-join"],
+            operations);
+        Assert.False(shutdown.IsCompleted);
+        releaseAutomaticTermination.TrySetResult();
+        await shutdown;
+        await lifetime.DisposeAsync();
+
+        Assert.Equal(
+            [
+                "owner-auto-start",
+                "monitor",
+                "owner-join",
+                "owner-auto-complete",
+            ],
+            operations);
+    }
+
+    [Fact]
     public async Task StartFailureStillDisposesMonitorBeforeOwner()
     {
         var failure = new InvalidOperationException("start failed");

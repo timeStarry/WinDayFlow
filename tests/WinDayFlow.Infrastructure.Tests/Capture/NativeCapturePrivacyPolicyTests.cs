@@ -260,6 +260,78 @@ public sealed class NativeCapturePrivacyPolicyTests
     }
 
     [Fact]
+    public void AllowAllApplicationsSuspendsApplicationAndWindowExclusions()
+    {
+        var rule = CaptureExclusionRule.Create(
+            Guid.NewGuid(),
+            "Private editor",
+            enabled: true,
+            CaptureExclusionRuleScope.Window,
+            ApplicationIdentityKind.ExecutableName,
+            "editor.exe",
+            WindowTitleMatchKind.Contains,
+            "private");
+        var privacy = CreatePrivacySettings(
+                excludeSensitiveApplications: true,
+                new CaptureExclusionRuleSet([rule]))
+            .ChangeApplicationPrivacyMode(
+                CaptureApplicationPrivacyMode.AllowAllApplications);
+        var signals = CopySignals(
+            CreateAllowedSignals(),
+            applicationAllowed: NativeCapturePolicyDecision.Block,
+            windowAllowed: NativeCapturePolicyDecision.Block,
+            captureIdentity: new NativeCaptureIdentitySnapshot(
+                executableName: "editor.exe",
+                packageFamilyName: null,
+                publisherCertificateSha256: null,
+                windowTitle: "Private document"));
+
+        var context = NativeCapturePrivacyPolicy.Compose(
+            CreateEnabledSettings(privacy),
+            signals,
+            runtimePolicyRevision: 14);
+
+        Assert.Equal(NativeCapturePolicyDecision.Allow, context.ApplicationAllowed);
+        Assert.Equal(NativeCapturePolicyDecision.Allow, context.WindowAllowed);
+    }
+
+    [Fact]
+    public void AllowAllApplicationsStillBlocksLockScreenAndEnabledSystemPolicies()
+    {
+        var privacy = CapturePrivacySettings.Default.ChangeApplicationPrivacyMode(
+            CaptureApplicationPrivacyMode.AllowAllApplications);
+        var signals = CopySignals(
+            CreateAllowedSignals(),
+            applicationAllowed: NativeCapturePolicyDecision.Allow,
+            windowAllowed: NativeCapturePolicyDecision.Allow,
+            captureIdentity: new NativeCaptureIdentitySnapshot(
+                executableName: "LockApp.exe",
+                packageFamilyName: null,
+                publisherCertificateSha256: null,
+                windowTitle: null));
+        signals = new NativeCapturePrivacySignals(
+            signals.SessionUnlocked,
+            signals.SecureDesktopClear,
+            NativeCaptureConditionState.Active,
+            NativeCaptureConditionState.Active,
+            signals.ApplicationAllowed,
+            signals.WindowAllowed,
+            signals.StorageAvailable,
+            signals.CaptureIdentity);
+
+        var context = NativeCapturePrivacyPolicy.Compose(
+            CreateEnabledSettings(privacy),
+            signals,
+            runtimePolicyRevision: 15);
+
+        Assert.Equal(NativeCapturePolicyDecision.Block, context.SecureDesktopClear);
+        Assert.Equal(NativeCapturePolicyDecision.Block, context.RemoteSessionAllowed);
+        Assert.Equal(NativeCapturePolicyDecision.Block, context.PresentationAllowed);
+        Assert.Equal(NativeCapturePolicyDecision.Allow, context.ApplicationAllowed);
+        Assert.Equal(NativeCapturePolicyDecision.Allow, context.WindowAllowed);
+    }
+
+    [Fact]
     public void UserApplicationAndWindowRuleDecisionsRemainIndependentInPolicy()
     {
         var windowRuleId = Guid.NewGuid();

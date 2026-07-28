@@ -1,5 +1,6 @@
 <Page
     x:Class="WinDayFlow.App.Views.TimelinePage"
+    x:Name="TimelinePageRoot"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:controls="using:WinDayFlow.App.Controls"
@@ -391,6 +392,7 @@
                                                 <ColumnDefinition Width="104" />
                                                 <ColumnDefinition Width="*" />
                                                 <ColumnDefinition Width="Auto" />
+                                                <ColumnDefinition Width="Auto" />
                                             </Grid.ColumnDefinitions>
                                             <Grid.RowDefinitions>
                                                 <RowDefinition Height="Auto" />
@@ -427,6 +429,22 @@
                                                 Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                                                 Text="{x:Bind StateDescription}"
                                                 TextWrapping="Wrap" />
+                                            <Button
+                                                Grid.RowSpan="2"
+                                                Grid.Column="4"
+                                                Width="32"
+                                                Height="32"
+                                                Padding="6"
+                                                VerticalAlignment="Center"
+                                                AutomationProperties.Name="重试分析"
+                                                Command="{Binding ViewModel.RetryAnalysisCommand, ElementName=TimelinePageRoot}"
+                                                CommandParameter="{Binding}"
+                                                ToolTipService.ToolTip="重试分析"
+                                                Visibility="{x:Bind CanRetry}">
+                                                <FontIcon
+                                                    FontSize="14"
+                                                    Glyph="&#xE72C;" />
+                                            </Button>
                                         </Grid>
                                     </Border>
                                 </DataTemplate>

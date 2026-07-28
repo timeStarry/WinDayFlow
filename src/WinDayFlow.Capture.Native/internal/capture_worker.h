@@ -87,6 +87,7 @@ struct CaptureWorkerConfiguration {
   uint32_t maximum_height = 1'080;
   uint32_t acquire_timeout_ms = 50;
   uint32_t topology_retry_ms = 100;
+  uint32_t topology_retry_limit = 4;
   uint32_t rollback_retry_limit = 8;
   uint32_t rollback_retry_delay_ms = 10;
   uint32_t average_bitrate = 2'500'000;

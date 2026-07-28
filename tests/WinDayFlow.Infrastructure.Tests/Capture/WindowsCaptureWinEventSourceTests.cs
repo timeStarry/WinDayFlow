@@ -153,11 +153,11 @@ public sealed class WindowsCaptureWinEventSourceTests
     }
 
     [Fact]
-    public void WindowMessagesMapToValueFreeSystemChangeKinds()
+    public void WindowMessagesMapToSystemChangesWithoutAWindowTarget()
     {
         var api = new FakeWindowsCaptureWinEventNativeApi();
         using var source = new WindowsCaptureWinEventSource(api);
-        var changes = new List<WindowsCaptureWinEventChange>();
+        var changes = new List<WindowsCaptureWinEventNotification>();
         source.Start(changes.Add, _ => { });
 
         api.RaiseWindowMessageOnOwnerThread(0x007E, 0, 0);
@@ -169,12 +169,12 @@ public sealed class WindowsCaptureWinEventSourceTests
 
         Assert.Equal(
             [
-                WindowsCaptureWinEventChange.DisplayTopologyChanged,
-                WindowsCaptureWinEventChange.SessionUnavailable,
-                WindowsCaptureWinEventChange.SessionAvailable,
-                WindowsCaptureWinEventChange.SessionChanged,
-                WindowsCaptureWinEventChange.PowerSuspending,
-                WindowsCaptureWinEventChange.PowerResumed,
+                Notification(WindowsCaptureWinEventChange.DisplayTopologyChanged),
+                Notification(WindowsCaptureWinEventChange.SessionUnavailable),
+                Notification(WindowsCaptureWinEventChange.SessionAvailable),
+                Notification(WindowsCaptureWinEventChange.SessionChanged),
+                Notification(WindowsCaptureWinEventChange.PowerSuspending),
+                Notification(WindowsCaptureWinEventChange.PowerResumed),
             ],
             changes);
     }
@@ -184,7 +184,7 @@ public sealed class WindowsCaptureWinEventSourceTests
     {
         var api = new FakeWindowsCaptureWinEventNativeApi();
         using var source = new WindowsCaptureWinEventSource(api);
-        var changes = new List<WindowsCaptureWinEventChange>();
+        var changes = new List<WindowsCaptureWinEventNotification>();
         source.Start(changes.Add, _ => { });
 
         api.RaiseWindowMessageOnOwnerThread(0x05FF, 123, 456);
@@ -231,14 +231,14 @@ public sealed class WindowsCaptureWinEventSourceTests
     }
 
     [Fact]
-    public void RelevantCallbacksMapToValueFreeChangeKinds()
+    public void RelevantCallbacksPreserveTheirWindowHandle()
     {
         var api = new FakeWindowsCaptureWinEventNativeApi();
         using var source = new WindowsCaptureWinEventSource(api);
-        var changes = new List<WindowsCaptureWinEventChange>();
+        var changes = new List<WindowsCaptureWinEventNotification>();
         source.Start(changes.Add, _ => { });
 
-        api.Raise(WindowsCaptureWinEventSource.EventSystemForeground, 0, -4, 9);
+        api.Raise(WindowsCaptureWinEventSource.EventSystemForeground, 200, -4, 9);
         api.Raise(WindowsCaptureWinEventSource.EventSystemDesktopSwitch, 0, -4, 9);
         api.Raise(WindowsCaptureWinEventSource.EventObjectCreate, 100, 0, 0);
         api.Raise(WindowsCaptureWinEventSource.EventObjectDestroy, 100, 0, 0);
@@ -247,12 +247,12 @@ public sealed class WindowsCaptureWinEventSourceTests
 
         Assert.Equal(
             [
-                WindowsCaptureWinEventChange.Foreground,
-                WindowsCaptureWinEventChange.DesktopSwitch,
-                WindowsCaptureWinEventChange.ObjectCreated,
-                WindowsCaptureWinEventChange.ObjectDestroyed,
-                WindowsCaptureWinEventChange.ObjectLocationChanged,
-                WindowsCaptureWinEventChange.ObjectNameChanged,
+                Notification(WindowsCaptureWinEventChange.Foreground, 200),
+                Notification(WindowsCaptureWinEventChange.DesktopSwitch),
+                Notification(WindowsCaptureWinEventChange.ObjectCreated, 100),
+                Notification(WindowsCaptureWinEventChange.ObjectDestroyed, 100),
+                Notification(WindowsCaptureWinEventChange.ObjectLocationChanged, 100),
+                Notification(WindowsCaptureWinEventChange.ObjectNameChanged, 100),
             ],
             changes);
     }
@@ -262,7 +262,7 @@ public sealed class WindowsCaptureWinEventSourceTests
     {
         var api = new FakeWindowsCaptureWinEventNativeApi();
         using var source = new WindowsCaptureWinEventSource(api);
-        var changes = new List<WindowsCaptureWinEventChange>();
+        var changes = new List<WindowsCaptureWinEventNotification>();
         source.Start(changes.Add, _ => { });
 
         api.Raise(WindowsCaptureWinEventSource.EventObjectCreate, 0, 0, 0);
@@ -348,7 +348,7 @@ public sealed class WindowsCaptureWinEventSourceTests
     {
         var api = new FakeWindowsCaptureWinEventNativeApi();
         using var source = new WindowsCaptureWinEventSource(api);
-        var changes = new List<WindowsCaptureWinEventChange>();
+        var changes = new List<WindowsCaptureWinEventNotification>();
         source.Start(changes.Add, _ => { });
 
         GC.Collect();
@@ -361,7 +361,7 @@ public sealed class WindowsCaptureWinEventSourceTests
             0);
 
         Assert.Equal(
-            WindowsCaptureWinEventChange.Foreground,
+            Notification(WindowsCaptureWinEventChange.Foreground, 100),
             Assert.Single(changes));
     }
 
@@ -460,7 +460,7 @@ public sealed class WindowsCaptureWinEventSourceTests
             RaiseLateCallbackDuringUnhook = true,
         };
         using var source = new WindowsCaptureWinEventSource(api);
-        var changes = new List<WindowsCaptureWinEventChange>();
+        var changes = new List<WindowsCaptureWinEventNotification>();
         source.Start(changes.Add, _ => { });
 
         source.Dispose();
@@ -476,7 +476,7 @@ public sealed class WindowsCaptureWinEventSourceTests
         var api = new FakeWindowsCaptureWinEventNativeApi();
         using var source = new WindowsCaptureWinEventSource(api);
         var faults = new ConcurrentQueue<WindowsCaptureWinEventSourceFault>();
-        var changes = new List<WindowsCaptureWinEventChange>();
+        var changes = new List<WindowsCaptureWinEventNotification>();
         source.Start(changes.Add, faults.Enqueue);
         api.FailedUnhookHandles.Add(3);
 
@@ -698,6 +698,10 @@ public sealed class WindowsCaptureWinEventSourceTests
             registration.Flags);
         Assert.NotNull(registration.Callback);
     }
+
+    private static WindowsCaptureWinEventNotification Notification(
+        WindowsCaptureWinEventChange change,
+        ulong windowHandle = 0) => new(change, windowHandle);
 
     private sealed record HookRegistration(
         nint Handle,

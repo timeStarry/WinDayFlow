@@ -54,10 +54,23 @@ bool IsValidDisplayDeviceKey(std::wstring_view value) {
 }
 
 bool IsValidTarget(const CaptureTargetIdentity& target) {
-  return target.window_handle != 0 && target.process_id != 0 &&
-         target.process_creation_time_100ns != 0 && target.target_epoch != 0 &&
-         target.display_monitor_handle != 0 &&
-         IsValidDisplayDeviceKey(target.display_device_key);
+  const bool display_valid = target.target_epoch != 0 &&
+                             target.display_monitor_handle != 0 &&
+                             IsValidDisplayDeviceKey(target.display_device_key);
+  if (!display_valid) {
+    return false;
+  }
+
+  switch (target.scope) {
+    case CaptureAuthorizationScope::kForegroundTarget:
+      return target.window_handle != 0 && target.process_id != 0 &&
+             target.process_creation_time_100ns != 0;
+    case CaptureAuthorizationScope::kDisplayWide:
+      return target.window_handle == 0 && target.process_id == 0 &&
+             target.process_creation_time_100ns == 0;
+    default:
+      return false;
+  }
 }
 
 bool DisplayDeviceKeysEqual(std::wstring_view left, std::wstring_view right) {
@@ -108,7 +121,8 @@ bool CaptureTargetIdentity::operator==(
          process_creation_time_100ns == other.process_creation_time_100ns &&
          target_epoch == other.target_epoch &&
          display_monitor_handle == other.display_monitor_handle &&
-         DisplayDeviceKeysEqual(display_device_key, other.display_device_key);
+         DisplayDeviceKeysEqual(display_device_key, other.display_device_key) &&
+         scope == other.scope;
 }
 
 bool IsFullyAllowed(const PrivacyContext& context) {

@@ -19,6 +19,7 @@ public enum NativeCaptureCapabilities : ulong
     DisplayScopedAuthorization = 1UL << 9,
     DisplayBoundCommandAdmission = 1UL << 10,
     CallbackTimeAuthorizationInvalidation = 1UL << 11,
+    DisplayWideContinuousAuthorization = 1UL << 12,
 }
 
 public enum NativeCapturePolicyDecision
@@ -331,6 +332,10 @@ public static class NativeCaptureAbiContract
         RuntimeOwnerCapabilities
         | NativeCaptureCapabilities.ScreenCapture
         | NativeCaptureCapabilities.H264Chunks;
+
+    public const NativeCaptureCapabilities DisplayWideContinuousCapabilities =
+        RuntimeOwnerCapabilities
+        | NativeCaptureCapabilities.DisplayWideContinuousAuthorization;
 
     public static NativeCaptureAbiLayout GetManagedLayout()
     {

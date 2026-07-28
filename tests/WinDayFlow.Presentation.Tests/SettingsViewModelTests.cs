@@ -44,6 +44,17 @@ public sealed class SettingsViewModelTests
         Assert.True(viewModel.ExcludeSensitiveApplications);
         Assert.True(viewModel.PauseInRemoteSessions);
         Assert.True(viewModel.PauseDuringScreenSharing);
+        Assert.Equal(
+            CaptureApplicationPrivacyMode.ProtectByForegroundApplication,
+            viewModel.ApplicationPrivacyMode);
+        Assert.True(viewModel.IsForegroundApplicationProtectionEnabled);
+        Assert.False(viewModel.IsAllowAllApplicationsMode);
+        Assert.True(viewModel.CanChangeApplicationPrivacyMode);
+        Assert.True(viewModel.CanChangeApplicationProtection);
+        Assert.Contains(
+            "可选择“固定一个显示器并允许全部应用”",
+            viewModel.ApplicationPrivacyModeDetailText);
+        Assert.Contains("停止录制并要求重新同意", viewModel.ApplicationPrivacyModeDetailText);
         Assert.Equal(1, viewModel.CapturePrivacyRevision);
         Assert.True(viewModel.CanChangePrivacy);
         Assert.Equal(expectedBackendAvailable, viewModel.IsCaptureBackendAvailable);
@@ -153,6 +164,112 @@ public sealed class SettingsViewModelTests
         Assert.Equal(2, viewModel.CapturePrivacyRevision);
         Assert.Equal("录制说明或隐私选择已更新", viewModel.ConsentStatusText);
         Assert.Single(repository.SavedSettings);
+    }
+
+    [Fact]
+    public async Task AllowAllApplicationsModePersistsFailClosedBeforeStoppingAndDisablesRuleEditing()
+    {
+        var consent = CreateConsent();
+        var repository = new TestSettingsRepository(
+            new AppSettings(
+                AppThemePreference.System,
+                CaptureEnabled: true,
+                CloudAnalysisEnabled: false,
+                consent));
+        using var settings = new AppSettingsService(repository);
+        await settings.InitializeAsync();
+        var capture = new TestCaptureService(CaptureState.Recording)
+        {
+            StopOperation = _ =>
+            {
+                Assert.False(settings.Current.CaptureEnabled);
+                Assert.False(settings.HasValidRecordingConsent);
+                Assert.Equal(
+                    CaptureApplicationPrivacyMode.AllowAllApplications,
+                    settings.Current.CapturePrivacy.ApplicationPrivacyMode);
+                return Task.CompletedTask;
+            },
+        };
+        using var viewModel = new SettingsViewModel(
+            settings,
+            capture,
+            isExclusionEngineAvailable: true);
+        var changedProperties = ObserveChanges(viewModel);
+
+        Assert.True(await viewModel.SetCaptureApplicationPrivacyModeAsync(
+            CaptureApplicationPrivacyMode.AllowAllApplications));
+
+        Assert.Equal(1, capture.StopCount);
+        Assert.Equal(CaptureState.Stopped, capture.CurrentStatus.State);
+        Assert.True(viewModel.IsAllowAllApplicationsMode);
+        Assert.False(viewModel.IsForegroundApplicationProtectionEnabled);
+        Assert.False(viewModel.CanChangeApplicationProtection);
+        Assert.False(viewModel.CanAddExclusionRule);
+        Assert.False(viewModel.CanChangeExclusionRules);
+        Assert.Equal(2, viewModel.CapturePrivacyRevision);
+        Assert.Contains("开始录制时固定", viewModel.ApplicationPrivacyModeDetailText);
+        Assert.Contains("焦点移到其他显示器", viewModel.ApplicationPrivacyModeDetailText);
+        Assert.Contains("其他显示器不会被录制", viewModel.ApplicationPrivacyModeDetailText);
+        Assert.Contains("未完成录制块", viewModel.ApplicationPrivacyModeDetailText);
+        Assert.Contains("等待录制完全停止", viewModel.ApplicationPrivacyModeDetailText);
+        Assert.Contains(
+            "将 WinDayFlow 窗口移到目标显示器",
+            viewModel.ApplicationPrivacyModeDetailText);
+        Assert.Contains("不会录制所有显示器", viewModel.ContinuousCaptureDisclosureText);
+        Assert.Contains("不会改换录制目标", viewModel.ContinuousCaptureDisclosureText);
+        Assert.Contains("等待录制完全停止", viewModel.ContinuousCaptureDisclosureText);
+        Assert.Contains("将 WinDayFlow 窗口移到目标显示器", viewModel.ContinuousCaptureDisclosureText);
+        Assert.Contains("在那里重新开始录制", viewModel.ContinuousCaptureDisclosureText);
+        Assert.DoesNotContain("激活窗口后重新开始", viewModel.ContinuousCaptureDisclosureText);
+        Assert.Contains("WinDayFlow 设置页", viewModel.ContinuousCaptureDisclosureText);
+        Assert.Contains("AI 提供方配置", viewModel.ContinuousCaptureDisclosureText);
+        Assert.Contains("敏感应用或自定义排除规则", viewModel.ContinuousCaptureDisclosureText);
+        Assert.Contains("睡眠或唤醒", viewModel.ContinuousCaptureDisclosureText);
+        Assert.Contains("存储不足或不可读", viewModel.ContinuousCaptureDisclosureText);
+        Assert.Contains("旧授权失效", viewModel.ContinuousCaptureDisclosureText);
+        Assert.Contains("当前模式下暂不生效", viewModel.SensitiveApplicationProtectionDetailText);
+        Assert.Contains("切回前台应用保护后恢复生效", viewModel.ExclusionEngineStatusText);
+        Assert.Contains("固定一个显示器并允许全部应用", viewModel.PrivacySummaryText);
+        Assert.Contains(nameof(SettingsViewModel.ApplicationPrivacyMode), changedProperties);
+        Assert.Contains(
+            nameof(SettingsViewModel.CanChangeApplicationProtection),
+            changedProperties);
+        Assert.Single(repository.SavedSettings);
+    }
+
+    [Fact]
+    public async Task ApplicationPrivacyModeStopFailureReportsPersistedFailClosedResult()
+    {
+        var consent = CreateConsent();
+        var repository = new TestSettingsRepository(
+            new AppSettings(
+                AppThemePreference.System,
+                CaptureEnabled: true,
+                CloudAnalysisEnabled: false,
+                consent));
+        using var settings = new AppSettingsService(repository);
+        await settings.InitializeAsync();
+        var capture = new TestCaptureService(CaptureState.Recording)
+        {
+            StopOperation = _ => throw new InvalidOperationException(
+                "Sensitive detail."),
+        };
+        using var viewModel = new SettingsViewModel(settings, capture);
+
+        Assert.False(await viewModel.SetCaptureApplicationPrivacyModeAsync(
+            CaptureApplicationPrivacyMode.AllowAllApplications));
+
+        Assert.Equal(1, capture.StopCount);
+        Assert.False(settings.Current.CaptureEnabled);
+        Assert.False(settings.HasValidRecordingConsent);
+        Assert.Equal(
+            CaptureApplicationPrivacyMode.AllowAllApplications,
+            settings.Current.CapturePrivacy.ApplicationPrivacyMode);
+        Assert.Equal(2, settings.Current.CapturePrivacy.Revision);
+        Assert.Single(repository.SavedSettings);
+        Assert.Equal(
+            "应用录制范围已保存，旧授权也已失效，但未能确认录制已停止。请退出 WinDayFlow 后重新打开，再重新同意并启用录制。",
+            viewModel.ErrorMessage);
     }
 
     [Fact]

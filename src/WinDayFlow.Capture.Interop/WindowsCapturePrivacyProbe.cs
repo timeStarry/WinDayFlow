@@ -58,7 +58,7 @@ public sealed class WindowsCapturePrivacyProbe
             SampleCondition(_nativeApi.TryGetPresentationMode),
             NativeCapturePolicyDecision.Unknown,
             NativeCapturePolicyDecision.Unknown,
-            SampleStorage());
+            SampleStorageCore());
     }
 
     private NativeCaptureConditionState SampleRemoteSession()
@@ -126,7 +126,14 @@ public sealed class WindowsCapturePrivacyProbe
         }
     }
 
-    private NativeCapturePolicyDecision SampleStorage()
+    internal NativeCapturePolicyDecision SampleStorage()
+    {
+        return IsSupportedPlatform()
+            ? SampleStorageCore()
+            : NativeCapturePolicyDecision.Unknown;
+    }
+
+    private NativeCapturePolicyDecision SampleStorageCore()
     {
         try
         {
@@ -181,7 +188,7 @@ public sealed class WindowsCapturePrivacyProbe
         }
     }
 
-    private static bool IsRecoverableNativeReadException(Exception exception)
+    internal static bool IsRecoverableNativeReadException(Exception exception)
     {
         return exception is not AccessViolationException
             and not OutOfMemoryException

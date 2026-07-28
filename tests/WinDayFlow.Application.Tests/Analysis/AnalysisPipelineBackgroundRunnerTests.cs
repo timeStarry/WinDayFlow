@@ -74,7 +74,7 @@ public sealed class AnalysisPipelineBackgroundRunnerTests
     }
 
     [Fact]
-    public async Task WakeBurstsAreCoalescedAndRunsNeverOverlap()
+    public async Task RequestRunBurstsAreCoalescedAndRunsNeverOverlap()
     {
         var releaseFirstRun = new TaskCompletionSource(
             TaskCreationOptions.RunContinuationsAsynchronously);
@@ -92,10 +92,8 @@ public sealed class AnalysisPipelineBackgroundRunnerTests
         await harness.Runner.StartAsync();
         Assert.Equal(1, await recorder.ReadCallAsync());
 
-        for (var index = 0; index < 20; index++)
-        {
-            harness.ChunkNotifier.RaiseCommitted();
-        }
+        Assert.IsAssignableFrom<IAnalysisPipelineScheduler>(harness.Runner);
+        Parallel.For(0, 20, _ => harness.Runner.RequestRun());
 
         Assert.Equal(1, recorder.CallCount);
         Assert.Equal(1, recorder.MaximumConcurrency);
@@ -104,6 +102,41 @@ public sealed class AnalysisPipelineBackgroundRunnerTests
 
         Assert.Equal(2, await recorder.ReadCallAsync());
         Assert.Equal(1, recorder.MaximumConcurrency);
+    }
+
+    [Fact]
+    public async Task SuccessfulRunPublishesSummaryAndAdvancesDataRevision()
+    {
+        var summary = new AnalysisPipelineRunSummary(
+            RecoveredLeaseCount: 1,
+            new CaptureAnalysisIngestionResult(
+                ScannedChunkCount: 2,
+                CreatedChunkCount: 1,
+                CreatedJobCount: 1,
+                AnalysisReady: true),
+            ProcessedJobCount: 1,
+            CompletedJobCount: 1,
+            RetryableFailureCount: 0,
+            TerminalFailureCount: 0,
+            LeaseLostCount: 0,
+            MoreWorkPossible: false);
+        var recorder = new RunRecorder(_ => Task.FromResult(summary));
+        await using var harness = await CreateHarnessAsync(recorder.RunAsync);
+        using var statuses = new StatusRecorder(harness.StatusSource);
+
+        await harness.Runner.StartAsync();
+
+        var running = await statuses.ReadAsync();
+        var idle = await statuses.ReadAsync();
+        Assert.Equal(AnalysisPipelineActivityState.Running, running.State);
+        Assert.Equal(0, running.DataRevision);
+        Assert.Null(running.LastRunSummary);
+        Assert.Null(running.FaultCode);
+        Assert.Equal(AnalysisPipelineActivityState.Idle, idle.State);
+        Assert.Equal(1, idle.DataRevision);
+        Assert.Same(summary, idle.LastRunSummary);
+        Assert.Null(idle.FaultCode);
+        Assert.Equal(running.Sequence + 1, idle.Sequence);
     }
 
     [Fact]
@@ -123,6 +156,115 @@ public sealed class AnalysisPipelineBackgroundRunnerTests
 
         Assert.Equal(2, await recorder.ReadCallAsync());
         Assert.Equal(2, recorder.CallCount);
+    }
+
+    [Fact]
+    public async Task RunFailurePublishesFaultAndTheNextRunRecovers()
+    {
+        var failure = new IOException("transient pipeline failure");
+        var recoveredSummary = CreateSummary(moreWorkPossible: false);
+        var recorder = new RunRecorder(call =>
+            call == 1
+                ? Task.FromException<AnalysisPipelineRunSummary>(failure)
+                : Task.FromResult(recoveredSummary));
+        await using var harness = await CreateHarnessAsync(recorder.RunAsync);
+        using var statuses = new StatusRecorder(harness.StatusSource);
+
+        await harness.Runner.StartAsync();
+
+        Assert.Equal(
+            AnalysisPipelineActivityState.Running,
+            (await statuses.ReadAsync()).State);
+        var faulted = await statuses.ReadAsync();
+        Assert.Equal(AnalysisPipelineActivityState.Faulted, faulted.State);
+        Assert.Equal(
+            AnalysisPipelineFaultCode.PipelineRunFailed,
+            faulted.FaultCode);
+        Assert.Equal(1, faulted.DataRevision);
+
+        harness.Runner.RequestRun();
+
+        var running = await statuses.ReadAsync();
+        var idle = await statuses.ReadAsync();
+        Assert.Equal(AnalysisPipelineActivityState.Running, running.State);
+        Assert.Null(running.FaultCode);
+        Assert.Equal(AnalysisPipelineActivityState.Idle, idle.State);
+        Assert.Null(idle.FaultCode);
+        Assert.Same(recoveredSummary, idle.LastRunSummary);
+        Assert.Equal(faulted.DataRevision, idle.DataRevision);
+    }
+
+    [Fact]
+    public async Task PeriodicSchedulerFailurePublishesFaultAndThenRecovers()
+    {
+        var recorder = new RunRecorder();
+        var periodicDelay = new ControlledFailingPeriodicDelay();
+        await using var harness = await CreateHarnessAsync(
+            recorder.RunAsync,
+            delayAsync: periodicDelay.WaitAsync);
+        using var statuses = new StatusRecorder(harness.StatusSource);
+
+        await harness.Runner.StartAsync();
+        Assert.Equal(
+            AnalysisPipelineActivityState.Running,
+            (await statuses.ReadAsync()).State);
+        Assert.Equal(
+            AnalysisPipelineActivityState.Idle,
+            (await statuses.ReadAsync()).State);
+
+        periodicDelay.FailFirstWait();
+
+        var faulted = await statuses.ReadAsync();
+        Assert.Equal(AnalysisPipelineActivityState.Faulted, faulted.State);
+        Assert.Equal(
+            AnalysisPipelineFaultCode.SchedulerFailed,
+            faulted.FaultCode);
+        await periodicDelay.WaitUntilRetryingAsync();
+        periodicDelay.Pulse();
+
+        var running = await statuses.ReadAsync();
+        var idle = await statuses.ReadAsync();
+        Assert.Equal(AnalysisPipelineActivityState.Running, running.State);
+        Assert.Null(running.FaultCode);
+        Assert.Equal(AnalysisPipelineActivityState.Idle, idle.State);
+        Assert.Null(idle.FaultCode);
+        Assert.Equal(2, recorder.CallCount);
+    }
+
+    [Fact]
+    public async Task ThrowingStatusObserverDoesNotInterruptTheRunner()
+    {
+        var recorder = new RunRecorder();
+        await using var harness = await CreateHarnessAsync(recorder.RunAsync);
+        var notificationCount = 0;
+        harness.StatusSource.StatusChanged += (_, _) =>
+        {
+            Interlocked.Increment(ref notificationCount);
+            throw new InvalidOperationException("observer failure");
+        };
+        using var statuses = new StatusRecorder(harness.StatusSource);
+
+        await harness.Runner.StartAsync();
+        Assert.Equal(1, await recorder.ReadCallAsync());
+        Assert.Equal(
+            AnalysisPipelineActivityState.Running,
+            (await statuses.ReadAsync()).State);
+        Assert.Equal(
+            AnalysisPipelineActivityState.Idle,
+            (await statuses.ReadAsync()).State);
+        harness.Runner.RequestRun();
+        Assert.Equal(2, await recorder.ReadCallAsync());
+        Assert.Equal(
+            AnalysisPipelineActivityState.Running,
+            (await statuses.ReadAsync()).State);
+        Assert.Equal(
+            AnalysisPipelineActivityState.Idle,
+            (await statuses.ReadAsync()).State);
+
+        Assert.Equal(4, Volatile.Read(ref notificationCount));
+        Assert.Equal(
+            AnalysisPipelineActivityState.Idle,
+            harness.StatusSource.Current.State);
     }
 
     [Fact]
@@ -154,8 +296,12 @@ public sealed class AnalysisPipelineBackgroundRunnerTests
         }
 
         await using var harness = await CreateHarnessAsync(RunAsync);
+        using var statuses = new StatusRecorder(harness.StatusSource);
         await harness.Runner.StartAsync();
         await runStarted.Task.WaitAsync(TestTimeout);
+        Assert.Equal(
+            AnalysisPipelineActivityState.Running,
+            (await statuses.ReadAsync()).State);
         Assert.Equal(1, harness.ChunkNotifier.SubscriberCount);
 
         await harness.Runner.StopAsync().WaitAsync(TestTimeout);
@@ -171,6 +317,11 @@ public sealed class AnalysisPipelineBackgroundRunnerTests
             requestTimeoutSeconds: 30,
             replacementApiKey: null);
         Assert.Equal(1, Volatile.Read(ref callCount));
+        var stopped = await statuses.ReadAsync();
+        Assert.Equal(AnalysisPipelineActivityState.Idle, stopped.State);
+        Assert.Null(stopped.FaultCode);
+        Assert.Null(stopped.LastRunSummary);
+        Assert.Equal(0, stopped.DataRevision);
     }
 
     [Fact]
@@ -182,6 +333,8 @@ public sealed class AnalysisPipelineBackgroundRunnerTests
         await harness.Runner.DisposeAsync();
 
         Assert.Equal(0, harness.ChunkNotifier.SubscriberCount);
+        Assert.Equal(AnalysisPipelineActivityState.Idle, harness.StatusSource.Current.State);
+        Assert.Equal(1, harness.StatusSource.Current.Sequence);
         await Assert.ThrowsAsync<ObjectDisposedException>(
             () => harness.Runner.StartAsync());
         await harness.DisposeDependenciesAsync();
@@ -221,18 +374,21 @@ public sealed class AnalysisPipelineBackgroundRunnerTests
             settings);
         await providerConfiguration.InitializeAsync();
         var chunkNotifier = new TestChunkCommitNotifier();
+        var statusSource = new AnalysisPipelineStatusSource();
         var runner = new AnalysisPipelineBackgroundRunner(
             runOnceAsync,
             chunkNotifier,
             settings,
             providerConfiguration,
             options,
-            delayAsync ?? WaitForeverAsync);
+            delayAsync ?? WaitForeverAsync,
+            statusSource);
         return new TestHarness(
             runner,
             chunkNotifier,
             settings,
-            providerConfiguration);
+            providerConfiguration,
+            statusSource);
     }
 
     private static Task WaitForeverAsync(
@@ -258,7 +414,8 @@ public sealed class AnalysisPipelineBackgroundRunnerTests
         AnalysisPipelineBackgroundRunner runner,
         TestChunkCommitNotifier chunkNotifier,
         AppSettingsService settings,
-        AiProviderConfigurationService providerConfiguration)
+        AiProviderConfigurationService providerConfiguration,
+        AnalysisPipelineStatusSource statusSource)
         : IAsyncDisposable
     {
         private int _dependenciesDisposed;
@@ -271,6 +428,8 @@ public sealed class AnalysisPipelineBackgroundRunnerTests
 
         public AiProviderConfigurationService ProviderConfiguration { get; } =
             providerConfiguration;
+
+        public AnalysisPipelineStatusSource StatusSource { get; } = statusSource;
 
         public async ValueTask DisposeAsync()
         {
@@ -369,6 +528,73 @@ public sealed class AnalysisPipelineBackgroundRunnerTests
         }
 
         public void Pulse() => _pulses.Writer.TryWrite(item: true);
+    }
+
+    private sealed class ControlledFailingPeriodicDelay
+    {
+        private readonly TaskCompletionSource _failFirstWait = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _retryStarted = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly Channel<bool> _pulses = Channel.CreateUnbounded<bool>();
+        private int _callCount;
+
+        public async Task WaitAsync(
+            TimeSpan delay,
+            CancellationToken cancellationToken)
+        {
+            _ = delay;
+            var call = Interlocked.Increment(ref _callCount);
+            if (call == 1)
+            {
+                await _failFirstWait.Task
+                    .WaitAsync(cancellationToken)
+                    .ConfigureAwait(false);
+                throw new IOException("periodic scheduler failure");
+            }
+
+            _retryStarted.TrySetResult();
+            _ = await _pulses.Reader
+                .ReadAsync(cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        public void FailFirstWait() => _failFirstWait.TrySetResult();
+
+        public Task WaitUntilRetryingAsync() =>
+            _retryStarted.Task.WaitAsync(TestTimeout);
+
+        public void Pulse() => _pulses.Writer.TryWrite(item: true);
+    }
+
+    private sealed class StatusRecorder : IDisposable
+    {
+        private readonly AnalysisPipelineStatusSource _source;
+        private readonly Channel<AnalysisPipelineStatus> _statuses =
+            Channel.CreateUnbounded<AnalysisPipelineStatus>();
+
+        public StatusRecorder(AnalysisPipelineStatusSource source)
+        {
+            _source = source;
+            _source.StatusChanged += OnStatusChanged;
+        }
+
+        public Task<AnalysisPipelineStatus> ReadAsync() =>
+            _statuses.Reader.ReadAsync().AsTask().WaitAsync(TestTimeout);
+
+        public void Dispose()
+        {
+            _source.StatusChanged -= OnStatusChanged;
+            _statuses.Writer.TryComplete();
+        }
+
+        private void OnStatusChanged(
+            object? sender,
+            AnalysisPipelineStatusChangedEventArgs eventArgs)
+        {
+            _ = sender;
+            _statuses.Writer.TryWrite(eventArgs.Current);
+        }
     }
 
     private sealed class TestChunkCommitNotifier : ICaptureChunkCommitNotifier

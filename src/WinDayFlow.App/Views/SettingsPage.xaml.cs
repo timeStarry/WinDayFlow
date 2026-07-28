@@ -220,6 +220,77 @@ public sealed partial class SettingsPage : Page
         await PersistPrivacyControlsAsync(ViewModel.EvidenceRetentionDays);
     }
 
+    private async void OnApplicationPrivacyModeChanged(
+        object sender,
+        SelectionChangedEventArgs e)
+    {
+        if (_isUpdatingPrivacyControls
+            || ApplicationPrivacyModePicker.SelectedIndex is < 0 or > 1)
+        {
+            return;
+        }
+
+        var mode = ApplicationPrivacyModePicker.SelectedIndex == 1
+            ? CaptureApplicationPrivacyMode.AllowAllApplications
+            : CaptureApplicationPrivacyMode.ProtectByForegroundApplication;
+        if (mode == ViewModel.ApplicationPrivacyMode)
+        {
+            return;
+        }
+
+        if (mode == CaptureApplicationPrivacyMode.AllowAllApplications
+            && !await ConfirmContinuousCaptureScopeAsync())
+        {
+            SynchronizePrivacyControls();
+            return;
+        }
+
+        if (!await ViewModel.SetCaptureApplicationPrivacyModeAsync(mode))
+        {
+            SynchronizePrivacyControls();
+        }
+
+        UpdateErrorInformation();
+    }
+
+    private async Task<bool> ConfirmContinuousCaptureScopeAsync()
+    {
+        if (_dialogOpen)
+        {
+            return false;
+        }
+
+        var content = new StackPanel
+        {
+            MaxWidth = 540,
+            Spacing = 10,
+        };
+        content.Children.Add(CreateDialogText(
+            "范围：每次开始录制时固定当时授权的一个显示器；不会录制所有显示器。"));
+        content.Children.Add(CreateDialogText(
+            "会被记录：该固定显示器上的普通桌面内容，包括 WinDayFlow 设置页、AI 提供方配置，以及原本匹配敏感应用或自定义排除规则的内容。"));
+        content.Children.Add(CreateDialogText(
+            "体验改善：录制期间切换应用或把焦点移到其他显示器都不会改换录制目标，避免授权反复暂停、恢复和丢弃未完成录制块，因此时间线更连续。"));
+        content.Children.Add(CreateDialogText(
+            "更换显示器：请等待录制完全停止，将 WinDayFlow 窗口移到目标显示器，并在那里重新开始录制；仅把焦点移到其他显示器不会切换录制目标。"));
+        content.Children.Add(CreateDialogText(
+            "仍会暂停或停止：显示器断开或显示拓扑变化、锁屏、安全桌面、睡眠、Windows 会话切换、存储异常、撤销同意和手动暂停或停止。远程会话与 Windows 演示模式仍遵循当前设置。"));
+        content.Children.Add(CreateDialogText(
+            "切换后会立即停止当前录制、使旧授权失效；你需要阅读新范围并重新同意，录制才可再次开启。"));
+
+        var dialog = new ContentDialog
+        {
+            XamlRoot = XamlRoot,
+            Title = "允许固定显示器上的全部应用？",
+            Content = content,
+            PrimaryButtonText = "理解范围并切换",
+            CloseButtonText = "取消",
+            DefaultButton = ContentDialogButton.Close,
+        };
+
+        return await ShowDialogAsync(dialog) == ContentDialogResult.Primary;
+    }
+
     private async Task PersistPrivacyControlsAsync(int retentionDays)
     {
         if (!await ViewModel.SetCapturePrivacyAsync(
@@ -327,6 +398,8 @@ public sealed partial class SettingsPage : Page
         content.Children.Add(CreateDialogText($"接收方：{endpointOrigin}"));
         content.Children.Add(CreateDialogText(
             "发送内容：从已提交录制块提取的少量静态截图、对应时间范围，以及经过隐私规则筛选的应用上下文。"));
+        content.Children.Add(CreateDialogText(
+            "启用范围：包括启用前已保存在本机但尚未分析的录制块，以及之后新产生的录制块。"));
         content.Children.Add(CreateDialogText(
             "不会发送：完整录制视频、未选择的本地文件或 WinDayFlow 数据库。"));
         content.Children.Add(CreateDialogText(
@@ -632,7 +705,8 @@ public sealed partial class SettingsPage : Page
         if (e.PropertyName is nameof(SettingsViewModel.EvidenceRetentionDays)
             or nameof(SettingsViewModel.ExcludeSensitiveApplications)
             or nameof(SettingsViewModel.PauseInRemoteSessions)
-            or nameof(SettingsViewModel.PauseDuringScreenSharing))
+            or nameof(SettingsViewModel.PauseDuringScreenSharing)
+            or nameof(SettingsViewModel.ApplicationPrivacyMode))
         {
             SynchronizePrivacyControls();
         }
@@ -1114,6 +1188,11 @@ public sealed partial class SettingsPage : Page
             }
 
             RetentionPicker.SelectedItem = matchingItem;
+            ApplicationPrivacyModePicker.SelectedIndex =
+                ViewModel.ApplicationPrivacyMode
+                    == CaptureApplicationPrivacyMode.AllowAllApplications
+                        ? 1
+                        : 0;
             SensitiveApplicationToggle.IsOn = ViewModel.ExcludeSensitiveApplications;
             RemoteSessionToggle.IsOn = ViewModel.PauseInRemoteSessions;
             ScreenSharingToggle.IsOn = ViewModel.PauseDuringScreenSharing;
@@ -1240,6 +1319,10 @@ public sealed partial class SettingsPage : Page
         UpdateSettingLayout(CaptureSettingLayout, CaptureToggle, useStackedLayout);
         UpdateSettingLayout(StorageSettingLayout, DataFolderTextBox, useStackedLayout);
         UpdateSettingLayout(RetentionSettingLayout, RetentionPicker, useStackedLayout);
+        UpdateSettingLayout(
+            ApplicationPrivacyModeSettingLayout,
+            ApplicationPrivacyModePicker,
+            useStackedLayout);
         UpdateSettingLayout(
             SensitiveApplicationSettingLayout,
             SensitiveApplicationToggle,

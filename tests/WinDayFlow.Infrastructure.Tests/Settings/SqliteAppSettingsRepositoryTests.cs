@@ -30,7 +30,9 @@ public sealed class SqliteAppSettingsRepositoryTests
             ExcludeSensitiveApplications: false,
             PauseInRemoteSessions: true,
             PauseDuringScreenSharing: false,
-            Revision: 2);
+            Revision: 2,
+            ApplicationPrivacyMode:
+                CaptureApplicationPrivacyMode.AllowAllApplications);
         var consent = new RecordingConsent(
             AppSettingsService.CurrentRecordingConsentVersion,
             new DateTimeOffset(2026, 7, 16, 3, 4, 5, TimeSpan.Zero).AddTicks(6789),
@@ -54,6 +56,9 @@ public sealed class SqliteAppSettingsRepositoryTests
         Assert.Equal(consent.AcceptedAtUtc, restored.RecordingConsent?.AcceptedAtUtc);
         Assert.Equal(consent.PrivacyRevision, restored.RecordingConsent?.PrivacyRevision);
         Assert.Equal(privacy, restored.CapturePrivacy);
+        Assert.Equal(
+            CaptureApplicationPrivacyMode.AllowAllApplications,
+            restored.CapturePrivacy.ApplicationPrivacyMode);
     }
 
     [Fact]
@@ -123,6 +128,67 @@ public sealed class SqliteAppSettingsRepositoryTests
         var repository = new SqliteAppSettingsRepository(factory);
         await Assert.ThrowsAsync<InvalidDataException>(
             () => repository.GetAsync());
+    }
+
+    [Fact]
+    public async Task GetAsyncRejectsCorruptApplicationPrivacyModeEvenIfChecksWereBypassed()
+    {
+        using var database = new TemporaryDatabase();
+        var factory = new SqliteConnectionFactory(database.DatabasePath);
+        await new SqliteDatabaseInitializer(factory).InitializeAsync();
+
+        await using (var connection = await factory.OpenConnectionAsync())
+        await using (var command = connection.CreateCommand())
+        {
+            command.CommandText = """
+                PRAGMA ignore_check_constraints = ON;
+                UPDATE app_settings
+                SET capture_application_privacy_mode = 99
+                WHERE id = 1;
+                """;
+            await command.ExecuteNonQueryAsync();
+        }
+
+        var repository = new SqliteAppSettingsRepository(factory);
+        await Assert.ThrowsAsync<InvalidDataException>(
+            () => repository.GetAsync());
+    }
+
+    [Fact]
+    public async Task SaveAsyncRequiresPrivacyRevisionAdvanceForApplicationModeChange()
+    {
+        using var database = new TemporaryDatabase();
+        var repository = await CreateRepositoryAsync(database.DatabasePath);
+        var current = AppSettings.Default.CapturePrivacy;
+        var invalidPrivacy = new CapturePrivacySettings(
+            current.EvidenceRetentionDays,
+            current.ExcludeSensitiveApplications,
+            current.PauseInRemoteSessions,
+            current.PauseDuringScreenSharing,
+            current.Revision,
+            current.ExclusionRules,
+            CaptureApplicationPrivacyMode.AllowAllApplications);
+        var invalid = new AppSettings(
+            AppThemePreference.System,
+            CaptureEnabled: false,
+            CloudAnalysisEnabled: false,
+            RecordingConsent: null,
+            invalidPrivacy);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => repository.SaveAsync(AppSettings.Default, invalid));
+
+        var changedPrivacy = current.ChangeApplicationPrivacyMode(
+            CaptureApplicationPrivacyMode.AllowAllApplications);
+        var changed = new AppSettings(
+            AppThemePreference.System,
+            CaptureEnabled: false,
+            CloudAnalysisEnabled: false,
+            RecordingConsent: null,
+            changedPrivacy);
+        await repository.SaveAsync(AppSettings.Default, changed);
+
+        Assert.Equal(changed, await repository.GetAsync());
     }
 
     [Fact]

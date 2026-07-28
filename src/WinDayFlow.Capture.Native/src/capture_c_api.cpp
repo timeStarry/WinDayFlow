@@ -25,6 +25,7 @@
 namespace {
 
 using windayflow::capture::CaptureActivationMode;
+using windayflow::capture::CaptureAuthorizationScope;
 using windayflow::capture::CaptureChunkFingerprintResult;
 using windayflow::capture::CaptureEventReadResult;
 using windayflow::capture::CaptureInstanceController;
@@ -57,6 +58,7 @@ constexpr int kMaximumDisplayDeviceKeyUtf16Characters = 31;
 #if WDF_ENABLE_DEV_LIVE_CAPTURE
 constexpr CaptureActivationMode kCaptureActivationMode =
     CaptureActivationMode::kEnabled;
+constexpr uint32_t kDevLiveCaptureAverageBitrate = 500'000;
 constexpr wdf_capture_capabilities kLiveCaptureCapabilities =
     WDF_CAPTURE_CAPABILITY_SCREEN_CAPTURE |
     WDF_CAPTURE_CAPABILITY_H264_CHUNKS;
@@ -498,7 +500,8 @@ wdf_capture_result CopyRuntimeAuthorization(
   }
 
   constexpr wdf_capture_target_flags kKnownTargetFlags =
-      WDF_CAPTURE_TARGET_PRESENT | WDF_CAPTURE_TARGET_DISPLAY_PRESENT;
+      WDF_CAPTURE_TARGET_PRESENT | WDF_CAPTURE_TARGET_DISPLAY_PRESENT |
+      WDF_CAPTURE_TARGET_DISPLAY_WIDE_SCOPE;
   if ((source->target_flags & ~kKnownTargetFlags) != 0) {
     return WDF_CAPTURE_RESULT_INVALID_ARGUMENT;
   }
@@ -526,13 +529,18 @@ wdf_capture_result CopyRuntimeAuthorization(
       (source->target_flags & WDF_CAPTURE_TARGET_PRESENT) != 0;
   const bool display_present =
       (source->target_flags & WDF_CAPTURE_TARGET_DISPLAY_PRESENT) != 0;
-  const bool target_values_present = source->target_epoch != 0 ||
-                                     source->target_window_handle != 0 ||
+  const bool display_wide_scope =
+      (source->target_flags & WDF_CAPTURE_TARGET_DISPLAY_WIDE_SCOPE) != 0;
+  const bool window_values_present = source->target_window_handle != 0 ||
                                      source->target_process_creation_time_100ns !=
                                          0 ||
                                      source->target_process_id != 0;
-  if (target_present != target_values_present ||
-      target_present != display_present) {
+  const bool scope_present = target_present || display_wide_scope;
+  if ((target_present && display_wide_scope) ||
+      (scope_present && !display_present) ||
+      (!scope_present && display_present) ||
+      (target_present != window_values_present) ||
+      (scope_present != (source->target_epoch != 0))) {
     return WDF_CAPTURE_RESULT_INVALID_ARGUMENT;
   }
 
@@ -570,10 +578,11 @@ wdf_capture_result CopyRuntimeAuthorization(
 
   RuntimeAuthorization authorization;
   authorization.privacy = privacy;
-  if (target_present) {
-    if (source->target_epoch == 0 || source->target_window_handle == 0 ||
+  if (scope_present) {
+    if (source->target_epoch == 0 ||
+        (target_present && (source->target_window_handle == 0 ||
         source->target_process_creation_time_100ns == 0 ||
-        source->target_process_id == 0) {
+        source->target_process_id == 0))) {
       return WDF_CAPTURE_RESULT_INVALID_ARGUMENT;
     }
     authorization.target = CaptureTargetIdentity{
@@ -582,11 +591,13 @@ wdf_capture_result CopyRuntimeAuthorization(
         source->target_process_creation_time_100ns,
         source->target_epoch,
         source->target_display_monitor_handle,
-        std::move(display_device_key)};
+        std::move(display_device_key),
+        display_wide_scope ? CaptureAuthorizationScope::kDisplayWide
+                           : CaptureAuthorizationScope::kForegroundTarget};
   }
 
   const bool fully_allowed = windayflow::capture::IsFullyAllowed(privacy);
-  if (fully_allowed != target_present) {
+  if (fully_allowed != scope_present) {
     return WDF_CAPTURE_RESULT_INVALID_ARGUMENT;
   }
 
@@ -666,7 +677,8 @@ wdf_capture_get_capabilities(wdf_capture_capabilities* capabilities) noexcept {
                     WDF_CAPTURE_CAPABILITY_DETERMINISTIC_STOP |
                     WDF_CAPTURE_CAPABILITY_DISPLAY_SCOPED_AUTHORIZATION |
                     WDF_CAPTURE_CAPABILITY_DISPLAY_BOUND_COMMAND_ADMISSION |
-                    WDF_CAPTURE_CAPABILITY_CALLBACK_TIME_AUTHORIZATION_INVALIDATION;
+                    WDF_CAPTURE_CAPABILITY_CALLBACK_TIME_AUTHORIZATION_INVALIDATION |
+                    WDF_CAPTURE_CAPABILITY_DISPLAY_WIDE_CONTINUOUS_AUTHORIZATION;
     return WDF_CAPTURE_RESULT_OK;
   } catch (...) {
     return WDF_CAPTURE_RESULT_INTERNAL_ERROR;
@@ -699,6 +711,10 @@ extern "C" wdf_capture_result WDF_CAPTURE_CALL wdf_capture_create(
     controller_configuration.worker.policy = policy;
     controller_configuration.worker.maximum_width = config->max_width;
     controller_configuration.worker.maximum_height = config->max_height;
+#if WDF_ENABLE_DEV_LIVE_CAPTURE
+    controller_configuration.worker.average_bitrate =
+        kDevLiveCaptureAverageBitrate;
+#endif
     auto backend = windayflow::capture::CreateWindowsCaptureWorkerBackend(
         std::move(output_directory_utf16));
     if (backend == nullptr) {

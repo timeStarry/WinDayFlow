@@ -8,6 +8,7 @@
 #include <mutex>
 #include <optional>
 #include <stdexcept>
+#include <string>
 #include <thread>
 
 #include "capture_instance_controller.h"
@@ -44,6 +45,10 @@ class CaptureInstanceControllerTestPeer {
       void (*hook)(const CaptureWorkerCheckpoint&)) {
     std::lock_guard lock(controller.mutex_);
     controller.worker_checkpoint_hook_ = hook;
+  }
+
+  static uint64_t PauseEpoch(CaptureInstanceController& controller) {
+    return controller.runtime_.ReadControlSnapshot().pause_epoch;
   }
 
   static bool AppendRequiredEvent(CaptureInstanceController& controller) {
@@ -232,6 +237,7 @@ class TestBackend final
 struct ReadEvent {
   CaptureEventReadResult result = CaptureEventReadResult::kInternalError;
   wdf_capture_event_v1 event{};
+  std::string detail;
 };
 
 ReadEvent ReadOne(CaptureInstanceController& controller,
@@ -244,6 +250,10 @@ ReadEvent ReadOne(CaptureInstanceController& controller,
   value.result = controller.Poll(timeout_ms, &value.event, detail.data(),
                                  static_cast<uint32_t>(detail.size()),
                                  &required);
+  if (value.result == CaptureEventReadResult::kSuccess &&
+      value.event.detail_utf8_length <= detail.size()) {
+    value.detail.assign(detail.data(), value.event.detail_utf8_length);
+  }
   return value;
 }
 
@@ -279,6 +289,13 @@ windayflow::capture::PrivacyContext AllowedPrivacy(uint64_t revision) {
 windayflow::capture::PrivacyContext BlockedPrivacy(uint64_t revision) {
   auto privacy = AllowedPrivacy(revision);
   privacy.session_unlocked = WDF_CAPTURE_POLICY_BLOCK;
+  return privacy;
+}
+
+windayflow::capture::PrivacyContext ApplicationBlockedPrivacy(
+    uint64_t revision) {
+  auto privacy = AllowedPrivacy(revision);
+  privacy.application_allowed = WDF_CAPTURE_POLICY_BLOCK;
   return privacy;
 }
 
@@ -341,8 +358,15 @@ bool TestDisabledConsumesAdmissionWithoutStarting() {
                      "disabled stop omitted STOPPING") &&
          Expect(controller.WaitStopped(1'000) == WDF_CAPTURE_RESULT_OK,
                 "disabled controller did not finalize revoke") &&
-         ExpectState(controller, WDF_CAPTURE_STATE_STOPPED,
-                     "disabled stop omitted STOPPED") &&
+         [&controller] {
+           const ReadEvent stopped = ReadOne(controller);
+           return Expect(
+               stopped.result == CaptureEventReadResult::kSuccess &&
+                   stopped.event.kind == WDF_CAPTURE_EVENT_STATE_CHANGED &&
+                   stopped.event.state == WDF_CAPTURE_STATE_STOPPED &&
+                   stopped.detail == "Capture worker stopped and joined.",
+               "disabled stop published a false worker failure");
+         }() &&
          Expect(controller.join_count() == 0 &&
                     controller.reserved_event_count() == 0 &&
                     !backend_state->called.load(),
@@ -443,6 +467,20 @@ bool StartEnabled(CaptureInstanceController& controller, uint64_t generation) {
          controller.StartAuthorized(admission) == WDF_CAPTURE_RESULT_OK;
 }
 
+bool PublishReadyAndExpectRecording(CaptureInstanceController& controller,
+                                    const char* message) {
+  const uint64_t run_id = controller.active_run_id();
+  return Expect(run_id != 0 &&
+                    windayflow::capture::CaptureInstanceControllerTestPeer::
+                        Checkpoint(
+                            controller, run_id,
+                            {windayflow::capture::
+                                 CaptureWorkerCheckpointKind::kReady,
+                             0}),
+                "controller rejected an injected Ready checkpoint") &&
+         ExpectState(controller, WDF_CAPTURE_STATE_RECORDING, message);
+}
+
 bool TestEnabledStateSequenceAndStop() {
   auto backend_state = std::make_shared<BackendState>();
   CaptureInstanceControllerConfiguration configuration;
@@ -464,8 +502,8 @@ bool TestEnabledStateSequenceAndStop() {
   }
   if (!ExpectState(controller, WDF_CAPTURE_STATE_STARTING,
                    "STARTING was not published before worker readiness") ||
-      !ExpectState(controller, WDF_CAPTURE_STATE_RECORDING,
-                   "Ready checkpoint did not publish RECORDING")) {
+      !PublishReadyAndExpectRecording(
+          controller, "Ready checkpoint did not publish RECORDING")) {
     return false;
   }
   const uint64_t run_id = controller.active_run_id();
@@ -490,10 +528,10 @@ bool TestEnabledStateSequenceAndStop() {
   if (!Expect(Authorize(controller, 2, &replacement_generation),
               "authorization replacement failed") ||
       !ExpectStateAndReason(controller, WDF_CAPTURE_STATE_PAUSING,
-                            WDF_CAPTURE_REASON_NONE,
+                            WDF_CAPTURE_REASON_POLICY_BLOCKED,
                             "authorization replacement omitted PAUSING") ||
       !ExpectStateAndReason(controller, WDF_CAPTURE_STATE_PAUSED,
-                            WDF_CAPTURE_REASON_NONE,
+                            WDF_CAPTURE_REASON_POLICY_BLOCKED,
                             "Paused checkpoint did not acknowledge PAUSED")) {
     return false;
   }
@@ -505,8 +543,8 @@ bool TestEnabledStateSequenceAndStop() {
               "enabled controller did not resume") ||
       !ExpectState(controller, WDF_CAPTURE_STATE_RESUMING,
                    "RESUMING state was omitted") ||
-      !ExpectState(controller, WDF_CAPTURE_STATE_RECORDING,
-                   "resumed Ready checkpoint did not publish RECORDING")) {
+      !PublishReadyAndExpectRecording(
+          controller, "resumed Ready checkpoint did not publish RECORDING")) {
     return false;
   }
 
@@ -545,8 +583,8 @@ bool TestStaleDeferredStopCannotStopReplacementRun() {
               "stale-stop fixture did not start its first run") ||
       !ExpectState(controller, WDF_CAPTURE_STATE_STARTING,
                    "stale-stop first run omitted STARTING") ||
-      !ExpectState(controller, WDF_CAPTURE_STATE_RECORDING,
-                   "stale-stop first run omitted RECORDING")) {
+      !PublishReadyAndExpectRecording(
+          controller, "stale-stop first run omitted RECORDING")) {
     return false;
   }
   const uint64_t first_run_id = controller.active_run_id();
@@ -569,8 +607,8 @@ bool TestStaleDeferredStopCannotStopReplacementRun() {
               "stale-stop fixture did not start its replacement run") ||
       !ExpectState(controller, WDF_CAPTURE_STATE_STARTING,
                    "stale-stop replacement run omitted STARTING") ||
-      !ExpectState(controller, WDF_CAPTURE_STATE_RECORDING,
-                   "stale-stop replacement run omitted RECORDING")) {
+      !PublishReadyAndExpectRecording(
+          controller, "stale-stop replacement run omitted RECORDING")) {
     return false;
   }
   const uint64_t second_run_id = controller.active_run_id();
@@ -621,8 +659,8 @@ bool TestWaitLeaderTimeoutAndFollowerTakeover() {
               "takeover fixture did not start") ||
       !ExpectState(controller, WDF_CAPTURE_STATE_STARTING,
                    "takeover fixture omitted STARTING") ||
-      !ExpectState(controller, WDF_CAPTURE_STATE_RECORDING,
-                   "takeover fixture omitted RECORDING")) {
+      !PublishReadyAndExpectRecording(
+          controller, "takeover fixture omitted RECORDING")) {
     return false;
   }
   {
@@ -668,7 +706,7 @@ bool TestWaitLeaderTimeoutAndFollowerTakeover() {
                 "wait takeover joined twice or leaked reservations");
 }
 
-bool TestPausingReasonTracksLatestAuthorization() {
+bool TestPausingReasonTracksLatestBlockingAuthorization() {
   auto backend_state = std::make_shared<BackendState>();
   CaptureInstanceControllerConfiguration configuration;
   configuration.activation_mode = CaptureActivationMode::kEnabled;
@@ -691,8 +729,8 @@ bool TestPausingReasonTracksLatestAuthorization() {
               "pause-reason fixture did not start") ||
       !ExpectState(controller, WDF_CAPTURE_STATE_STARTING,
                    "pause-reason fixture omitted STARTING") ||
-      !ExpectState(controller, WDF_CAPTURE_STATE_RECORDING,
-                   "pause-reason fixture omitted RECORDING")) {
+      !PublishReadyAndExpectRecording(
+          controller, "pause-reason fixture omitted RECORDING")) {
     g_worker_checkpoint_gate.store(nullptr);
     return false;
   }
@@ -728,9 +766,19 @@ bool TestPausingReasonTracksLatestAuthorization() {
     g_worker_checkpoint_gate.store(nullptr);
     return Expect(false, "Paused checkpoint did not reach its barrier");
   }
+  uint64_t application_blocked_generation = 0;
+  if (!Expect(controller.UpdateRuntimeAuthorization(
+                  {ApplicationBlockedPrivacy(3), std::nullopt},
+                  &application_blocked_generation) ==
+                  windayflow::capture::CaptureSafetyUpdateResult::kOk,
+              "replacement blocking a later application failed")) {
+    release_checkpoint();
+    g_worker_checkpoint_gate.store(nullptr);
+    return false;
+  }
   uint64_t allowed_generation = 0;
   if (!Expect(controller.UpdateRuntimeAuthorization(
-                  {AllowedPrivacy(3), Target()}, &allowed_generation) ==
+                  {AllowedPrivacy(4), Target()}, &allowed_generation) ==
                   windayflow::capture::CaptureSafetyUpdateResult::kOk,
               "allowing authorization replacement failed")) {
     release_checkpoint();
@@ -739,8 +787,8 @@ bool TestPausingReasonTracksLatestAuthorization() {
   }
   release_checkpoint();
   if (!ExpectStateAndReason(controller, WDF_CAPTURE_STATE_PAUSED,
-                            WDF_CAPTURE_REASON_NONE,
-                            "PAUSED retained a superseded blocking reason")) {
+                             WDF_CAPTURE_REASON_EXCLUDED_APPLICATION,
+                             "PAUSED lost its latest blocking reason")) {
     g_worker_checkpoint_gate.store(nullptr);
     return false;
   }
@@ -756,6 +804,252 @@ bool TestPausingReasonTracksLatestAuthorization() {
   windayflow::capture::CaptureInstanceControllerTestPeer::
       SetWorkerCheckpointHook(controller, nullptr);
   g_worker_checkpoint_gate.store(nullptr);
+  return stopped;
+}
+
+bool TestPausingUserReasonSurvivesAuthorizationUpdates() {
+  auto backend_state = std::make_shared<BackendState>();
+  CaptureInstanceControllerConfiguration configuration;
+  configuration.activation_mode = CaptureActivationMode::kEnabled;
+  configuration.event_queue_capacity = 16;
+  WorkerCheckpointGate checkpoint_gate;
+  g_worker_checkpoint_gate.store(&checkpoint_gate);
+  CaptureInstanceController controller(
+      configuration,
+      std::make_unique<TestBackend>(true, false, backend_state));
+  windayflow::capture::CaptureInstanceControllerTestPeer::
+      SetWorkerCheckpointHook(controller, &HoldPausedCheckpoint);
+  auto release_checkpoint = [&checkpoint_gate] {
+    {
+      std::lock_guard lock(checkpoint_gate.mutex);
+      checkpoint_gate.release = true;
+    }
+    checkpoint_gate.changed.notify_all();
+  };
+  auto detach_checkpoint = [&controller] {
+    windayflow::capture::CaptureInstanceControllerTestPeer::
+        SetWorkerCheckpointHook(controller, nullptr);
+    g_worker_checkpoint_gate.store(nullptr);
+  };
+
+  uint64_t generation = 0;
+  if (!ExpectState(controller, WDF_CAPTURE_STATE_STOPPED,
+                   "user-reason fixture omitted initial state") ||
+      !Expect(Authorize(controller, 1, &generation) &&
+                  StartEnabled(controller, generation),
+              "user-reason fixture did not start") ||
+      !ExpectState(controller, WDF_CAPTURE_STATE_STARTING,
+                   "user-reason fixture omitted STARTING") ||
+      !PublishReadyAndExpectRecording(
+          controller, "user-reason fixture omitted RECORDING") ||
+      !Expect(controller.Pause() == WDF_CAPTURE_RESULT_OK,
+              "user-reason fixture rejected Pause") ||
+      !ExpectStateAndReason(controller, WDF_CAPTURE_STATE_PAUSING,
+                            WDF_CAPTURE_REASON_USER_PAUSED,
+                            "user Pause omitted its PAUSING reason")) {
+    release_checkpoint();
+    detach_checkpoint();
+    return false;
+  }
+
+  bool checkpoint_entered = false;
+  {
+    std::unique_lock lock(checkpoint_gate.mutex);
+    checkpoint_entered = checkpoint_gate.changed.wait_for(
+        lock, std::chrono::seconds(1),
+        [&checkpoint_gate] { return checkpoint_gate.entered; });
+  }
+  uint64_t blocked_generation = 0;
+  uint64_t allowed_generation = 0;
+  if (!Expect(checkpoint_entered,
+              "user Pause did not reach its Paused checkpoint") ||
+      !Expect(controller.UpdateRuntimeAuthorization(
+                  {BlockedPrivacy(2), std::nullopt}, &blocked_generation) ==
+                  windayflow::capture::CaptureSafetyUpdateResult::kOk,
+              "user-reason blocking replacement failed") ||
+      !Expect(controller.UpdateRuntimeAuthorization(
+                  {AllowedPrivacy(3), Target()}, &allowed_generation) ==
+                  windayflow::capture::CaptureSafetyUpdateResult::kOk,
+              "user-reason allowing replacement failed")) {
+    release_checkpoint();
+    detach_checkpoint();
+    return false;
+  }
+
+  release_checkpoint();
+  if (!ExpectStateAndReason(controller, WDF_CAPTURE_STATE_PAUSED,
+                            WDF_CAPTURE_REASON_USER_PAUSED,
+                            "authorization updates replaced USER_PAUSED")) {
+    detach_checkpoint();
+    return false;
+  }
+
+  if (!Expect(controller.RequestStop() == WDF_CAPTURE_RESULT_OK,
+              "user-reason fixture rejected cleanup stop") ||
+      !ExpectState(controller, WDF_CAPTURE_STATE_STOPPING,
+                   "user-reason cleanup omitted STOPPING")) {
+    detach_checkpoint();
+    return false;
+  }
+  const bool stopped =
+      Expect(controller.WaitStopped(2'000) == WDF_CAPTURE_RESULT_OK,
+             "user-reason fixture did not stop") &&
+      ExpectState(controller, WDF_CAPTURE_STATE_STOPPED,
+                  "user-reason cleanup omitted STOPPED");
+  detach_checkpoint();
+  return stopped;
+}
+
+bool TestLateReadyDoesNotEscapeAuthorizationPause() {
+  auto backend_state = std::make_shared<BackendState>();
+  CaptureInstanceControllerConfiguration configuration;
+  configuration.activation_mode = CaptureActivationMode::kEnabled;
+  configuration.event_queue_capacity = 16;
+  WorkerCheckpointGate checkpoint_gate;
+  g_worker_checkpoint_gate.store(&checkpoint_gate);
+  CaptureInstanceController controller(
+      configuration,
+      std::make_unique<TestBackend>(true, true, backend_state));
+  windayflow::capture::CaptureInstanceControllerTestPeer::
+      SetWorkerCheckpointHook(controller, &HoldPausedCheckpoint);
+  auto release_acquire = [&backend_state] {
+    {
+      std::lock_guard lock(backend_state->mutex);
+      backend_state->release_acquire = true;
+    }
+    backend_state->changed.notify_all();
+  };
+  auto release_checkpoint = [&checkpoint_gate] {
+    {
+      std::lock_guard lock(checkpoint_gate.mutex);
+      checkpoint_gate.release = true;
+    }
+    checkpoint_gate.changed.notify_all();
+  };
+  auto detach_checkpoint = [&controller] {
+    windayflow::capture::CaptureInstanceControllerTestPeer::
+        SetWorkerCheckpointHook(controller, nullptr);
+    g_worker_checkpoint_gate.store(nullptr);
+  };
+  if (!ExpectState(controller, WDF_CAPTURE_STATE_STOPPED,
+                   "late-ready fixture omitted initial state")) {
+    release_acquire();
+    release_checkpoint();
+    detach_checkpoint();
+    return false;
+  }
+
+  uint64_t generation = 0;
+  if (!Expect(Authorize(controller, 1, &generation) &&
+                  StartEnabled(controller, generation),
+              "late-ready fixture did not start") ||
+      !ExpectState(controller, WDF_CAPTURE_STATE_STARTING,
+                   "late-ready fixture omitted STARTING")) {
+    release_acquire();
+    release_checkpoint();
+    detach_checkpoint();
+    return false;
+  }
+  {
+    std::unique_lock lock(backend_state->mutex);
+    if (!backend_state->changed.wait_for(
+            lock, std::chrono::seconds(1),
+            [&backend_state] { return backend_state->acquire_entered; })) {
+      backend_state->release_acquire = true;
+      lock.unlock();
+      backend_state->changed.notify_all();
+      release_checkpoint();
+      detach_checkpoint();
+      return Expect(false,
+                    "late-ready worker did not enter first-frame acquisition");
+    }
+  }
+
+  uint64_t replacement_generation = 0;
+  auto authorization_update = std::async(
+      std::launch::async,
+      [&controller, &replacement_generation] {
+        return controller.UpdateRuntimeAuthorization(
+            {AllowedPrivacy(2), Target()}, &replacement_generation);
+      });
+  if (!ExpectState(controller, WDF_CAPTURE_STATE_PAUSING,
+                   "late-ready authorization did not enter PAUSING")) {
+    release_acquire();
+    release_checkpoint();
+    static_cast<void>(authorization_update.get());
+    detach_checkpoint();
+    return false;
+  }
+  release_acquire();
+  const auto update_result = authorization_update.get();
+  bool checkpoint_entered = false;
+  {
+    std::unique_lock lock(checkpoint_gate.mutex);
+    checkpoint_entered = checkpoint_gate.changed.wait_for(
+        lock, std::chrono::seconds(1),
+        [&checkpoint_gate] { return checkpoint_gate.entered; });
+  }
+  if (!Expect(update_result ==
+                  windayflow::capture::CaptureSafetyUpdateResult::kOk,
+              "late-ready authorization replacement failed") ||
+      !Expect(checkpoint_entered,
+              "late-ready worker did not reach its Paused checkpoint")) {
+    release_checkpoint();
+    detach_checkpoint();
+    return false;
+  }
+
+  const uint64_t run_id = controller.active_run_id();
+  const uint64_t pause_epoch =
+      windayflow::capture::CaptureInstanceControllerTestPeer::PauseEpoch(
+          controller);
+  if (!Expect(run_id != 0 && pause_epoch != 0,
+              "late-ready fixture lost its run or pause epoch") ||
+      !Expect(windayflow::capture::CaptureInstanceControllerTestPeer::
+                  Checkpoint(
+                      controller, run_id,
+                      {windayflow::capture::CaptureWorkerCheckpointKind::kReady,
+                       0}),
+              "PAUSING rejected the delayed Ready checkpoint") ||
+      !Expect(controller.state() == WDF_CAPTURE_STATE_PAUSING &&
+                  ReadOne(controller, 0).result == CaptureEventReadResult::kEmpty,
+              "delayed Ready escaped PAUSING or published RECORDING")) {
+    release_checkpoint();
+    detach_checkpoint();
+    return false;
+  }
+  release_checkpoint();
+  if (!ExpectState(controller, WDF_CAPTURE_STATE_PAUSED,
+                   "late-ready fixture omitted PAUSED") ||
+      !Expect(windayflow::capture::CaptureInstanceControllerTestPeer::
+                  Checkpoint(
+                      controller, run_id,
+                      {windayflow::capture::CaptureWorkerCheckpointKind::kReady,
+                       0}),
+              "PAUSED rejected the delayed Ready checkpoint") ||
+      !Expect(controller.state() == WDF_CAPTURE_STATE_PAUSED &&
+                  ReadOne(controller, 0).result == CaptureEventReadResult::kEmpty,
+              "delayed Ready escaped PAUSED or published RECORDING")) {
+    detach_checkpoint();
+    return false;
+  }
+
+  if (!Expect(controller.RequestStop() == WDF_CAPTURE_RESULT_OK,
+              "late-ready fixture rejected cleanup stop") ||
+      !ExpectState(controller, WDF_CAPTURE_STATE_STOPPING,
+                   "late-ready cleanup omitted STOPPING")) {
+    detach_checkpoint();
+    return false;
+  }
+  const bool stopped =
+      Expect(controller.WaitStopped(2'000) == WDF_CAPTURE_RESULT_OK,
+             "late-ready fixture did not stop") &&
+      ExpectState(controller, WDF_CAPTURE_STATE_STOPPED,
+                  "late-ready cleanup omitted STOPPED") &&
+      Expect(controller.join_count() == 1 &&
+                 controller.reserved_event_count() == 0,
+             "late-ready cleanup leaked a join or reservation");
+  detach_checkpoint();
   return stopped;
 }
 
@@ -819,8 +1113,8 @@ bool TestDestructorJoinsActiveWorker() {
                 "destructor fixture did not start") ||
         !ExpectState(controller, WDF_CAPTURE_STATE_STARTING,
                      "destructor fixture omitted STARTING") ||
-        !ExpectState(controller, WDF_CAPTURE_STATE_RECORDING,
-                     "destructor fixture omitted RECORDING")) {
+        !PublishReadyAndExpectRecording(
+            controller, "destructor fixture omitted RECORDING")) {
       return false;
     }
     {
@@ -871,15 +1165,32 @@ bool TestFatalExitPublishesErrorWithoutFakeStopping() {
   if (!Expect(failure.result == CaptureEventReadResult::kSuccess &&
                   failure.event.kind == WDF_CAPTURE_EVENT_ERROR &&
                   failure.event.state == WDF_CAPTURE_STATE_FAULTED &&
-                  failure.event.error == WDF_CAPTURE_ERROR_DEVICE_UNAVAILABLE,
+                  failure.event.error == WDF_CAPTURE_ERROR_DEVICE_UNAVAILABLE &&
+                  failure.detail ==
+                      "Capture worker exited because display acquisition failed.",
               "fatal worker exit did not publish ERROR/FAULTED") ||
+      !Expect(!windayflow::capture::CaptureInstanceControllerTestPeer::
+                  Checkpoint(
+                      controller, controller.active_run_id(),
+                      {windayflow::capture::CaptureWorkerCheckpointKind::kReady,
+                       0}) &&
+                  controller.state() == WDF_CAPTURE_STATE_FAULTED,
+              "FAULTED accepted an illegal Ready checkpoint") ||
       !Expect(ReadOne(controller, 0).result == CaptureEventReadResult::kEmpty,
               "fatal worker exit published fake STOPPING") ||
       !Expect(controller.WaitStopped(2'000) ==
                   WDF_CAPTURE_RESULT_INTERNAL_ERROR,
-              "fatal worker result was not cached for waiters") ||
-      !ExpectState(controller, WDF_CAPTURE_STATE_STOPPED,
-                   "fatal join omitted final STOPPED")) {
+              "fatal worker result was not cached for waiters")) {
+    return false;
+  }
+  const ReadEvent stopped = ReadOne(controller);
+  if (!Expect(stopped.result == CaptureEventReadResult::kSuccess &&
+                  stopped.event.kind == WDF_CAPTURE_EVENT_STATE_CHANGED &&
+                  stopped.event.state == WDF_CAPTURE_STATE_STOPPED &&
+                  stopped.event.reason == WDF_CAPTURE_REASON_BACKEND_FAULT &&
+                  stopped.detail ==
+                      "Capture worker exited because display acquisition failed.",
+              "fatal join omitted its terminal failure detail")) {
     return false;
   }
   return Expect(controller.join_count() == 1 &&
@@ -1026,7 +1337,9 @@ int main() {
       !TestEnabledStateSequenceAndStop() ||
       !TestStaleDeferredStopCannotStopReplacementRun() ||
       !TestWaitLeaderTimeoutAndFollowerTakeover() ||
-      !TestPausingReasonTracksLatestAuthorization() ||
+      !TestPausingReasonTracksLatestBlockingAuthorization() ||
+      !TestPausingUserReasonSurvivesAuthorizationUpdates() ||
+      !TestLateReadyDoesNotEscapeAuthorizationPause() ||
       !TestStopRevokesAuthorizationBeforeWorkerStart() ||
       !TestDestructorJoinsActiveWorker() ||
       !TestFatalExitPublishesErrorWithoutFakeStopping() ||

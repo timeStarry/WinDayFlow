@@ -233,6 +233,50 @@
                     <TextBlock Style="{StaticResource SectionTitleTextStyle}" Text="隐私" />
                     <Border Style="{StaticResource SettingsGroupBorderStyle}">
                         <Grid
+                            x:Name="ApplicationPrivacyModeSettingLayout"
+                            Padding="20"
+                            ColumnSpacing="24">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="2*" />
+                                <ColumnDefinition Width="3*" />
+                            </Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+                            <StackPanel VerticalAlignment="Center" Spacing="2">
+                                <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}" Text="应用录制范围" />
+                                <TextBlock
+                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                    Text="{x:Bind ViewModel.ApplicationPrivacyModeDetailText, Mode=OneWay}"
+                                    TextWrapping="Wrap" />
+                            </StackPanel>
+                            <RadioButtons
+                                x:Name="ApplicationPrivacyModePicker"
+                                Grid.Column="1"
+                                MaxWidth="420"
+                                HorizontalAlignment="Stretch"
+                                VerticalAlignment="Center"
+                                AutomationProperties.AutomationId="ApplicationPrivacyModePicker"
+                                AutomationProperties.Name="应用录制范围"
+                                IsEnabled="{x:Bind ViewModel.CanChangeApplicationPrivacyMode, Mode=OneWay}"
+                                SelectionChanged="OnApplicationPrivacyModeChanged">
+                                <x:String>按前台应用保护（推荐）</x:String>
+                                <x:String>固定一个显示器，允许其中全部应用（连续录制）</x:String>
+                            </RadioButtons>
+                        </Grid>
+                    </Border>
+
+                    <InfoBar
+                        AutomationProperties.LiveSetting="Polite"
+                        IsClosable="False"
+                        IsOpen="{x:Bind ViewModel.IsAllowAllApplicationsMode, Mode=OneWay}"
+                        Message="{x:Bind ViewModel.ContinuousCaptureDisclosureText, Mode=OneWay}"
+                        Severity="Warning"
+                        Title="固定显示器连续录制会扩大采集范围" />
+
+                    <Border Style="{StaticResource SettingsGroupBorderStyle}">
+                        <Grid
                             x:Name="SensitiveApplicationSettingLayout"
                             Padding="20"
                             ColumnSpacing="24">
@@ -248,7 +292,7 @@
                                 <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}" Text="敏感应用保护" />
                                 <TextBlock
                                     Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                    Text="录制组件接入后，识别到身份验证、密码、财务、健康或私密浏览上下文时将暂停。"
+                                    Text="{x:Bind ViewModel.SensitiveApplicationProtectionDetailText, Mode=OneWay}"
                                     TextWrapping="Wrap" />
                             </StackPanel>
                             <ToggleSwitch
@@ -258,7 +302,7 @@
                                 VerticalAlignment="Center"
                                 AutomationProperties.AutomationId="SensitiveApplicationProtectionToggle"
                                 AutomationProperties.Name="敏感应用保护"
-                                IsEnabled="{x:Bind ViewModel.CanChangePrivacy, Mode=OneWay}"
+                                IsEnabled="{x:Bind ViewModel.CanChangeApplicationProtection, Mode=OneWay}"
                                 IsOn="{x:Bind ViewModel.ExcludeSensitiveApplications, Mode=OneWay}"
                                 OffContent="关闭"
                                 OnContent="排除"

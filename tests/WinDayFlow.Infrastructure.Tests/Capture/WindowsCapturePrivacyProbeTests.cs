@@ -141,6 +141,31 @@ public sealed class WindowsCapturePrivacyProbeTests
     }
 
     [Fact]
+    public void StorageSampleReadsOnlyTheStructuredStorageSignal()
+    {
+        var nativeApi = FakeWindowsPrivacyNativeApi.CreateClear();
+        var probe = CreateProbe(nativeApi);
+
+        var decision = probe.SampleStorage();
+
+        Assert.Equal(NativeCapturePolicyDecision.Allow, decision);
+        Assert.Equal(1, nativeApi.ReadCount);
+    }
+
+    [Fact]
+    public void StorageSampleFailsClosedWithoutReadingDiskOnUnsupportedPlatforms()
+    {
+        var nativeApi = FakeWindowsPrivacyNativeApi.CreateClear();
+        nativeApi.IsSupportedPlatform = false;
+        var probe = CreateProbe(nativeApi);
+
+        var decision = probe.SampleStorage();
+
+        Assert.Equal(NativeCapturePolicyDecision.Unknown, decision);
+        Assert.Equal(0, nativeApi.ReadCount);
+    }
+
+    [Fact]
     public void CriticalReadExceptionsAreNotSwallowed()
     {
         var nativeApi = FakeWindowsPrivacyNativeApi.CreateClear();
@@ -299,6 +324,62 @@ public sealed class WindowsCapturePrivacyProbeTests
         Assert.Equal(12, layout.SessionStateOffset);
         Assert.Equal(16, layout.SessionFlagsOffset);
         Assert.Equal(20, layout.MinimumBytes);
+    }
+
+    [Fact]
+    public void ActiveSessionUsesDefaultInputDesktopToResolveStaleLockFlag()
+    {
+        var resolved = PInvokeWindowsPrivacyNativeApi.TryResolveSessionUnlocked(
+            WtsConnectState.Active,
+            PInvokeWindowsPrivacyNativeApi.WtsSessionStateLock,
+            inputDesktopRead: true,
+            inputDesktopClear: true,
+            out var unlocked);
+
+        Assert.True(resolved);
+        Assert.True(unlocked);
+    }
+
+    [Fact]
+    public void ActiveSessionRemainsLockedOnNonDefaultInputDesktop()
+    {
+        var resolved = PInvokeWindowsPrivacyNativeApi.TryResolveSessionUnlocked(
+            WtsConnectState.Active,
+            PInvokeWindowsPrivacyNativeApi.WtsSessionStateLock,
+            inputDesktopRead: true,
+            inputDesktopClear: false,
+            out var unlocked);
+
+        Assert.True(resolved);
+        Assert.False(unlocked);
+    }
+
+    [Fact]
+    public void ActiveSessionWithUnverifiableLockFlagRemainsUnknown()
+    {
+        var resolved = PInvokeWindowsPrivacyNativeApi.TryResolveSessionUnlocked(
+            WtsConnectState.Active,
+            PInvokeWindowsPrivacyNativeApi.WtsSessionStateLock,
+            inputDesktopRead: false,
+            inputDesktopClear: false,
+            out var unlocked);
+
+        Assert.False(resolved);
+        Assert.False(unlocked);
+    }
+
+    [Fact]
+    public void ExplicitUnlockFlagDoesNotRequireDesktopFallback()
+    {
+        var resolved = PInvokeWindowsPrivacyNativeApi.TryResolveSessionUnlocked(
+            WtsConnectState.Active,
+            PInvokeWindowsPrivacyNativeApi.WtsSessionStateUnlock,
+            inputDesktopRead: false,
+            inputDesktopClear: false,
+            out var unlocked);
+
+        Assert.True(resolved);
+        Assert.True(unlocked);
     }
 
     [Fact]

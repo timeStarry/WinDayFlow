@@ -14,6 +14,8 @@ internal sealed class NativeCaptureBackend
     private const int MaximumEventDetailBytes = 1024 * 1024;
     private const uint PollTimeoutMilliseconds = 250;
     internal const uint StopTimeoutMilliseconds = 5_000;
+    internal const uint AuthorizedLifecycleConfirmationTimeoutMilliseconds =
+        StopTimeoutMilliseconds;
 
     private static readonly UTF8Encoding StrictUtf8 = new(
         encoderShouldEmitUTF8Identifier: false,
@@ -53,6 +55,9 @@ internal sealed class NativeCaptureBackend
     private long _callbackInvalidationGeneration;
     private ulong _lastNativeAuthorizationEpoch;
     private ulong _lastObservedNativeEventSequence;
+    private ulong _lastObservedStartingSequence;
+    private ulong _lastObservedRecordingSequence;
+    private ulong _lastObservedResumingSequence;
     private ulong _lastObservedStoppedSequence;
     private Exception? _eventPumpFailure;
     private bool _eventPumpExited;
@@ -154,6 +159,11 @@ internal sealed class NativeCaptureBackend
     public bool SupportsCommandAdmission =>
         (Capabilities & NativeCaptureAbiContract.RuntimeOwnerCapabilities)
         == NativeCaptureAbiContract.RuntimeOwnerCapabilities;
+
+    public bool SupportsDisplayWideContinuousAuthorization =>
+        (Capabilities
+            & NativeCaptureAbiContract.DisplayWideContinuousCapabilities)
+        == NativeCaptureAbiContract.DisplayWideContinuousCapabilities;
 
     internal bool IsShutdownStarted =>
         Volatile.Read(ref _shutdownStarted) != 0;
@@ -903,6 +913,8 @@ internal sealed class NativeCaptureBackend
         {
             ThrowIfDisposed();
             ThrowIfShuttingDown();
+            var sequenceBeforeRequest = GetLastObservedNativeEventSequence();
+            var commandStartedAt = Stopwatch.GetTimestamp();
             var result = start
                 ? _nativeApi.StartAuthorized(_handle, ref admission)
                 : _nativeApi.ResumeAuthorized(_handle, ref admission);
@@ -915,6 +927,14 @@ internal sealed class NativeCaptureBackend
 
             ThrowForResult(result, operation);
             _stopEventObservationRequired = true;
+            cancellationToken.ThrowIfCancellationRequested();
+            await WaitForManagedAuthorizedLifecycleEventAsync(
+                    sequenceBeforeRequest,
+                    start ? CaptureState.Starting : CaptureState.Resuming,
+                    operation,
+                    commandStartedAt,
+                    cancellationToken)
+                .ConfigureAwait(false);
         }
         finally
         {
@@ -991,20 +1011,28 @@ internal sealed class NativeCaptureBackend
         var context = authorization.PrivacyContext;
         var target = authorization.Target;
         var targetPresent = target.State == NativeCaptureTargetIdentityState.Present;
+        var displayWide = targetPresent
+            && target.Scope == NativeCaptureAuthorizationScope.DisplayWide;
         var nativeAuthorization = new NativeCaptureRuntimeAuthorizationV1
         {
             StructSize = NativeCaptureAbiContract.X64RuntimeAuthorizationStructureSize,
             AbiVersion = NativeCaptureAbiContract.AbiVersion,
             RuntimePolicyRevision = context.RuntimePolicyRevision,
             TargetEpoch = targetPresent ? target.TargetEpoch : 0,
-            TargetWindowHandle = targetPresent ? target.WindowHandle : 0,
-            TargetProcessCreationTime100ns = targetPresent
+            TargetWindowHandle = targetPresent && !displayWide
+                ? target.WindowHandle
+                : 0,
+            TargetProcessCreationTime100ns = targetPresent && !displayWide
                 ? target.ProcessCreationTime100ns
                 : 0,
-            TargetProcessId = targetPresent ? target.ProcessId : 0,
+            TargetProcessId = targetPresent && !displayWide
+                ? target.ProcessId
+                : 0,
             TargetFlags = targetPresent
-                ? NativeCaptureRuntimeAuthorizationV1.TargetPresent
-                    | NativeCaptureRuntimeAuthorizationV1.TargetDisplayPresent
+                ? NativeCaptureRuntimeAuthorizationV1.TargetDisplayPresent
+                    | (displayWide
+                        ? NativeCaptureRuntimeAuthorizationV1.TargetDisplayWideScope
+                        : NativeCaptureRuntimeAuthorizationV1.TargetPresent)
                 : 0,
             ConsentGranted = (int)context.ConsentGranted,
             SessionUnlocked = (int)context.SessionUnlocked,
@@ -1225,15 +1253,18 @@ internal sealed class NativeCaptureBackend
                         throw new NativeCaptureException(result, "poll_event");
                     }
 
-                    ValidateNativeEventSequence(captureEvent.Sequence);
-                    if (!ProcessEvent(captureEvent, detailBuffer))
+                    lock (_eventPumpObservationSync)
                     {
-                        pumpFailure = new InvalidDataException(
-                            "The managed native capture event pump stopped after an invalid event.");
-                        return;
-                    }
+                        ValidateNativeEventSequence(captureEvent.Sequence);
+                        if (!ProcessEvent(captureEvent, detailBuffer))
+                        {
+                            pumpFailure = new InvalidDataException(
+                                "The managed native capture event pump stopped after an invalid event.");
+                            return;
+                        }
 
-                    ObserveProcessedNativeEvent(captureEvent);
+                        ObserveProcessedNativeEvent(captureEvent);
+                    }
                 }
                 catch (Exception exception) when (exception is not OperationCanceledException)
                 {
@@ -1278,16 +1309,30 @@ internal sealed class NativeCaptureBackend
     private void ObserveProcessedNativeEvent(NativeCaptureEventV1 captureEvent)
     {
         TaskCompletionSource? observationChanged = null;
-        var observedStopped =
+        var observedStateChanged =
             (NativeCaptureEventKind)captureEvent.Kind
-                == NativeCaptureEventKind.StateChanged
-            && (CaptureState)captureEvent.State == CaptureState.Stopped;
+                == NativeCaptureEventKind.StateChanged;
         lock (_eventPumpObservationSync)
         {
             _lastObservedNativeEventSequence = captureEvent.Sequence;
-            if (observedStopped)
+            if (observedStateChanged)
             {
-                _lastObservedStoppedSequence = captureEvent.Sequence;
+                switch ((CaptureState)captureEvent.State)
+                {
+                    case CaptureState.Starting:
+                        _lastObservedStartingSequence = captureEvent.Sequence;
+                        break;
+                    case CaptureState.Recording:
+                        _lastObservedRecordingSequence = captureEvent.Sequence;
+                        break;
+                    case CaptureState.Resuming:
+                        _lastObservedResumingSequence = captureEvent.Sequence;
+                        break;
+                    case CaptureState.Stopped:
+                        _lastObservedStoppedSequence = captureEvent.Sequence;
+                        break;
+                }
+
                 observationChanged = _eventPumpObservationChanged;
                 _eventPumpObservationChanged = CreateEventPumpObservationSource();
             }
@@ -1308,6 +1353,73 @@ internal sealed class NativeCaptureBackend
         }
 
         observationChanged.TrySetResult();
+    }
+
+    private async Task WaitForManagedAuthorizedLifecycleEventAsync(
+        ulong sequenceBeforeRequest,
+        CaptureState expectedState,
+        string operation,
+        long commandStartedAt,
+        CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            Task observationChanged;
+            lock (_eventPumpObservationSync)
+            {
+                var expectedStateSequence = expectedState switch
+                {
+                    CaptureState.Starting => _lastObservedStartingSequence,
+                    CaptureState.Resuming => _lastObservedResumingSequence,
+                    _ => throw new ArgumentOutOfRangeException(
+                        nameof(expectedState),
+                        expectedState,
+                        "An authorized lifecycle command must confirm Starting or Resuming."),
+                };
+                if (expectedStateSequence > sequenceBeforeRequest
+                    || _lastObservedRecordingSequence > sequenceBeforeRequest)
+                {
+                    return;
+                }
+
+                if (_eventPumpFailure is { } failure)
+                {
+                    throw new InvalidOperationException(
+                        $"The managed native capture event pump faulted before observing the {operation} command confirmation event.",
+                        failure);
+                }
+
+                if (_eventPumpExited)
+                {
+                    throw new InvalidOperationException(
+                        $"The managed native capture event pump exited before observing the {operation} command confirmation event.");
+                }
+
+                observationChanged = _eventPumpObservationChanged.Task;
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+            var remaining = TimeSpan.FromMilliseconds(
+                    AuthorizedLifecycleConfirmationTimeoutMilliseconds)
+                - Stopwatch.GetElapsedTime(commandStartedAt);
+            if (remaining <= TimeSpan.Zero)
+            {
+                throw CreateManagedAuthorizedLifecycleTimeoutException(operation);
+            }
+
+            try
+            {
+                await observationChanged
+                    .WaitAsync(remaining, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (TimeoutException exception)
+            {
+                throw CreateManagedAuthorizedLifecycleTimeoutException(
+                    operation,
+                    exception);
+            }
+        }
     }
 
     private async Task WaitForManagedStoppedEventAsync(
@@ -1388,6 +1500,13 @@ internal sealed class NativeCaptureBackend
         Exception? innerException = null) =>
         new(
             "The managed native capture event pump did not observe the terminal stopped event within the stop timeout.",
+            innerException);
+
+    private static TimeoutException CreateManagedAuthorizedLifecycleTimeoutException(
+        string operation,
+        Exception? innerException = null) =>
+        new(
+            $"The managed native capture event pump did not observe the {operation} command confirmation event within the authorized lifecycle timeout.",
             innerException);
 
     private bool ProcessEvent(NativeCaptureEventV1 captureEvent, byte[] detailBuffer)
@@ -1785,6 +1904,14 @@ internal sealed class NativeCaptureBackend
                     | NativeCaptureCapabilities.DisplayBoundCommandAdmission))
         {
             return "Native display-bound command admission requires the complete display-scoped runtime-owner safety set.";
+        }
+
+        if (capabilities.HasFlag(
+                NativeCaptureCapabilities.DisplayWideContinuousAuthorization)
+            && (capabilities & NativeCaptureAbiContract.RuntimeOwnerCapabilities)
+                != NativeCaptureAbiContract.RuntimeOwnerCapabilities)
+        {
+            return "Native display-wide continuous authorization requires the complete runtime-owner safety set.";
         }
 
         var screenCapture = capabilities.HasFlag(

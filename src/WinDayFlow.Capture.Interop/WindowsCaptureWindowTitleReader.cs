@@ -202,8 +202,13 @@ internal sealed class FailStopWindowsCaptureWindowTitleReader
         lock (_sync)
         {
             _terminalFatalException?.Throw();
-            if (_disposed
-                || _state is not WindowsCaptureWindowTitleWorkerState.Idle)
+            if (_disposed)
+            {
+                return WindowsCaptureObservationReadState.Unknown;
+            }
+
+            RecoverQuiescedPoisonedWorkerUnderLock();
+            if (_state is not WindowsCaptureWindowTitleWorkerState.Idle)
             {
                 return WindowsCaptureObservationReadState.Unknown;
             }
@@ -357,6 +362,20 @@ internal sealed class FailStopWindowsCaptureWindowTitleReader
             _state = WindowsCaptureWindowTitleWorkerState.Poisoned;
             return false;
         }
+    }
+
+    private void RecoverQuiescedPoisonedWorkerUnderLock()
+    {
+        if (_state is not WindowsCaptureWindowTitleWorkerState.Poisoned
+            || _worker?.IsAlive == true)
+        {
+            return;
+        }
+
+        _request = null;
+        _worker = null;
+        _state = WindowsCaptureWindowTitleWorkerState.Idle;
+        Monitor.PulseAll(_sync);
     }
 
     private void RunWorker()

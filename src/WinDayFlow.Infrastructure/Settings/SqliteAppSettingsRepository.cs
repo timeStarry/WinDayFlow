@@ -19,7 +19,8 @@ public sealed class SqliteAppSettingsRepository : IAppSettingsRepository
             exclude_sensitive_applications,
             pause_in_remote_sessions,
             pause_during_screen_sharing,
-            capture_privacy_revision
+            capture_privacy_revision,
+            capture_application_privacy_mode
         FROM app_settings
         WHERE id = 1;
         """;
@@ -262,7 +263,8 @@ public sealed class SqliteAppSettingsRepository : IAppSettingsRepository
                 exclude_sensitive_applications = $exclude_sensitive_applications,
                 pause_in_remote_sessions = $pause_in_remote_sessions,
                 pause_during_screen_sharing = $pause_during_screen_sharing,
-                capture_privacy_revision = $capture_privacy_revision
+                capture_privacy_revision = $capture_privacy_revision,
+                capture_application_privacy_mode = $capture_application_privacy_mode
             WHERE id = 1;
             """;
         command.Parameters.AddWithValue("$theme", (int)settings.Theme);
@@ -301,6 +303,9 @@ public sealed class SqliteAppSettingsRepository : IAppSettingsRepository
         command.Parameters.AddWithValue(
             "$capture_privacy_revision",
             settings.CapturePrivacy.Revision);
+        command.Parameters.AddWithValue(
+            "$capture_application_privacy_mode",
+            (int)settings.CapturePrivacy.ApplicationPrivacyMode);
 
         var affectedRows = await command
             .ExecuteNonQueryAsync(cancellationToken)
@@ -414,7 +419,8 @@ public sealed class SqliteAppSettingsRepository : IAppSettingsRepository
                 privacy.PauseInRemoteSessions,
                 privacy.PauseDuringScreenSharing,
                 privacy.Revision,
-                rules));
+                rules,
+                privacy.ApplicationPrivacyMode));
     }
 
     private static async Task<CaptureExclusionRuleSet> ReadRulesAsync(
@@ -523,12 +529,22 @@ public sealed class SqliteAppSettingsRepository : IAppSettingsRepository
                     consentPrivacyRevision);
             }
 
+            var applicationPrivacyModeValue = checked((int)reader.GetInt64(11));
+            var applicationPrivacyMode =
+                (CaptureApplicationPrivacyMode)applicationPrivacyModeValue;
+            if (!Enum.IsDefined(applicationPrivacyMode))
+            {
+                throw new InvalidDataException(
+                    $"Stored capture application privacy mode value '{applicationPrivacyModeValue}' is not supported.");
+            }
+
             var privacy = new CapturePrivacySettings(
                 checked((int)reader.GetInt64(6)),
                 ReadBoolean(reader, 7, "exclude_sensitive_applications"),
                 ReadBoolean(reader, 8, "pause_in_remote_sessions"),
                 ReadBoolean(reader, 9, "pause_during_screen_sharing"),
-                reader.GetInt64(10));
+                reader.GetInt64(10),
+                applicationPrivacyMode);
 
             return new AppSettings(
                 theme,

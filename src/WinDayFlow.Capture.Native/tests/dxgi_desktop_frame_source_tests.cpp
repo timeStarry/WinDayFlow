@@ -158,8 +158,11 @@ bool TestFailureMapping() {
                     DxgiDesktopFrameResult::kUnsupportedFormat,
                 "unsupported output was not mapped") &&
          Expect(windayflow::capture::MapDesktopDuplicationFailure(E_FAIL) ==
-                    DxgiDesktopFrameResult::kDeviceFailure,
-                "unknown device failure was not mapped") &&
+                     DxgiDesktopFrameResult::kDeviceFailure,
+                 "unknown device failure was not mapped") &&
+         Expect(windayflow::capture::MapDesktopDuplicationFailure(
+                    E_ACCESSDENIED) == DxgiDesktopFrameResult::kAccessDenied,
+                "desktop access denial was not distinguished") &&
          Expect(windayflow::capture::MapDesktopTextureMapFailure(
                     DXGI_ERROR_DEVICE_REMOVED) ==
                     DxgiDesktopFrameResult::kAccessLost,

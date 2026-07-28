@@ -12,6 +12,7 @@
 namespace {
 
 using windayflow::capture::CaptureTargetIdentity;
+using windayflow::capture::CaptureAuthorizationScope;
 using windayflow::capture::IWindowsCaptureTargetObserverApi;
 
 constexpr uint64_t kWindowHandle = 0x101;
@@ -37,6 +38,16 @@ HMONITOR TestMonitor(uint64_t value) {
 CaptureTargetIdentity ExpectedTarget() {
   return CaptureTargetIdentity{kWindowHandle, kProcessId,     kCreationTime,
                                kTargetEpoch,  kMonitorHandle, kDeviceKey};
+}
+
+CaptureTargetIdentity ExpectedDisplayWideTarget() {
+  return CaptureTargetIdentity{0,
+                               0,
+                               0,
+                               kTargetEpoch,
+                               kMonitorHandle,
+                               kDeviceKey,
+                               CaptureAuthorizationScope::kDisplayWide};
 }
 
 bool Expect(bool condition, const char* message) {
@@ -474,6 +485,67 @@ bool TestWindowHandleProcessHandleAndPidReuseFailClosed() {
                 "reused PID with a different creation time was accepted");
 }
 
+bool TestDisplayWideObservationAvoidsApplicationIdentityCalls() {
+  FakeWindowsCaptureTargetObserverApi api;
+  api.foreground = TestWindow(kWindowHandle + 1);
+  api.owner = {kThreadId + 1, kProcessId + 1};
+  api.monitor_info.device_key = LR"(\\.\display7)";
+  const CaptureTargetIdentity expected = ExpectedDisplayWideTarget();
+  const auto observed =
+      windayflow::capture::ObserveWindowsCaptureAuthorizationWithApi(
+          api, expected);
+
+  return Expect(observed.has_value() && *observed == expected,
+                "stable display-wide authorization was not observed") &&
+         Expect(api.monitor_info_calls == 2 && api.foreground_calls == 0 &&
+                    api.owner_calls == 0 && api.open_calls == 0 &&
+                    api.process_id_calls == 0 && api.process_time_calls == 0 &&
+                    api.monitor_calls == 0 && api.close_calls == 0,
+                "display-wide observation read foreground application identity") &&
+         Expect(api.monitor_info_sizes_were_valid,
+                "display-wide observation used an invalid monitor structure");
+}
+
+bool TestDisplayWideObservationFailsClosed() {
+  const CaptureTargetIdentity expected = ExpectedDisplayWideTarget();
+
+  FakeWindowsCaptureTargetObserverApi first_read_failed;
+  first_read_failed.monitor_info.succeeded = FALSE;
+  if (!Expect(
+          !windayflow::capture::ObserveWindowsCaptureAuthorizationWithApi(
+              first_read_failed, expected),
+          "display-wide monitor read failure was accepted")) {
+    return false;
+  }
+
+  FakeWindowsCaptureTargetObserverApi display_changed;
+  display_changed.monitor_info_reads = {
+      {TRUE, kDeviceKey, true},
+      {TRUE, LR"(\\.\DISPLAY8)", true},
+  };
+  if (!Expect(
+          !windayflow::capture::ObserveWindowsCaptureAuthorizationWithApi(
+              display_changed, expected),
+          "display-wide monitor identity race was accepted")) {
+    return false;
+  }
+
+  CaptureTargetIdentity invalid = expected;
+  invalid.process_id = kProcessId;
+  FakeWindowsCaptureTargetObserverApi invalid_api;
+  return Expect(
+             !windayflow::capture::ObserveWindowsCaptureAuthorizationWithApi(
+                 invalid_api, invalid),
+             "display-wide target retained a process identity") &&
+         Expect(invalid_api.TotalCalls() == 0,
+                "invalid display-wide target reached the native API") &&
+         Expect(!windayflow::capture::ObserveWindowsCaptureTargetWithApi(
+                     invalid_api, expected),
+                "foreground-only observer accepted display-wide scope") &&
+         Expect(invalid_api.TotalCalls() == 0,
+                "display-wide scope reached foreground observation APIs");
+}
+
 }  // namespace
 
 int main() {
@@ -483,7 +555,9 @@ int main() {
       TestEveryNativeFailureFailsClosed() &&
       TestIdentityMismatchesFailClosed() &&
       TestRevalidationRejectsIdentityRaces() &&
-      TestWindowHandleProcessHandleAndPidReuseFailClosed();
+      TestWindowHandleProcessHandleAndPidReuseFailClosed() &&
+      TestDisplayWideObservationAvoidsApplicationIdentityCalls() &&
+      TestDisplayWideObservationFailsClosed();
   if (!passed) {
     return 1;
   }

@@ -7,9 +7,11 @@ namespace WinDayFlow.Infrastructure.Tests.Capture;
 public sealed class DevLiveCapturePrivacyTests
 {
     [Theory]
-    [InlineData("windayflow.app.EXE")]
     [InlineData("CMD.EXE")]
-    public async Task ExactClassicExecutableMatchPromotesOnlyApplicationAndWindow(
+    [InlineData("notepad.exe")]
+    [InlineData("devenv.exe")]
+    [InlineData("sample.exe")]
+    public async Task ResolvedClassicForegroundTargetIsAdmittedForQa(
         string executableName)
     {
         var source = CreateObservation(
@@ -38,19 +40,78 @@ public sealed class DevLiveCapturePrivacyTests
     }
 
     [Theory]
-    [InlineData("cmd.exe.evil")]
-    [InlineData("evil-cmd.exe")]
-    [InlineData("WinDayFlow.App.exe.bak")]
-    [InlineData("sample.exe")]
-    public async Task ExecutableSuffixAndNonAllowlistedNamesFailClosed(
+    [InlineData("WinDayFlow.App.exe")]
+    [InlineData("windayflow.app.EXE")]
+    public async Task WinDayFlowProcessIsExplicitlyBlockedWithoutLosingTarget(
         string executableName)
     {
-        var sampler = CreateSampler(CreateObservation(
-            executable: NativeCaptureObservation.Present(executableName)));
+        var source = CreateObservation(
+            executable: NativeCaptureObservation.Present(executableName));
+        var sampler = CreateSampler(source);
 
         var result = await sampler.SampleAsync(CancellationToken.None);
 
-        AssertFailClosed(result);
+        Assert.NotSame(WindowsCapturePrivacyObservation.FailClosed, result);
+        Assert.Equal(
+            NativeCapturePolicyDecision.Block,
+            result.Signals.ApplicationAllowed);
+        Assert.Equal(
+            NativeCapturePolicyDecision.Block,
+            result.Signals.WindowAllowed);
+        Assert.Same(source.Signals.CaptureIdentity, result.Signals.CaptureIdentity);
+        Assert.Same(source.Signals.Target, result.Signals.Target);
+        Assert.Same(source.DisplayTarget, result.DisplayTarget);
+        Assert.False(
+            WindowsCapturePrivacyMonitor
+                .IsRecoverableTransientTargetObservation(result));
+    }
+
+    [Theory]
+    [MemberData(nameof(UnresolvedWinDayFlowIdentityObservations))]
+    public async Task WinDayFlowProcessRemainsExplicitlyBlockedWhileIdentityResolves(
+        NativeCaptureObservation packageFamily,
+        NativeCaptureObservation windowTitle)
+    {
+        var source = CreateObservation(
+            executable: NativeCaptureObservation.Present("WinDayFlow.App.exe"),
+            packageFamily: packageFamily,
+            windowTitle: windowTitle);
+        var sampler = CreateSampler(source);
+
+        var result = await sampler.SampleAsync(CancellationToken.None);
+
+        Assert.Equal(
+            NativeCapturePolicyDecision.Block,
+            result.Signals.ApplicationAllowed);
+        Assert.Equal(
+            NativeCapturePolicyDecision.Block,
+            result.Signals.WindowAllowed);
+        Assert.Same(source.Signals.Target, result.Signals.Target);
+        Assert.Same(source.DisplayTarget, result.DisplayTarget);
+        Assert.False(
+            WindowsCapturePrivacyMonitor
+                .IsRecoverableTransientTargetObservation(result));
+    }
+
+    [Fact]
+    public async Task ResolvedPackagedForegroundTargetIsAdmittedForQa()
+    {
+        var source = CreateObservation(
+            executable: NativeCaptureObservation.Present("Contoso.App.exe"),
+            packageFamily: NativeCaptureObservation.Present(
+                "Contoso.App_123456789abcd"));
+        var sampler = CreateSampler(source);
+
+        var result = await sampler.SampleAsync(CancellationToken.None);
+
+        Assert.NotSame(WindowsCapturePrivacyObservation.FailClosed, result);
+        Assert.Equal(
+            NativeCapturePolicyDecision.Allow,
+            result.Signals.ApplicationAllowed);
+        Assert.Equal(
+            NativeCapturePolicyDecision.Allow,
+            result.Signals.WindowAllowed);
+        Assert.Same(source.Signals.CaptureIdentity, result.Signals.CaptureIdentity);
     }
 
     [Theory]
@@ -66,63 +127,212 @@ public sealed class DevLiveCapturePrivacyTests
     }
 
     [Theory]
-    [MemberData(nameof(RejectedPackageFamilyObservations))]
-    public async Task UnknownOrPresentPackageFamilyFailsClosed(
+    [MemberData(nameof(UnresolvedPackageFamilyObservations))]
+    public async Task UnresolvedPackageFamilyDoesNotBlockAStableExternalTarget(
         NativeCaptureObservation packageFamily)
     {
-        var sampler = CreateSampler(CreateObservation(packageFamily: packageFamily));
+        var source = CreateObservation(packageFamily: packageFamily);
+        var sampler = CreateSampler(source);
 
         var result = await sampler.SampleAsync(CancellationToken.None);
 
-        AssertFailClosed(result);
+        Assert.Equal(
+            NativeCapturePolicyDecision.Allow,
+            result.Signals.ApplicationAllowed);
+        Assert.Equal(
+            NativeCapturePolicyDecision.Allow,
+            result.Signals.WindowAllowed);
+        Assert.Same(source.Signals.CaptureIdentity, result.Signals.CaptureIdentity);
+        Assert.Same(source.Signals.Target, result.Signals.Target);
+        Assert.Same(source.DisplayTarget, result.DisplayTarget);
     }
 
     [Theory]
-    [MemberData(nameof(RejectedWindowTitleObservations))]
-    public async Task UnknownAbsentOrEmptyWindowTitleFailsClosed(
+    [MemberData(nameof(UnresolvedWindowTitleObservations))]
+    public async Task UnresolvedWindowTitleDoesNotBlockAStableExternalTarget(
         NativeCaptureObservation windowTitle)
     {
-        var sampler = CreateSampler(CreateObservation(windowTitle: windowTitle));
+        var source = CreateObservation(windowTitle: windowTitle);
+        var sampler = CreateSampler(source);
 
         var result = await sampler.SampleAsync(CancellationToken.None);
 
-        AssertFailClosed(result);
+        Assert.Equal(
+            NativeCapturePolicyDecision.Allow,
+            result.Signals.ApplicationAllowed);
+        Assert.Equal(
+            NativeCapturePolicyDecision.Allow,
+            result.Signals.WindowAllowed);
+        Assert.Same(source.Signals.CaptureIdentity, result.Signals.CaptureIdentity);
+        Assert.Same(source.Signals.Target, result.Signals.Target);
+        Assert.Same(source.DisplayTarget, result.DisplayTarget);
+    }
+
+    [Theory]
+    [InlineData("LockApp.exe")]
+    [InlineData("lockapp.EXE")]
+    public async Task LockScreenProcessIsExplicitlyBlockedWithoutLosingTarget(
+        string executableName)
+    {
+        var source = CreateObservation(
+            executable: NativeCaptureObservation.Present(executableName),
+            packageFamily: NativeCaptureObservation.Unknown,
+            windowTitle: NativeCaptureObservation.Unknown);
+        var sampler = CreateSampler(source);
+
+        var result = await sampler.SampleAsync(CancellationToken.None);
+
+        Assert.Equal(
+            NativeCapturePolicyDecision.Block,
+            result.Signals.ApplicationAllowed);
+        Assert.Equal(
+            NativeCapturePolicyDecision.Block,
+            result.Signals.WindowAllowed);
+        Assert.Same(source.Signals.Target, result.Signals.Target);
+        Assert.Same(source.DisplayTarget, result.DisplayTarget);
     }
 
     [Theory]
     [InlineData(NativeCaptureTargetIdentityState.Unknown)]
     [InlineData(NativeCaptureTargetIdentityState.Absent)]
-    public async Task UnknownOrAbsentTargetAndDisplayFailClosed(
+    public async Task UnknownTargetFailsClosedAndAbsentTargetIsPreserved(
         NativeCaptureTargetIdentityState state)
     {
         var sampler = CreateSampler(CreateObservation(targetState: state));
 
         var result = await sampler.SampleAsync(CancellationToken.None);
 
-        AssertFailClosed(result);
+        if (state == NativeCaptureTargetIdentityState.Absent)
+        {
+            Assert.Equal(
+                NativeCaptureTargetIdentityState.Absent,
+                result.Signals.Target.State);
+            Assert.Equal(
+                WindowsCaptureDisplayTargetState.Absent,
+                result.DisplayTarget.State);
+        }
+        else
+        {
+            AssertFailClosed(result);
+        }
     }
 
     [Theory]
     [InlineData(NativeCapturePolicyDecision.Block, NativeCapturePolicyDecision.Unknown)]
     [InlineData(NativeCapturePolicyDecision.Unknown, NativeCapturePolicyDecision.Block)]
-    public async Task ExistingApplicationOrWindowBlockCannotBePromoted(
+    public async Task ExistingApplicationOrWindowBlockIsPreservedWithTarget(
         NativeCapturePolicyDecision applicationAllowed,
         NativeCapturePolicyDecision windowAllowed)
     {
-        var sampler = CreateSampler(CreateObservation(
+        var source = CreateObservation(
             applicationAllowed: applicationAllowed,
-            windowAllowed: windowAllowed));
+            windowAllowed: windowAllowed);
+        var sampler = CreateSampler(source);
 
         var result = await sampler.SampleAsync(CancellationToken.None);
 
-        AssertFailClosed(result);
+        Assert.Same(source, result);
+        Assert.Equal(applicationAllowed, result.Signals.ApplicationAllowed);
+        Assert.Equal(windowAllowed, result.Signals.WindowAllowed);
+        Assert.Equal(
+            NativeCaptureTargetIdentityState.Present,
+            result.Signals.Target.State);
+    }
+
+    [Fact]
+    public async Task ExistingApplicationBlockIsPreservedForUnknownTarget()
+    {
+        var source = CreateObservation(
+            executable: NativeCaptureObservation.Unknown,
+            targetState: NativeCaptureTargetIdentityState.Unknown,
+            applicationAllowed: NativeCapturePolicyDecision.Block);
+        var sampler = CreateSampler(source);
+
+        var result = await sampler.SampleAsync(CancellationToken.None);
+
+        Assert.Same(source, result);
+        Assert.Equal(
+            NativeCapturePolicyDecision.Block,
+            result.Signals.ApplicationAllowed);
+        Assert.Equal(
+            NativeCaptureTargetIdentityState.Unknown,
+            result.Signals.Target.State);
+        Assert.False(
+            WindowsCapturePrivacyMonitor
+                .IsRecoverableTransientTargetObservation(result));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    public async Task ExistingIndependentBlockIsPreservedForUnknownTarget(
+        int blockedSignal)
+    {
+        var source = CreateObservation(
+            executable: NativeCaptureObservation.Unknown,
+            targetState: NativeCaptureTargetIdentityState.Unknown,
+            sessionUnlocked: blockedSignal == 0
+                ? NativeCapturePolicyDecision.Block
+                : NativeCapturePolicyDecision.Allow,
+            secureDesktopClear: blockedSignal == 1
+                ? NativeCapturePolicyDecision.Block
+                : NativeCapturePolicyDecision.Allow,
+            storageAvailable: blockedSignal == 2
+                ? NativeCapturePolicyDecision.Block
+                : NativeCapturePolicyDecision.Allow);
+        var sampler = CreateSampler(source);
+
+        var result = await sampler.SampleAsync(CancellationToken.None);
+
+        Assert.Same(source, result);
+        Assert.False(
+            WindowsCapturePrivacyMonitor
+                .IsRecoverableTransientTargetObservation(result));
+    }
+
+    [Fact]
+    public async Task QaAdmissionDoesNotPromoteIndependentPrivacySignals()
+    {
+        var source = CreateObservation(
+            sessionUnlocked: NativeCapturePolicyDecision.Block,
+            secureDesktopClear: NativeCapturePolicyDecision.Unknown,
+            remoteSession: NativeCaptureConditionState.Active,
+            presentationMode: NativeCaptureConditionState.Unknown,
+            storageAvailable: NativeCapturePolicyDecision.Block);
+        var sampler = CreateSampler(source);
+
+        var result = await sampler.SampleAsync(CancellationToken.None);
+
+        Assert.NotSame(WindowsCapturePrivacyObservation.FailClosed, result);
+        Assert.Equal(
+            NativeCapturePolicyDecision.Block,
+            result.Signals.SessionUnlocked);
+        Assert.Equal(
+            NativeCapturePolicyDecision.Unknown,
+            result.Signals.SecureDesktopClear);
+        Assert.Equal(
+            NativeCaptureConditionState.Active,
+            result.Signals.RemoteSession);
+        Assert.Equal(
+            NativeCaptureConditionState.Unknown,
+            result.Signals.PresentationMode);
+        Assert.Equal(
+            NativeCapturePolicyDecision.Block,
+            result.Signals.StorageAvailable);
+        Assert.Equal(
+            NativeCapturePolicyDecision.Allow,
+            result.Signals.ApplicationAllowed);
+        Assert.Equal(
+            NativeCapturePolicyDecision.Allow,
+            result.Signals.WindowAllowed);
     }
 
     [Fact]
     public async Task InvalidationIsForwardedToTheInnerSampler()
     {
         var inner = new StubPrivacySampler(CreateObservation());
-        var sampler = new DevAllowlistedWindowsCapturePrivacySampler(inner);
+        var sampler = new DevLiveQaWindowsCapturePrivacySampler(inner);
 
         sampler.InvalidateTargetObservation();
         _ = await sampler.SampleAsync(CancellationToken.None);
@@ -139,14 +349,13 @@ public sealed class DevLiveCapturePrivacyTests
         };
 
     public static TheoryData<NativeCaptureObservation>
-        RejectedPackageFamilyObservations => new()
+        UnresolvedPackageFamilyObservations => new()
         {
             NativeCaptureObservation.Unknown,
-            NativeCaptureObservation.Present("packaged.app_family"),
         };
 
     public static TheoryData<NativeCaptureObservation>
-        RejectedWindowTitleObservations => new()
+        UnresolvedWindowTitleObservations => new()
         {
             NativeCaptureObservation.Unknown,
             NativeCaptureObservation.Absent,
@@ -154,10 +363,24 @@ public sealed class DevLiveCapturePrivacyTests
             NativeCaptureObservation.Present("   "),
         };
 
-    private static DevAllowlistedWindowsCapturePrivacySampler CreateSampler(
+    public static TheoryData<
+        NativeCaptureObservation,
+        NativeCaptureObservation> UnresolvedWinDayFlowIdentityObservations => new()
+        {
+            {
+                NativeCaptureObservation.Unknown,
+                NativeCaptureObservation.Present("WinDayFlow")
+            },
+            {
+                NativeCaptureObservation.Absent,
+                NativeCaptureObservation.Unknown
+            },
+        };
+
+    private static DevLiveQaWindowsCapturePrivacySampler CreateSampler(
         WindowsCapturePrivacyObservation observation)
     {
-        return new DevAllowlistedWindowsCapturePrivacySampler(
+        return new DevLiveQaWindowsCapturePrivacySampler(
             new StubPrivacySampler(observation));
     }
 
@@ -170,7 +393,17 @@ public sealed class DevLiveCapturePrivacyTests
         NativeCapturePolicyDecision applicationAllowed =
             NativeCapturePolicyDecision.Unknown,
         NativeCapturePolicyDecision windowAllowed =
-            NativeCapturePolicyDecision.Unknown)
+            NativeCapturePolicyDecision.Unknown,
+        NativeCapturePolicyDecision sessionUnlocked =
+            NativeCapturePolicyDecision.Allow,
+        NativeCapturePolicyDecision secureDesktopClear =
+            NativeCapturePolicyDecision.Allow,
+        NativeCaptureConditionState remoteSession =
+            NativeCaptureConditionState.Inactive,
+        NativeCaptureConditionState presentationMode =
+            NativeCaptureConditionState.Inactive,
+        NativeCapturePolicyDecision storageAvailable =
+            NativeCapturePolicyDecision.Allow)
     {
         var identity = NativeCaptureIdentitySnapshot.FromObservations(
             executable ?? NativeCaptureObservation.Present("cmd.exe"),
@@ -207,13 +440,13 @@ public sealed class DevLiveCapturePrivacyTests
         };
         return new WindowsCapturePrivacyObservation(
             new NativeCapturePrivacySignals(
-                NativeCapturePolicyDecision.Allow,
-                NativeCapturePolicyDecision.Allow,
-                NativeCaptureConditionState.Inactive,
-                NativeCaptureConditionState.Inactive,
+                sessionUnlocked,
+                secureDesktopClear,
+                remoteSession,
+                presentationMode,
                 applicationAllowed,
                 windowAllowed,
-                NativeCapturePolicyDecision.Allow,
+                storageAvailable,
                 identity,
                 target),
             display);

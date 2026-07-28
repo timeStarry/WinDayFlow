@@ -10,6 +10,7 @@ namespace windayflow::capture {
 namespace {
 
 constexpr uint32_t kMaximumWorkerWaitMs = 60'000;
+constexpr uint32_t kMaximumTopologyRetryLimit = 64;
 constexpr uint32_t kMaximumRollbackAttempts = 64;
 constexpr uint32_t kMaximumRollbackDelayMs = 1'000;
 constexpr int64_t kMediaFoundationTicksPerMillisecond = 10'000;
@@ -165,6 +166,19 @@ uint32_t BoundedWaitMilliseconds(int64_t delay_ms) noexcept {
       std::min<int64_t>(delay_ms, kMaximumWorkerWaitMs));
 }
 
+uint32_t TopologyRetryDelayMilliseconds(uint32_t base_delay_ms,
+                                        uint32_t attempt) noexcept {
+  uint32_t delay_ms = std::min(base_delay_ms, kMaximumWorkerWaitMs);
+  for (uint32_t index = 1; index < attempt &&
+                           delay_ms < kMaximumWorkerWaitMs;
+       ++index) {
+    delay_ms = delay_ms > kMaximumWorkerWaitMs / 2U
+                   ? kMaximumWorkerWaitMs
+                   : delay_ms * 2U;
+  }
+  return delay_ms;
+}
+
 wdf_capture_state EventStateFor(ChunkFinalizationReason reason) noexcept {
   switch (reason) {
     case ChunkFinalizationReason::kPause:
@@ -245,6 +259,8 @@ bool IsValidCaptureWorkerConfiguration(
          configuration.maximum_height <= 4'320 &&
          configuration.acquire_timeout_ms <= kMaximumWorkerWaitMs &&
          configuration.topology_retry_ms <= kMaximumWorkerWaitMs &&
+         configuration.topology_retry_limit > 0 &&
+         configuration.topology_retry_limit <= kMaximumTopologyRetryLimit &&
          configuration.rollback_retry_limit > 0 &&
          configuration.rollback_retry_limit <= kMaximumRollbackAttempts &&
          configuration.rollback_retry_delay_ms <= kMaximumRollbackDelayMs &&
@@ -335,6 +351,7 @@ void CaptureWorker::Run(CaptureRuntimeOwner& runtime,
     ChunkState chunk;
     bool topology_available = false;
     bool ready_for_token = false;
+    uint32_t consecutive_topology_retries = 0;
     uint64_t handled_pause_epoch = 0;
     uint64_t observed_control_sequence = runtime.ReadControlSnapshot().sequence;
 
@@ -392,6 +409,7 @@ void CaptureWorker::Run(CaptureRuntimeOwner& runtime,
 
       ScopedSensitiveBytes encoded_storage;
       std::vector<uint8_t>& encoded_mp4 = encoded_storage.value;
+      const int64_t finalization_steady_ms = backend_.SteadyNowMilliseconds();
       const AuthorizedStageResult finalize =
           ExecuteAuthorizedStage(token, [&]() noexcept {
             return backend_.FinalizeChunk(chunk.end_timestamp_ticks,
@@ -427,9 +445,8 @@ void CaptureWorker::Run(CaptureRuntimeOwner& runtime,
         return WorkerStepResult::kInternalFailure;
       }
 
-      const int64_t now_steady_ms = backend_.SteadyNowMilliseconds();
       const int64_t elapsed_ms =
-          std::max<int64_t>(0, now_steady_ms - chunk.start_steady_ms);
+          std::max<int64_t>(0, finalization_steady_ms - chunk.start_steady_ms);
       const int64_t encoded_duration_ms = CalculateEncodedDurationMs(
           chunk.frame_count, configuration_.policy.capture_interval_ms);
       const int64_t duration_ms = CalculateChunkDurationMs(
@@ -445,6 +462,7 @@ void CaptureWorker::Run(CaptureRuntimeOwner& runtime,
           chunk.timing.frame_rate_denominator,
           token.persistence_generation,
           token.target.target_epoch,
+          token.target.scope == CaptureAuthorizationScope::kDisplayWide,
       };
       if (!IsValidChunkManifest(manifest)) {
         reservation.Cancel();
@@ -591,6 +609,7 @@ void CaptureWorker::Run(CaptureRuntimeOwner& runtime,
           }
           token = *control.replacement_token;
           ready_for_token = false;
+          consecutive_topology_retries = 0;
           schedule.Reset(backend_.SteadyNowMilliseconds());
           return true;
         }
@@ -723,8 +742,17 @@ void CaptureWorker::Run(CaptureRuntimeOwner& runtime,
         if (initialized.backend_result ==
             CaptureWorkerBackendResult::kRebuildRequired) {
           backend_.ResetAcquisition();
+          if (consecutive_topology_retries >=
+              configuration_.topology_retry_limit) {
+            fail(WorkerStepResult::kDeviceFailure);
+            return;
+          }
+          ++consecutive_topology_retries;
           static_cast<void>(runtime.WaitForControlChange(
-              observed_control_sequence, configuration_.topology_retry_ms));
+              observed_control_sequence,
+              TopologyRetryDelayMilliseconds(
+                  configuration_.topology_retry_ms,
+                  consecutive_topology_retries)));
           continue;
         }
         if (initialized.backend_result != CaptureWorkerBackendResult::kOk) {
@@ -732,12 +760,6 @@ void CaptureWorker::Run(CaptureRuntimeOwner& runtime,
           return;
         }
         topology_available = true;
-        if (!ready_for_token &&
-            !publish_checkpoint(CaptureWorkerCheckpointKind::kReady, 0)) {
-          fail(WorkerStepResult::kEventFailure);
-          return;
-        }
-        ready_for_token = true;
         schedule.Reset(backend_.SteadyNowMilliseconds());
       }
 
@@ -803,8 +825,17 @@ void CaptureWorker::Run(CaptureRuntimeOwner& runtime,
         }
         backend_.ResetAcquisition();
         topology_available = false;
+        if (consecutive_topology_retries >=
+            configuration_.topology_retry_limit) {
+          fail(WorkerStepResult::kDeviceFailure);
+          return;
+        }
+        ++consecutive_topology_retries;
         static_cast<void>(runtime.WaitForControlChange(
-            observed_control_sequence, configuration_.topology_retry_ms));
+            observed_control_sequence,
+            TopologyRetryDelayMilliseconds(
+                configuration_.topology_retry_ms,
+                consecutive_topology_retries)));
         continue;
       }
       if (acquired.backend_result != CaptureWorkerBackendResult::kOk) {
@@ -858,6 +889,25 @@ void CaptureWorker::Run(CaptureRuntimeOwner& runtime,
 
       const int64_t frame_steady_ms = backend_.SteadyNowMilliseconds();
       const int64_t frame_unix_ms = backend_.UnixNowMilliseconds();
+      if (chunk.writer_started &&
+          frame_steady_ms - chunk.start_steady_ms >=
+              static_cast<int64_t>(configuration_.policy.chunk_duration_ms)) {
+        const WorkerStepResult boundary =
+            finalize_chunk(ChunkFinalizationReason::kRegular);
+        if (boundary == WorkerStepResult::kAuthorizationLost) {
+          SecureClear(&transformed_frame);
+          if (!handle_authorization_loss()) {
+            return;
+          }
+          continue;
+        }
+        if (boundary != WorkerStepResult::kOk) {
+          SecureClear(&transformed_frame);
+          fail(boundary);
+          return;
+        }
+      }
+
       int64_t frame_offset_ms = 0;
       int64_t frame_timestamp_ticks = 0;
       bool begin_writer = !chunk.writer_started;
@@ -924,6 +974,7 @@ void CaptureWorker::Run(CaptureRuntimeOwner& runtime,
         chunk.width = writer_configuration.width;
         chunk.height = writer_configuration.height;
         chunk.timing = timing;
+        schedule.ReanchorFrame(frame_steady_ms);
       }
       chunk.latest_frame_offset_ms =
           std::max(chunk.latest_frame_offset_ms, frame_offset_ms);
@@ -934,6 +985,14 @@ void CaptureWorker::Run(CaptureRuntimeOwner& runtime,
         ++chunk.frame_count;
       }
       ++result.encoded_frames;
+      consecutive_topology_retries = 0;
+      if (!ready_for_token) {
+        if (!publish_checkpoint(CaptureWorkerCheckpointKind::kReady, 0)) {
+          fail(WorkerStepResult::kEventFailure);
+          return;
+        }
+        ready_for_token = true;
+      }
     }
   } catch (...) {
     result.reason = CaptureWorkerExitReason::kInternalFailure;

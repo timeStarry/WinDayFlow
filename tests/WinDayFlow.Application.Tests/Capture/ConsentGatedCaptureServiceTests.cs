@@ -76,6 +76,9 @@ public sealed class ConsentGatedCaptureServiceTests
             settings,
             new TestRuntimeAuthorization(isCaptureAuthorized: false));
 
+        Assert.Equal(CaptureState.Stopped, service.CurrentStatus.State);
+        Assert.Equal(CaptureReasonCode.None, service.CurrentStatus.Reason);
+
         await Assert.ThrowsAsync<RecordingConsentRequiredException>(
             () => service.StartAsync());
         await Assert.ThrowsAsync<RecordingConsentRequiredException>(
@@ -254,6 +257,73 @@ public sealed class ConsentGatedCaptureServiceTests
     }
 
     [Fact]
+    public async Task PersistedCaptureIntentSurvivesInitialUnavailableStatus()
+    {
+        using var settings = await CreateConsentedSettingsAsync();
+        var authorization = new ControlledRuntimeAuthorization(
+            isCaptureAuthorized: true);
+        var backend = new StubCaptureBackend(CaptureState.Unavailable);
+        using var service = new ConsentGatedCaptureService(
+            backend,
+            settings,
+            authorization);
+
+        Assert.Equal(0, authorization.IssueCount);
+        Assert.Equal(0, backend.StartCount);
+
+        backend.TransitionTo(CaptureState.Stopped);
+        await backend.StartCompleted.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(1, authorization.IssueCount);
+        Assert.Equal(1, backend.StartCount);
+        Assert.Equal(CaptureState.Recording, service.CurrentStatus.State);
+    }
+
+    [Fact]
+    public async Task PersistedCaptureIntentWaitsForBackendAndRuntimeRecovery()
+    {
+        using var settings = await CreateConsentedSettingsAsync();
+        var authorization = new ControlledRuntimeAuthorization(
+            isCaptureAuthorized: false);
+        var backend = new StubCaptureBackend(CaptureState.Unavailable);
+        using var service = new ConsentGatedCaptureService(
+            backend,
+            settings,
+            authorization);
+
+        backend.TransitionTo(CaptureState.Stopped);
+        Assert.Equal(0, authorization.IssueCount);
+        Assert.Equal(0, backend.StartCount);
+
+        authorization.SetCaptureAuthorized(authorized: true);
+        await backend.StartCompleted.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(1, authorization.IssueCount);
+        Assert.Equal(1, backend.StartCount);
+        Assert.Equal(CaptureState.Recording, service.CurrentStatus.State);
+    }
+
+    [Fact]
+    public async Task PersistedCaptureIntentDoesNotStartUnavailableBackend()
+    {
+        using var settings = await CreateConsentedSettingsAsync();
+        var authorization = new ControlledRuntimeAuthorization(
+            isCaptureAuthorized: false);
+        var backend = new StubCaptureBackend(CaptureState.Unavailable);
+        using var service = new ConsentGatedCaptureService(
+            backend,
+            settings,
+            authorization);
+
+        authorization.SetCaptureAuthorized(authorized: true);
+        await Task.Delay(TimeSpan.FromMilliseconds(100));
+
+        Assert.Equal(0, authorization.IssueCount);
+        Assert.Equal(0, backend.StartCount);
+        Assert.Equal(CaptureState.Unavailable, service.CurrentStatus.State);
+    }
+
+    [Fact]
     public async Task ExplicitStartRacingStartupRestoreCallsBackendOnlyOnce()
     {
         using var settings = await CreateConsentedSettingsAsync();
@@ -309,6 +379,154 @@ public sealed class ConsentGatedCaptureServiceTests
         Assert.Equal(0, authorization.IssueCount);
         Assert.Equal(0, backend.StartCount);
         Assert.Equal(CaptureState.Stopped, service.CurrentStatus.State);
+    }
+
+    [Fact]
+    public async Task InitialAutomaticPauseResumesWhenRuntimeAuthorizationRecovers()
+    {
+        using var settings = await CreateConsentedSettingsAsync();
+        var authorization = new ControlledRuntimeAuthorization(
+            isCaptureAuthorized: true);
+        authorization.SetCaptureAuthorized(authorized: false);
+        var backend = new StubCaptureBackend(
+            CaptureState.Paused,
+            CaptureReasonCode.ExcludedApplication);
+        using var service = new ConsentGatedCaptureService(
+            backend,
+            settings,
+            authorization);
+
+        authorization.SetCaptureAuthorized(authorized: true);
+        await backend.ResumeCompleted.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(1, authorization.IssueCount);
+        Assert.Equal(1, backend.ResumeCount);
+        Assert.Equal(CaptureState.Recording, service.CurrentStatus.State);
+    }
+
+    [Fact]
+    public async Task InitialAutomaticPauseResumesWhenAuthorizationAlreadyRecovered()
+    {
+        using var settings = await CreateConsentedSettingsAsync();
+        var authorization = new ControlledRuntimeAuthorization(
+            isCaptureAuthorized: true);
+        authorization.SetCaptureAuthorized(authorized: false);
+        authorization.SetCaptureAuthorized(authorized: true);
+        var backend = new StubCaptureBackend(
+            CaptureState.Paused,
+            CaptureReasonCode.ExcludedApplication);
+
+        using var service = new ConsentGatedCaptureService(
+            backend,
+            settings,
+            authorization);
+        await backend.ResumeCompleted.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(1, authorization.IssueCount);
+        Assert.Equal(1, backend.ResumeCount);
+        Assert.Equal([1L], backend.ResumeAdmissionGenerations);
+        Assert.Equal(CaptureState.Recording, service.CurrentStatus.State);
+    }
+
+    [Fact]
+    public async Task AutomaticPauseRacingStartupStartStillResumesAfterRecovery()
+    {
+        using var settings = await CreateConsentedSettingsAsync();
+        var releaseStart = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var authorization = new ControlledRuntimeAuthorization(
+            isCaptureAuthorized: true);
+        var backend = new StubCaptureBackend(CaptureState.Stopped)
+        {
+            TransitionOnCommands = false,
+            StartOperation = token => releaseStart.Task.WaitAsync(token),
+        };
+        using var service = new ConsentGatedCaptureService(
+            backend,
+            settings,
+            authorization);
+
+        await backend.StartStarted.WaitAsync(TimeSpan.FromSeconds(5));
+        authorization.SetCaptureAuthorized(authorized: false);
+        backend.TransitionTo(CaptureState.Paused);
+        releaseStart.TrySetResult();
+        await backend.StartCompleted.WaitAsync(TimeSpan.FromSeconds(5));
+
+        authorization.SetCaptureAuthorized(authorized: true);
+        await backend.ResumeCompleted.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(1, backend.StartCount);
+        Assert.Equal(1, backend.ResumeCount);
+        Assert.Equal([1L], backend.ResumeAdmissionGenerations);
+    }
+
+    [Fact]
+    public async Task StaleNonStoppedEventDoesNotClearPendingStartObservation()
+    {
+        using var settings = await CreateConsentedSettingsAsync();
+        var releaseStart = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var authorization = new ControlledRuntimeAuthorization(
+            isCaptureAuthorized: true);
+        var backend = new StubCaptureBackend(CaptureState.Stopped)
+        {
+            TransitionOnCommands = false,
+            StartOperation = token => releaseStart.Task.WaitAsync(token),
+        };
+        using var service = new ConsentGatedCaptureService(
+            backend,
+            settings,
+            authorization);
+
+        await backend.StartStarted.WaitAsync(TimeSpan.FromSeconds(5));
+        var staleRecording = backend.CreatePendingStatusEvent(
+            CaptureState.Recording);
+        backend.TransitionTo(CaptureState.Stopped);
+        backend.PublishStatusEvent(staleRecording);
+        authorization.SetCaptureAuthorized(authorized: false);
+        backend.TransitionTo(CaptureState.Paused);
+        releaseStart.TrySetResult();
+        await backend.StartCompleted.WaitAsync(TimeSpan.FromSeconds(5));
+
+        authorization.SetCaptureAuthorized(authorized: true);
+        await backend.ResumeCompleted.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(1, backend.StartCount);
+        Assert.Equal(1, backend.ResumeCount);
+        Assert.Equal([1L], backend.ResumeAdmissionGenerations);
+    }
+
+    [Fact]
+    public async Task StoppedStatusDuringPendingStartDoesNotRelinquishOwnership()
+    {
+        using var settings = await CreateConsentedSettingsAsync();
+        var releaseStart = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var authorization = new ControlledRuntimeAuthorization(
+            isCaptureAuthorized: true);
+        var backend = new StubCaptureBackend(CaptureState.Stopped)
+        {
+            TransitionOnCommands = false,
+            StartOperation = token => releaseStart.Task.WaitAsync(token),
+        };
+        using var service = new ConsentGatedCaptureService(
+            backend,
+            settings,
+            authorization);
+
+        await backend.StartStarted.WaitAsync(TimeSpan.FromSeconds(5));
+        authorization.SetCaptureAuthorized(authorized: false);
+        backend.TransitionTo(CaptureState.Stopped);
+        backend.TransitionTo(CaptureState.Paused);
+        releaseStart.TrySetResult();
+        await backend.StartCompleted.WaitAsync(TimeSpan.FromSeconds(5));
+
+        authorization.SetCaptureAuthorized(authorized: true);
+        await backend.ResumeCompleted.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(1, backend.StartCount);
+        Assert.Equal(1, backend.ResumeCount);
+        Assert.Equal([1L], backend.ResumeAdmissionGenerations);
     }
 
     [Fact]
@@ -706,6 +924,31 @@ public sealed class ConsentGatedCaptureServiceTests
     }
 
     [Fact]
+    public async Task StaleStoppedEventDoesNotRelinquishCurrentPauseOwnership()
+    {
+        using var settings = await CreateConsentedSettingsAsync();
+        var authorization = new ControlledRuntimeAuthorization(
+            isCaptureAuthorized: true);
+        var backend = new StubCaptureBackend(CaptureState.Recording);
+        using var service = new ConsentGatedCaptureService(
+            backend,
+            settings,
+            authorization);
+
+        var staleStopped = backend.CreatePendingStatusEvent(
+            CaptureState.Stopped);
+        authorization.SetCaptureAuthorized(authorized: false);
+        backend.TransitionTo(CaptureState.Paused);
+        backend.PublishStatusEvent(staleStopped);
+        authorization.SetCaptureAuthorized(authorized: true);
+        await backend.ResumeCompleted.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(1, backend.ResumeCount);
+        Assert.Equal([1L], backend.ResumeAdmissionGenerations);
+        Assert.Equal(CaptureState.Recording, service.CurrentStatus.State);
+    }
+
+    [Fact]
     public async Task AutomaticResumeUsesAFreshAdmissionForTheLatestGeneration()
     {
         using var settings = await CreateConsentedSettingsAsync();
@@ -823,6 +1066,73 @@ public sealed class ConsentGatedCaptureServiceTests
         Assert.Equal(0, backend.ResumeCount);
         Assert.Equal(1, backend.StopCount);
         Assert.Equal(CaptureState.Stopped, service.CurrentStatus.State);
+    }
+
+    [Fact]
+    public async Task QueuedExplicitStartCannotOverwriteLaterStopIntent()
+    {
+        using var settings = await CreateSettingsWithCurrentConsentAsync();
+        var releaseStart = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var authorization = new ControlledRuntimeAuthorization(
+            isCaptureAuthorized: true);
+        var backend = new StubCaptureBackend(CaptureState.Stopped)
+        {
+            StartOperation = token => releaseStart.Task.WaitAsync(token),
+        };
+        using var service = new ConsentGatedCaptureService(
+            backend,
+            settings,
+            authorization);
+        await settings.SetCaptureEnabledAsync(enabled: true);
+
+        var activeStart = service.StartAsync();
+        await backend.StartStarted.WaitAsync(TimeSpan.FromSeconds(5));
+        var queuedStart = service.StartAsync();
+        var stop = service.StopAsync();
+
+        releaseStart.TrySetResult();
+        await activeStart.WaitAsync(TimeSpan.FromSeconds(5));
+        await Assert.ThrowsAsync<CaptureRuntimeAdmissionRejectedException>(
+            () => queuedStart);
+        await stop.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(1, backend.StartCount);
+        Assert.Equal(1, backend.StopCount);
+        Assert.Equal(CaptureState.Stopped, service.CurrentStatus.State);
+    }
+
+    [Fact]
+    public async Task QueuedExplicitResumeCannotOverwriteLaterPauseIntent()
+    {
+        using var settings = await CreateConsentedSettingsAsync();
+        var releaseResume = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var authorization = new ControlledRuntimeAuthorization(
+            isCaptureAuthorized: true);
+        var backend = new StubCaptureBackend(CaptureState.Paused)
+        {
+            ResumeOperation = token => releaseResume.Task.WaitAsync(token),
+        };
+        using var service = new ConsentGatedCaptureService(
+            backend,
+            settings,
+            authorization);
+
+        var activeResume = service.ResumeAsync();
+        await backend.ResumeStarted.WaitAsync(TimeSpan.FromSeconds(5));
+        var queuedResume = service.ResumeAsync();
+        var pause = service.PauseAsync();
+
+        releaseResume.TrySetResult();
+        await activeResume.WaitAsync(TimeSpan.FromSeconds(5));
+        await Assert.ThrowsAsync<CaptureRuntimeAdmissionRejectedException>(
+            () => queuedResume);
+        await pause.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(1, backend.ResumeCount);
+        Assert.Equal(1, backend.PauseCount);
+        Assert.Equal(CaptureState.Paused, service.CurrentStatus.State);
     }
 
     [Fact]
@@ -1001,6 +1311,112 @@ public sealed class ConsentGatedCaptureServiceTests
     }
 
     [Fact]
+    public async Task AutomaticResumeRetriesNullAdmissionWithoutAnotherEvent()
+    {
+        using var settings = await CreateConsentedSettingsAsync();
+        var runtimeAuthorization = new ControlledRuntimeAuthorization(
+            isCaptureAuthorized: true);
+        var issueAttempt = 0;
+        runtimeAuthorization.IssueOperation = (_, _) =>
+        {
+            var admission = Interlocked.Increment(ref issueAttempt) == 1
+                ? null
+                : new TestAdmissionStamp(
+                    runtimeAuthorization.InvalidationGeneration);
+            return Task.FromResult<ICaptureRuntimeAdmissionStamp?>(admission);
+        };
+        var backend = new StubCaptureBackend(CaptureState.Recording);
+        using var service = new ConsentGatedCaptureService(
+            backend,
+            settings,
+            runtimeAuthorization);
+
+        runtimeAuthorization.SetCaptureAuthorized(authorized: false);
+        backend.TransitionTo(CaptureState.Paused);
+        runtimeAuthorization.SetCaptureAuthorized(authorized: true);
+        await backend.ResumeCompleted.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(2, runtimeAuthorization.IssueCount);
+        Assert.Equal(1, backend.ResumeCount);
+        Assert.Equal(CaptureState.Recording, service.CurrentStatus.State);
+    }
+
+    [Fact]
+    public async Task AutomaticResumeRetriesRejectedAdmissionWithoutAnotherEvent()
+    {
+        using var settings = await CreateConsentedSettingsAsync();
+        var runtimeAuthorization = new ControlledRuntimeAuthorization(
+            isCaptureAuthorized: true);
+        var issueAttempt = 0;
+        runtimeAuthorization.IssueOperation = (_, _) =>
+        {
+            if (Interlocked.Increment(ref issueAttempt) == 1)
+            {
+                throw new CaptureRuntimeAdmissionRejectedException();
+            }
+
+            return Task.FromResult<ICaptureRuntimeAdmissionStamp?>(
+                new TestAdmissionStamp(
+                    runtimeAuthorization.InvalidationGeneration));
+        };
+        var backend = new StubCaptureBackend(CaptureState.Recording);
+        using var service = new ConsentGatedCaptureService(
+            backend,
+            settings,
+            runtimeAuthorization);
+
+        runtimeAuthorization.SetCaptureAuthorized(authorized: false);
+        backend.TransitionTo(CaptureState.Paused);
+        runtimeAuthorization.SetCaptureAuthorized(authorized: true);
+        await backend.ResumeCompleted.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(2, runtimeAuthorization.IssueCount);
+        Assert.Equal(1, backend.ResumeCount);
+        Assert.Equal(CaptureState.Recording, service.CurrentStatus.State);
+    }
+
+    [Fact]
+    public async Task AutomaticResumeWaitsForRuntimeStatusConfirmation()
+    {
+        using var settings = await CreateConsentedSettingsAsync();
+        var runtimeAuthorization = new ControlledRuntimeAuthorization(
+            isCaptureAuthorized: true);
+        var confirmedAttempt = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var resumeAttempt = 0;
+        StubCaptureBackend? backend = null;
+        backend = new StubCaptureBackend(CaptureState.Recording)
+        {
+            TransitionOnCommands = false,
+            ResumeOperation = _ =>
+            {
+                if (Interlocked.Increment(ref resumeAttempt) == 2)
+                {
+                    backend!.TransitionTo(CaptureState.Resuming);
+                    confirmedAttempt.TrySetResult();
+                }
+
+                return Task.CompletedTask;
+            },
+        };
+        using var service = new ConsentGatedCaptureService(
+            backend,
+            settings,
+            runtimeAuthorization);
+
+        runtimeAuthorization.SetCaptureAuthorized(authorized: false);
+        backend.TransitionTo(CaptureState.Paused);
+        runtimeAuthorization.SetCaptureAuthorized(authorized: true);
+        await confirmedAttempt.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        backend.TransitionTo(CaptureState.Recording);
+
+        Assert.Equal(2, runtimeAuthorization.IssueCount);
+        Assert.Equal(2, backend.ResumeCount);
+        Assert.Equal([1L, 1L], backend.ResumeAdmissionGenerations);
+        Assert.Equal(CaptureState.Recording, service.CurrentStatus.State);
+    }
+
+    [Fact]
     public async Task ThrowingStatusSubscriberDoesNotBlockSupervisorOrOtherSubscribers()
     {
         using var settings = await CreateConsentedSettingsAsync();
@@ -1160,9 +1576,15 @@ public sealed class ConsentGatedCaptureServiceTests
         private EventHandler<CaptureStatusChangedEventArgs>? _statusChanged;
         private long _statusSequence;
 
-        public StubCaptureBackend(CaptureState state)
+        public StubCaptureBackend(
+            CaptureState state,
+            CaptureReasonCode reason = CaptureReasonCode.None)
         {
-            CurrentStatus = CreateStatus(state, null, _statusSequence);
+            CurrentStatus = CreateStatus(
+                state,
+                null,
+                _statusSequence,
+                reason);
         }
 
         public CaptureStatus CurrentStatus { get; private set; }
@@ -1334,7 +1756,8 @@ public sealed class ConsentGatedCaptureServiceTests
         public void TransitionTo(
             CaptureState state,
             string? detail = null,
-            bool incrementSequence = true)
+            bool incrementSequence = true,
+            CaptureReasonCode reason = CaptureReasonCode.None)
         {
             var previous = CurrentStatus;
             if (incrementSequence)
@@ -1342,16 +1765,41 @@ public sealed class ConsentGatedCaptureServiceTests
                 _statusSequence++;
             }
 
-            CurrentStatus = CreateStatus(state, detail, _statusSequence);
+            CurrentStatus = CreateStatus(
+                state,
+                detail,
+                _statusSequence,
+                reason);
             _statusChanged?.Invoke(
                 this,
                 new CaptureStatusChangedEventArgs(previous, CurrentStatus));
         }
 
+        public CaptureStatusChangedEventArgs CreatePendingStatusEvent(
+            CaptureState state,
+            CaptureReasonCode reason = CaptureReasonCode.None)
+        {
+            var previous = CurrentStatus;
+            _statusSequence++;
+            var pendingStatus = CreateStatus(
+                state,
+                detail: null,
+                _statusSequence,
+                reason);
+            return new CaptureStatusChangedEventArgs(previous, pendingStatus);
+        }
+
+        public void PublishStatusEvent(CaptureStatusChangedEventArgs eventArgs)
+        {
+            ArgumentNullException.ThrowIfNull(eventArgs);
+            _statusChanged?.Invoke(this, eventArgs);
+        }
+
         private static CaptureStatus CreateStatus(
             CaptureState state,
             string? detail,
-            long sequence)
+            long sequence,
+            CaptureReasonCode reason = CaptureReasonCode.None)
         {
             return new CaptureStatus(
                 state,
@@ -1361,7 +1809,7 @@ public sealed class ConsentGatedCaptureServiceTests
                 Sequence: checked((ulong)sequence),
                 Reason: state == CaptureState.Faulted
                     ? CaptureReasonCode.BackendFault
-                    : CaptureReasonCode.None,
+                    : reason,
                 ErrorCode: state == CaptureState.Faulted
                     ? CaptureErrorCode.Unknown
                     : CaptureErrorCode.None);

@@ -176,6 +176,7 @@ public partial class App : Microsoft.UI.Xaml.Application
             _appWindow = _window.AppWindow;
             _windowCloseCoordinator = new CaptureAwareWindowCloseCoordinator(
                 _host.Services.GetRequiredService<ICaptureService>().StopAsync,
+                CompleteShutdownBeforeCloseAsync,
                 _window.Close,
                 Program.WriteShutdownFailure);
             _appWindow.Closing += OnAppWindowClosing;
@@ -201,13 +202,12 @@ public partial class App : Microsoft.UI.Xaml.Application
         }
     }
 
-    private async void OnWindowClosed(object sender, WindowEventArgs args)
+    private void OnWindowClosed(object sender, WindowEventArgs args)
     {
+        _ = sender;
+        _ = args;
         var window = _window;
-        _window = null;
         var appWindow = _appWindow;
-        _appWindow = null;
-        _windowCloseCoordinator = null;
         if (appWindow is not null)
         {
             appWindow.Closing -= OnAppWindowClosing;
@@ -219,13 +219,32 @@ public partial class App : Microsoft.UI.Xaml.Application
         }
 
         var currentInstance = Program.CurrentInstance;
+        if (currentInstance is not null)
+        {
+            currentInstance.Activated -= OnAppInstanceActivated;
+        }
+
+        _window = null;
+        _appWindow = null;
+        _windowCloseCoordinator = null;
         try
         {
-            if (currentInstance is not null)
-            {
-                currentInstance.Activated -= OnAppInstanceActivated;
-            }
+            currentInstance?.UnregisterKey();
+        }
+        catch (Exception exception)
+        {
+            Program.WriteShutdownFailure(exception);
+        }
+        finally
+        {
+            Exit();
+        }
+    }
 
+    private async Task CompleteShutdownBeforeCloseAsync()
+    {
+        try
+        {
             await _host.StopAsync(HostStopTimeout);
         }
         catch (Exception exception)
@@ -234,34 +253,16 @@ public partial class App : Microsoft.UI.Xaml.Application
         }
         finally
         {
-            try
-            {
-                using var cleanupBudget = new CancellationTokenSource(
-                    ShutdownCleanupBudget);
-                await RunShutdownCleanupAsync(
-                    "Development capture cleanup",
-                    DisposeDevLiveCaptureAsync,
-                    cleanupBudget.Token);
-                await RunShutdownCleanupAsync(
-                    "Application host disposal",
-                    DisposeHostAsync,
-                    cleanupBudget.Token);
-            }
-            finally
-            {
-                try
-                {
-                    currentInstance?.UnregisterKey();
-                }
-                catch (Exception exception)
-                {
-                    Program.WriteShutdownFailure(exception);
-                }
-                finally
-                {
-                    Exit();
-                }
-            }
+            using var cleanupBudget = new CancellationTokenSource(
+                ShutdownCleanupBudget);
+            await RunShutdownCleanupAsync(
+                "Development capture cleanup",
+                DisposeDevLiveCaptureAsync,
+                cleanupBudget.Token);
+            await RunShutdownCleanupAsync(
+                "Application host disposal",
+                DisposeHostAsync,
+                cleanupBudget.Token);
         }
     }
 
@@ -355,7 +356,13 @@ public partial class App : Microsoft.UI.Xaml.Application
             return;
         }
 
-        window.DispatcherQueue.TryEnqueue(window.Activate);
+        window.DispatcherQueue.TryEnqueue(() =>
+        {
+            if (ReferenceEquals(_window, window))
+            {
+                window.Activate();
+            }
+        });
     }
 
     private void OnUnhandledException(object sender, Microsoft.UI.Xaml.UnhandledExceptionEventArgs e)

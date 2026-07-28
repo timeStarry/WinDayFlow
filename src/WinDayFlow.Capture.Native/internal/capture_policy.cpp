@@ -189,6 +189,13 @@ void CaptureSchedule::Reset(int64_t now_ms) {
   context_schedule_exhausted_ = false;
 }
 
+void CaptureSchedule::ReanchorFrame(int64_t anchor_ms) {
+  const DeadlineAdvance next =
+      AdvanceDeadlinePast(anchor_ms, anchor_ms, frame_interval_ms_);
+  next_frame_ms_ = next.deadline_ms;
+  frame_schedule_exhausted_ = next.exhausted;
+}
+
 CaptureScheduleDecision CaptureSchedule::Poll(int64_t now_ms) {
   CaptureScheduleDecision decision;
   if (!frame_schedule_exhausted_ && now_ms >= next_frame_ms_) {

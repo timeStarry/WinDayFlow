@@ -31,7 +31,8 @@ add_library(windayflow_capture_core STATIC
   internal/privacy_guard.cpp
   internal/wic_bgra_scaler.cpp
   internal/windows_capture_target_observer.cpp
-  internal/windows_capture_worker_backend.cpp)
+  internal/windows_capture_worker_backend.cpp
+  internal/windows_graphics_capture_frame_source.cpp)
 
 target_compile_features(windayflow_capture_core PUBLIC cxx_std_20)
 target_include_directories(windayflow_capture_core
@@ -40,7 +41,7 @@ target_include_directories(windayflow_capture_core
     ${CMAKE_CURRENT_SOURCE_DIR}/internal)
 target_link_libraries(windayflow_capture_core PUBLIC
   bcrypt d3d11 dxgi mf mfplat mfreadwrite mfuuid ole32 oleaut32 user32
-  windowscodecs)
+  windowsapp windowscodecs)
 
 add_library(windayflow_capture SHARED
   src/capture_c_api.cpp
@@ -154,6 +155,11 @@ if(BUILD_TESTING)
   add_windayflow_native_test(windows_capture_target_observer_tests
     tests/windows_capture_target_observer_tests.cpp)
   target_link_libraries(windows_capture_target_observer_tests PRIVATE
+    windayflow_capture_core)
+
+  add_windayflow_native_test(windows_graphics_capture_frame_source_tests
+    tests/windows_graphics_capture_frame_source_tests.cpp)
+  target_link_libraries(windows_graphics_capture_frame_source_tests PRIVATE
     windayflow_capture_core)
 
   add_windayflow_native_test(wic_bgra_scaler_tests

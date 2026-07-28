@@ -33,6 +33,22 @@ public sealed class NativeCaptureRuntimeOwnerTests
     }
 
     [Fact]
+    public void OwnerRejectsProfileWithoutDisplayWideContinuousAuthorization()
+    {
+        var backend = new ScriptedRuntimeBackend
+        {
+            AdvertisedCapabilities =
+                NativeCaptureAbiContract.RuntimeOwnerCapabilities,
+        };
+
+        var exception = Assert.Throws<NotSupportedException>(
+            () => CreateOwner(backend));
+
+        Assert.Contains("display-wide continuous", exception.Message);
+        Assert.Equal("ConstructionFailureDispose", Assert.Single(backend.Operations));
+    }
+
+    [Fact]
     public async Task ChunkCommitIsForwardedAsAnApplicationWakeHint()
     {
         var backend = new ScriptedRuntimeBackend();
@@ -76,6 +92,144 @@ public sealed class NativeCaptureRuntimeOwnerTests
         Assert.Equal(
             ExpectedTerminationSequence,
             backend.Operations);
+        Assert.Equal(1, backend.DestroyCount);
+    }
+
+    [Fact]
+    public async Task TerminationProofExposesOnlyTheSharedStartedTermination()
+    {
+        var backend = new ScriptedRuntimeBackend();
+        backend.BlockAuthorizationUpdate();
+        var owner = CreateOwner(backend);
+        var proof = Assert.IsAssignableFrom<
+            INativeCapturePrivacySignalSinkTermination>(owner);
+
+        Assert.False(proof.IsTerminationStarted);
+        Assert.Throws<InvalidOperationException>(() =>
+        {
+            _ = proof.Termination;
+        });
+
+        var first = owner.DisposeAsync().AsTask();
+        await backend.AuthorizationUpdateStarted.WaitAsync(
+            TimeSpan.FromSeconds(5));
+        var second = owner.DisposeAsync().AsTask();
+
+        Assert.True(proof.IsTerminationStarted);
+        Assert.Same(first, proof.Termination);
+        Assert.Same(first, second);
+        Assert.False(proof.Termination.IsCompleted);
+
+        backend.ReleaseAuthorizationUpdate();
+        await proof.Termination;
+        Assert.True(proof.Termination.IsCompletedSuccessfully);
+        Assert.Equal(1, backend.DestroyCount);
+    }
+
+    [Fact]
+    public async Task TerminalAuthorizationInvalidStateIsOwnedByStopAndWait()
+    {
+        var backend = new ScriptedRuntimeBackend
+        {
+            UpdateFailure = new NativeCaptureException(
+                NativeCaptureResult.InvalidState,
+                "update_runtime_authorization"),
+            RevokeFailure = new NativeCaptureException(
+                NativeCaptureResult.InvalidState,
+                "revoke_runtime_authorization"),
+        };
+        var owner = CreateOwner(backend);
+
+        backend.RaiseStatus(CaptureState.Faulted);
+        await owner.Termination.WaitAsync(TimeSpan.FromSeconds(5));
+        await owner.DisposeAsync();
+
+        Assert.Equal(ExpectedTerminationSequence, backend.Operations);
+        Assert.Equal(1, backend.DestroyCount);
+    }
+
+    [Fact]
+    public async Task TerminalAuthorizationRaceDoesNotHideWaitFailure()
+    {
+        var waitFailure = new NativeCaptureException(
+            NativeCaptureResult.InternalError,
+            "wait_stopped");
+        var backend = new ScriptedRuntimeBackend
+        {
+            UpdateFailure = new NativeCaptureException(
+                NativeCaptureResult.InvalidState,
+                "update_runtime_authorization"),
+            RevokeFailure = new NativeCaptureException(
+                NativeCaptureResult.InvalidState,
+                "revoke_runtime_authorization"),
+            WaitFailure = waitFailure,
+        };
+        var owner = CreateOwner(backend);
+
+        backend.RaiseStatus(CaptureState.Faulted);
+        var failure = await Assert.ThrowsAsync<NativeCaptureException>(
+            () => owner.Termination);
+
+        Assert.Same(waitFailure, failure);
+        Assert.Equal("wait_stopped", failure.Operation);
+        Assert.Equal(1, backend.DestroyCount);
+    }
+
+    [Fact]
+    public async Task NonterminalAuthorizationInvalidStateRemainsVisible()
+    {
+        var backend = new ScriptedRuntimeBackend
+        {
+            UpdateFailure = new NativeCaptureException(
+                NativeCaptureResult.InvalidState,
+                "update_runtime_authorization"),
+            RevokeFailure = new NativeCaptureException(
+                NativeCaptureResult.InvalidState,
+                "revoke_runtime_authorization"),
+        };
+        var owner = CreateOwner(backend);
+
+        var failure = await Assert.ThrowsAsync<AggregateException>(
+            () => owner.DisposeAsync().AsTask());
+
+        Assert.Equal(2, failure.InnerExceptions.Count);
+        Assert.All(
+            failure.InnerExceptions,
+            static exception => Assert.IsType<NativeCaptureException>(exception));
+        Assert.Equal(1, backend.DestroyCount);
+    }
+
+    [Fact]
+    public async Task ConcurrentDisposeSharesTheFilteredGenuineFailure()
+    {
+        var waitFailure = new NativeCaptureException(
+            NativeCaptureResult.InternalError,
+            "wait_stopped");
+        var backend = new ScriptedRuntimeBackend
+        {
+            UpdateFailure = new NativeCaptureException(
+                NativeCaptureResult.InvalidState,
+                "update_runtime_authorization"),
+            RevokeFailure = new NativeCaptureException(
+                NativeCaptureResult.InvalidState,
+                "revoke_runtime_authorization"),
+            WaitFailure = waitFailure,
+        };
+        var owner = CreateOwner(backend);
+
+        backend.RaiseStatus(CaptureState.Faulted);
+        var automaticTermination = owner.Termination;
+        var hostedShutdown = owner.DisposeAsync().AsTask();
+
+        Assert.Same(automaticTermination, hostedShutdown);
+        Assert.Same(
+            waitFailure,
+            await Assert.ThrowsAsync<NativeCaptureException>(
+                () => automaticTermination));
+        Assert.Same(
+            waitFailure,
+            await Assert.ThrowsAsync<NativeCaptureException>(
+                () => hostedShutdown));
         Assert.Equal(1, backend.DestroyCount);
     }
 
@@ -602,6 +756,7 @@ public sealed class NativeCaptureRuntimeOwnerTests
 
     private sealed class ScriptedRuntimeBackend : INativeCaptureRuntimeBackend
     {
+        private readonly object _statusSync = new();
         private readonly TaskCompletionSource _authorizationUpdateStarted = new(
             TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly TaskCompletionSource _releaseAuthorizationUpdate = new(
@@ -615,17 +770,28 @@ public sealed class NativeCaptureRuntimeOwnerTests
         private ulong _persistenceGeneration;
         private ulong _authorizationEpoch;
         private long _callbackInvalidationGeneration;
-
-        public NativeCaptureCapabilities AdvertisedCapabilities { get; init; } =
-            NativeCaptureAbiContract.RuntimeOwnerCapabilities;
-
-        public NativeCaptureCapabilities Capabilities => AdvertisedCapabilities;
-
-        public CaptureStatus CurrentStatus { get; } = new(
+        private CaptureStatus _currentStatus = new(
             CaptureState.Unavailable,
             DateTimeOffset.UnixEpoch,
             "test",
             Reason: CaptureReasonCode.BackendUnavailable);
+        private EventHandler<CaptureStatusChangedEventArgs>? _statusChanged;
+
+        public NativeCaptureCapabilities AdvertisedCapabilities { get; init; } =
+            NativeCaptureAbiContract.DisplayWideContinuousCapabilities;
+
+        public NativeCaptureCapabilities Capabilities => AdvertisedCapabilities;
+
+        public CaptureStatus CurrentStatus
+        {
+            get
+            {
+                lock (_statusSync)
+                {
+                    return _currentStatus;
+                }
+            }
+        }
 
         public List<string> Operations { get; } = [];
 
@@ -667,8 +833,20 @@ public sealed class NativeCaptureRuntimeOwnerTests
 
         public event EventHandler<CaptureStatusChangedEventArgs>? StatusChanged
         {
-            add { }
-            remove { }
+            add
+            {
+                lock (_statusSync)
+                {
+                    _statusChanged += value;
+                }
+            }
+            remove
+            {
+                lock (_statusSync)
+                {
+                    _statusChanged -= value;
+                }
+            }
         }
 
         public event EventHandler<CaptureChunkCommittedEventArgs>? ChunkCommitted;
@@ -678,6 +856,34 @@ public sealed class NativeCaptureRuntimeOwnerTests
             ChunkCommitted?.Invoke(
                 this,
                 CaptureChunkCommittedEventArgs.WakeHint);
+        }
+
+        public void RaiseStatus(CaptureState state)
+        {
+            CaptureStatus previous;
+            CaptureStatus current;
+            EventHandler<CaptureStatusChangedEventArgs>? handler;
+            lock (_statusSync)
+            {
+                previous = _currentStatus;
+                current = new CaptureStatus(
+                    state,
+                    DateTimeOffset.UtcNow,
+                    "test",
+                    previous.Sequence + 1,
+                    state == CaptureState.Faulted
+                        ? CaptureReasonCode.BackendFault
+                        : CaptureReasonCode.None,
+                    state == CaptureState.Faulted
+                        ? CaptureErrorCode.NativeFailure
+                        : CaptureErrorCode.None);
+                _currentStatus = current;
+                handler = _statusChanged;
+            }
+
+            handler?.Invoke(
+                this,
+                new CaptureStatusChangedEventArgs(previous, current));
         }
 
         public Task<NativeCaptureCommandAdmissionV1?> TryIssueCommandAdmissionAsync(

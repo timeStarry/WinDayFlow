@@ -86,6 +86,7 @@ internal unsafe struct NativeCaptureRuntimeAuthorizationV1
 {
     internal const uint TargetPresent = 1U << 0;
     internal const uint TargetDisplayPresent = 1U << 1;
+    internal const uint TargetDisplayWideScope = 1U << 2;
 
     public uint StructSize;
     public uint AbiVersion;

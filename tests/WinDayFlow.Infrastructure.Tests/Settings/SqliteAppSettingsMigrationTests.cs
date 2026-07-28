@@ -99,7 +99,66 @@ public sealed class SqliteAppSettingsMigrationTests
         Assert.True(await reader.ReadAsync());
         Assert.Equal(6, reader.GetInt32(0));
         Assert.Equal(1, reader.GetInt32(1));
+        Assert.True(await reader.ReadAsync());
+        Assert.Equal(7, reader.GetInt32(0));
+        Assert.Equal(1, reader.GetInt32(1));
         Assert.False(await reader.ReadAsync());
+    }
+
+    [Fact]
+    public async Task VersionSixDatabaseDefaultsToForegroundProtectionWithoutInvalidatingConsent()
+    {
+        using var database = new TemporaryDatabase();
+        var factory = new SqliteConnectionFactory(database.DatabasePath);
+        var initializer = new SqliteDatabaseInitializer(factory);
+        await initializer.InitializeAsync();
+        const string acceptedAt = "2026-07-28T04:05:06.0000000+00:00";
+
+        await using (var connection = await factory.OpenConnectionAsync())
+        await using (var command = connection.CreateCommand())
+        {
+            command.CommandText = """
+                UPDATE app_settings
+                SET theme = 2,
+                    capture_enabled = 1,
+                    cloud_analysis_enabled = 0,
+                    capture_consent_version = 2,
+                    capture_consent_granted_at_utc = '2026-07-28T04:05:06.0000000+00:00',
+                    capture_consent_privacy_revision = 7,
+                    evidence_retention_days = 90,
+                    exclude_sensitive_applications = 0,
+                    pause_in_remote_sessions = 1,
+                    pause_during_screen_sharing = 0,
+                    capture_privacy_revision = 7
+                WHERE id = 1;
+                ALTER TABLE app_settings
+                DROP COLUMN capture_application_privacy_mode;
+                DELETE FROM schema_migrations WHERE version = 7;
+                """;
+            await command.ExecuteNonQueryAsync();
+        }
+
+        await initializer.InitializeAsync();
+
+        var settings = await new SqliteAppSettingsRepository(factory).GetAsync();
+        Assert.Equal(AppThemePreference.Dark, settings.Theme);
+        Assert.True(settings.CaptureEnabled);
+        Assert.Equal(
+            CaptureApplicationPrivacyMode.ProtectByForegroundApplication,
+            settings.CapturePrivacy.ApplicationPrivacyMode);
+        Assert.Equal(7, settings.CapturePrivacy.Revision);
+        Assert.Equal(90, settings.CapturePrivacy.EvidenceRetentionDays);
+        Assert.False(settings.CapturePrivacy.ExcludeSensitiveApplications);
+        Assert.True(settings.CapturePrivacy.PauseInRemoteSessions);
+        Assert.False(settings.CapturePrivacy.PauseDuringScreenSharing);
+        Assert.Equal(
+            DateTimeOffset.ParseExact(
+                acceptedAt,
+                "O",
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.None),
+            settings.RecordingConsent?.AcceptedAtUtc);
+        Assert.Equal(7, settings.RecordingConsent?.PrivacyRevision);
     }
 
     [Fact]
@@ -210,6 +269,8 @@ public sealed class SqliteAppSettingsMigrationTests
                 DROP TABLE analysis_jobs;
                 DROP TABLE capture_chunks;
                 DROP TABLE capture_exclusion_rules;
+                ALTER TABLE app_settings
+                DROP COLUMN capture_application_privacy_mode;
                 DELETE FROM schema_migrations WHERE version >= 4;
                 UPDATE app_settings
                 SET theme = 2,

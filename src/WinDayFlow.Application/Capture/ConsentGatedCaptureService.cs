@@ -4,7 +4,8 @@ namespace WinDayFlow.Application.Capture;
 
 public sealed class ConsentGatedCaptureService : ICaptureService, IDisposable
 {
-    private const int RuntimeResumeRetryLimit = 3;
+    private const int RuntimeResumeFailureRetryLimit = 3;
+    private const int RuntimeResumeRetryBackoffLimit = 5;
     private const string ConsentRequiredDetail =
         "请先在设置中确认录制授权。";
     private const string ConsentStopFailedDetail =
@@ -30,6 +31,8 @@ public sealed class ConsentGatedCaptureService : ICaptureService, IDisposable
     private CaptureUserIntent _userIntent;
     private bool _startupStartPending;
     private bool _startupStartCanSatisfyExplicitStart;
+    private bool _startCommandAwaitingStatusObservation;
+    private RuntimeRecoveryConfirmation? _runtimeRecoveryAwaitingConfirmation;
     private CancellationTokenSource? _runtimeResumeCancellation;
     private bool _disposed;
 
@@ -46,7 +49,8 @@ public sealed class ConsentGatedCaptureService : ICaptureService, IDisposable
         _status = ProjectStatus(initialBackendStatus, current: null);
         _startupStartPending =
             HasPersistentCaptureAuthorization()
-            && initialBackendStatus.State == CaptureState.Stopped;
+            && initialBackendStatus.State is
+                CaptureState.Unavailable or CaptureState.Stopped;
         _userIntent = _startupStartPending
             ? CaptureUserIntent.Recording
             : InferInitialUserIntent(initialBackendStatus);
@@ -185,6 +189,7 @@ public sealed class ConsentGatedCaptureService : ICaptureService, IDisposable
     {
         cancellationToken.ThrowIfCancellationRequested();
         ThrowIfDisposed();
+        var expectedIntentVersion = ReadUserIntentVersion();
 
         using var linkedCancellation = CancellationTokenSource.CreateLinkedTokenSource(
             cancellationToken,
@@ -195,7 +200,6 @@ public sealed class ConsentGatedCaptureService : ICaptureService, IDisposable
         try
         {
             ThrowIfDisposed();
-            var expectedIntentVersion = ReadUserIntentVersion();
             if (!HasPersistentCaptureAuthorization())
             {
                 throw new RecordingConsentRequiredException();
@@ -241,8 +245,46 @@ public sealed class ConsentGatedCaptureService : ICaptureService, IDisposable
                 throw new CaptureRuntimeAdmissionRejectedException();
             }
 
-            await operation(admissionStamp, linkedCancellation.Token)
-                .ConfigureAwait(false);
+            var startObservationStarted = false;
+            var operationSucceeded = false;
+            try
+            {
+                if (admissionOperation == CaptureAdmissionOperation.Start)
+                {
+                    if (!TryBeginStartStatusObservation(appliedIntentVersion))
+                    {
+                        throw new CaptureRuntimeAdmissionRejectedException();
+                    }
+
+                    startObservationStarted = true;
+                    if (!IsRecordingIntentCurrent(appliedIntentVersion)
+                        || !HasCaptureAuthorization()
+                        || admissionStamp.InvalidationGeneration
+                            != _runtimeAuthorization.InvalidationGeneration)
+                    {
+                        throw new CaptureRuntimeAdmissionRejectedException();
+                    }
+                }
+
+                await operation(admissionStamp, linkedCancellation.Token)
+                    .ConfigureAwait(false);
+                operationSucceeded = true;
+            }
+            finally
+            {
+                if (startObservationStarted)
+                {
+                    if (operationSucceeded)
+                    {
+                        ObserveStartStatus(_backend.CurrentStatus);
+                    }
+                    else
+                    {
+                        AbandonStartStatusObservation();
+                    }
+                }
+            }
+
             AdvanceHandledRuntimeInvalidation(
                 admissionStamp.InvalidationGeneration);
         }
@@ -257,13 +299,15 @@ public sealed class ConsentGatedCaptureService : ICaptureService, IDisposable
         object? sender,
         CaptureStatusChangedEventArgs eventArgs)
     {
-        UpdateStatus(eventArgs.Current);
-        if (DoesNotRetainResumableRun(eventArgs.Current.State))
-        {
-            RelinquishRuntimePauseOwnership();
-        }
+        _ = sender;
+        _ = eventArgs;
+        var backendStatus = _backend.CurrentStatus;
+        ObserveStartStatus(backendStatus);
+        ObserveRuntimeRecoveryStatus(backendStatus);
+        UpdateStatus(backendStatus);
+        RelinquishRuntimePauseOwnershipIfRunEnded(backendStatus.State);
 
-        ScheduleConsentStopIfRequired(eventArgs.Current);
+        ScheduleConsentStopIfRequired(backendStatus);
         SignalRuntimeResumeReconciliation();
     }
 
@@ -362,7 +406,7 @@ public sealed class ConsentGatedCaptureService : ICaptureService, IDisposable
         }
 
         if (backendStatus.State is CaptureState.Unavailable or CaptureState.Faulted
-            || HasCaptureAuthorization()
+            || HasPersistentCaptureAuthorization()
             || MayRetainCaptureResources(backendStatus.State))
         {
             return backendStatus;
@@ -468,7 +512,8 @@ public sealed class ConsentGatedCaptureService : ICaptureService, IDisposable
             if (!_disposed
                 && _userIntent == CaptureUserIntent.Recording
                 && HasPersistentCaptureAuthorization()
-                && MayRetainCaptureResources(backendStatus.State))
+                && (MayRetainCaptureResources(backendStatus.State)
+                    || _startCommandAwaitingStatusObservation))
             {
                 AdvanceGeneration(ref _runtimePauseOwnedGeneration, generation);
                 return;
@@ -503,6 +548,7 @@ public sealed class ConsentGatedCaptureService : ICaptureService, IDisposable
     private async Task ReconcileRuntimeResumeAsync()
     {
         var consecutiveFailures = 0;
+        var consecutiveContention = 0;
         try
         {
             while (Interlocked.Exchange(ref _runtimeResumeWakePending, 0) != 0)
@@ -518,6 +564,7 @@ public sealed class ConsentGatedCaptureService : ICaptureService, IDisposable
                     await TryRestoreAfterRuntimeRecoveryAsync()
                         .ConfigureAwait(false);
                     consecutiveFailures = 0;
+                    consecutiveContention = 0;
                 }
                 catch (OperationCanceledException)
                     when (_lifetimeCancellation.IsCancellationRequested)
@@ -527,21 +574,30 @@ public sealed class ConsentGatedCaptureService : ICaptureService, IDisposable
                 catch (OperationCanceledException)
                 {
                     consecutiveFailures = 0;
+                    consecutiveContention = 0;
                     UpdateStatus(_backend.CurrentStatus);
                 }
                 catch (RecordingConsentRequiredException)
                 {
                     consecutiveFailures = 0;
+                    consecutiveContention++;
+                    shouldRetry = true;
+                    UpdateStatus(_backend.CurrentStatus);
                 }
                 catch (CaptureRuntimeAdmissionRejectedException)
                 {
                     consecutiveFailures = 0;
+                    consecutiveContention++;
+                    shouldRetry = true;
+                    UpdateStatus(_backend.CurrentStatus);
                 }
                 catch (Exception)
                 {
                     UpdateStatus(_backend.CurrentStatus);
+                    consecutiveContention = 0;
                     consecutiveFailures++;
-                    shouldRetry = consecutiveFailures < RuntimeResumeRetryLimit;
+                    shouldRetry = consecutiveFailures
+                        < RuntimeResumeFailureRetryLimit;
                 }
                 finally
                 {
@@ -556,7 +612,10 @@ public sealed class ConsentGatedCaptureService : ICaptureService, IDisposable
                     try
                     {
                         await Task.Delay(
-                                RuntimeResumeRetryDelay,
+                                GetRuntimeResumeRetryDelay(
+                                    consecutiveContention > 0
+                                        ? consecutiveContention
+                                        : consecutiveFailures),
                                 _lifetimeCancellation.Token)
                             .ConfigureAwait(false);
                     }
@@ -573,6 +632,7 @@ public sealed class ConsentGatedCaptureService : ICaptureService, IDisposable
                     else
                     {
                         consecutiveFailures = 0;
+                        consecutiveContention = 0;
                     }
                 }
             }
@@ -635,17 +695,54 @@ public sealed class ConsentGatedCaptureService : ICaptureService, IDisposable
                     throw new CaptureRuntimeAdmissionRejectedException();
                 }
 
-                if (recoveryOperation == CaptureAdmissionOperation.Start)
+                var startObservationStarted = false;
+                var operationSucceeded = false;
+                try
                 {
-                    await _backend
-                        .StartAsync(admissionStamp, resumeCancellation.Token)
-                        .ConfigureAwait(false);
+                    if (recoveryOperation == CaptureAdmissionOperation.Start)
+                    {
+                        if (!TryBeginStartStatusObservation(expectedIntentVersion))
+                        {
+                            throw new CaptureRuntimeAdmissionRejectedException();
+                        }
+
+                        startObservationStarted = true;
+                        if (!IsRecordingIntentCurrent(expectedIntentVersion)
+                            || !HasCaptureAuthorization()
+                            || admissionStamp.InvalidationGeneration
+                                != _runtimeAuthorization.InvalidationGeneration
+                            || GetRuntimeRecoveryOperation(_backend.CurrentStatus)
+                                != recoveryOperation)
+                        {
+                            throw new CaptureRuntimeAdmissionRejectedException();
+                        }
+
+                        await _backend
+                            .StartAsync(admissionStamp, resumeCancellation.Token)
+                            .ConfigureAwait(false);
+                    }
+                    else
+                    {
+                        await _backend
+                            .ResumeAsync(admissionStamp, resumeCancellation.Token)
+                            .ConfigureAwait(false);
+                    }
+
+                    operationSucceeded = true;
                 }
-                else
+                finally
                 {
-                    await _backend
-                        .ResumeAsync(admissionStamp, resumeCancellation.Token)
-                        .ConfigureAwait(false);
+                    if (startObservationStarted)
+                    {
+                        if (operationSucceeded)
+                        {
+                            ObserveStartStatus(_backend.CurrentStatus);
+                        }
+                        else
+                        {
+                            AbandonStartStatusObservation();
+                        }
+                    }
                 }
 
                 resumeCancellation.Token.ThrowIfCancellationRequested();
@@ -654,14 +751,25 @@ public sealed class ConsentGatedCaptureService : ICaptureService, IDisposable
                     throw new CaptureRuntimeAdmissionRejectedException();
                 }
 
-                if (recoveryOperation == CaptureAdmissionOperation.Start)
+                if (!AwaitRuntimeRecoveryConfirmation(
+                        recoveryOperation.Value,
+                        admissionStamp.InvalidationGeneration,
+                        expectedIntentVersion))
                 {
-                    CompleteStartupStart(expectedIntentVersion);
+                    throw new CaptureRuntimeAdmissionRejectedException();
                 }
 
-                AdvanceHandledRuntimeInvalidation(
-                    admissionStamp.InvalidationGeneration);
-                UpdateStatus(_backend.CurrentStatus);
+                var currentStatus = _backend.CurrentStatus;
+                ObserveRuntimeRecoveryStatus(currentStatus);
+                UpdateStatus(currentStatus);
+                if (IsRuntimeRecoveryAwaitingConfirmation(
+                        recoveryOperation.Value,
+                        admissionStamp.InvalidationGeneration,
+                        expectedIntentVersion)
+                    && ShouldRestoreAfterRuntimeRecovery(currentStatus))
+                {
+                    throw new CaptureRuntimeAdmissionRejectedException();
+                }
             }
             finally
             {
@@ -673,9 +781,17 @@ public sealed class ConsentGatedCaptureService : ICaptureService, IDisposable
     private bool ShouldResumeAfterRuntimeRecovery(CaptureStatus backendStatus)
     {
         if (backendStatus.State != CaptureState.Paused
-            || !HasCaptureAuthorization()
-            || Volatile.Read(ref _runtimePauseOwnedGeneration)
-                <= Volatile.Read(ref _handledRuntimeInvalidationGeneration))
+            || !HasCaptureAuthorization())
+        {
+            return false;
+        }
+
+        var ownsRuntimePause =
+            Volatile.Read(ref _runtimePauseOwnedGeneration)
+                > Volatile.Read(ref _handledRuntimeInvalidationGeneration);
+        if (!ownsRuntimePause
+            && !HasRuntimeRecoveryAwaitingConfirmation()
+            && !IsAutomaticProtectionReason(backendStatus.Reason))
         {
             return false;
         }
@@ -768,6 +884,8 @@ public sealed class ConsentGatedCaptureService : ICaptureService, IDisposable
             _userIntentVersion = unchecked(_userIntentVersion + 1);
             _startupStartPending = false;
             _startupStartCanSatisfyExplicitStart = false;
+            _startCommandAwaitingStatusObservation = false;
+            _runtimeRecoveryAwaitingConfirmation = null;
             resumeCancellation = _runtimeResumeCancellation;
         }
 
@@ -795,6 +913,151 @@ public sealed class ConsentGatedCaptureService : ICaptureService, IDisposable
 
         resumeCancellation.Dispose();
         return null;
+    }
+
+    private bool TryBeginStartStatusObservation(long expectedIntentVersion)
+    {
+        lock (_sync)
+        {
+            if (_disposed
+                || _userIntent != CaptureUserIntent.Recording
+                || _userIntentVersion != expectedIntentVersion
+                || _startCommandAwaitingStatusObservation)
+            {
+                return false;
+            }
+
+            _startCommandAwaitingStatusObservation = true;
+            return true;
+        }
+    }
+
+    private void ObserveStartStatus(CaptureStatus backendStatus)
+    {
+        if (backendStatus.State is CaptureState.Stopped or CaptureState.Unavailable)
+        {
+            return;
+        }
+
+        lock (_sync)
+        {
+            _startCommandAwaitingStatusObservation = false;
+        }
+    }
+
+    private bool AwaitRuntimeRecoveryConfirmation(
+        CaptureAdmissionOperation operation,
+        long invalidationGeneration,
+        long expectedIntentVersion)
+    {
+        lock (_sync)
+        {
+            if (_disposed
+                || _userIntent != CaptureUserIntent.Recording
+                || _userIntentVersion != expectedIntentVersion
+                || !HasCaptureAuthorization()
+                || _runtimeAuthorization.InvalidationGeneration
+                    != invalidationGeneration)
+            {
+                return false;
+            }
+
+            _runtimeRecoveryAwaitingConfirmation = new RuntimeRecoveryConfirmation(
+                operation,
+                invalidationGeneration,
+                expectedIntentVersion);
+            return true;
+        }
+    }
+
+    private bool ObserveRuntimeRecoveryStatus(CaptureStatus backendStatus)
+    {
+        RuntimeRecoveryConfirmation confirmation;
+        lock (_sync)
+        {
+            if (_runtimeRecoveryAwaitingConfirmation is not { } pending
+                || !IsRuntimeRecoveryConfirmed(pending.Operation, backendStatus.State)
+                || _disposed
+                || _userIntent != CaptureUserIntent.Recording
+                || _userIntentVersion != pending.IntentVersion
+                || !HasCaptureAuthorization()
+                || _runtimeAuthorization.InvalidationGeneration
+                    != pending.InvalidationGeneration)
+            {
+                return false;
+            }
+
+            confirmation = pending;
+            _runtimeRecoveryAwaitingConfirmation = null;
+        }
+
+        if (confirmation.Operation == CaptureAdmissionOperation.Start)
+        {
+            CompleteStartupStart(confirmation.IntentVersion);
+        }
+
+        AdvanceHandledRuntimeInvalidation(
+            confirmation.InvalidationGeneration);
+        return true;
+    }
+
+    private bool IsRuntimeRecoveryAwaitingConfirmation(
+        CaptureAdmissionOperation operation,
+        long invalidationGeneration,
+        long expectedIntentVersion)
+    {
+        lock (_sync)
+        {
+            return _runtimeRecoveryAwaitingConfirmation is { } pending
+                && pending.Operation == operation
+                && pending.InvalidationGeneration == invalidationGeneration
+                && pending.IntentVersion == expectedIntentVersion;
+        }
+    }
+
+    private bool HasRuntimeRecoveryAwaitingConfirmation()
+    {
+        lock (_sync)
+        {
+            return _runtimeRecoveryAwaitingConfirmation is not null;
+        }
+    }
+
+    private void AbandonStartStatusObservation()
+    {
+        var abandoned = false;
+        lock (_sync)
+        {
+            if (_startCommandAwaitingStatusObservation)
+            {
+                _startCommandAwaitingStatusObservation = false;
+                abandoned = true;
+            }
+        }
+
+        if (abandoned)
+        {
+            RelinquishRuntimePauseOwnership();
+        }
+    }
+
+    private void RelinquishRuntimePauseOwnershipIfRunEnded(CaptureState state)
+    {
+        if (!DoesNotRetainResumableRun(state))
+        {
+            return;
+        }
+
+        lock (_sync)
+        {
+            if (_disposed || _startCommandAwaitingStatusObservation)
+            {
+                return;
+            }
+
+            _runtimeRecoveryAwaitingConfirmation = null;
+            RelinquishRuntimePauseOwnership();
+        }
     }
 
     private void EndRuntimeResume(CancellationTokenSource resumeCancellation)
@@ -845,6 +1108,7 @@ public sealed class ConsentGatedCaptureService : ICaptureService, IDisposable
             _userIntent = CaptureUserIntent.Recording;
             _userIntentVersion = unchecked(_userIntentVersion + 1);
             _startupStartCanSatisfyExplicitStart = false;
+            _runtimeRecoveryAwaitingConfirmation = null;
             appliedIntentVersion = _userIntentVersion;
         }
 
@@ -911,6 +1175,29 @@ public sealed class ConsentGatedCaptureService : ICaptureService, IDisposable
         return state is CaptureState.Starting or CaptureState.Recording;
     }
 
+    private static bool IsRuntimeRecoveryConfirmed(
+        CaptureAdmissionOperation operation,
+        CaptureState state)
+    {
+        return operation switch
+        {
+            CaptureAdmissionOperation.Start =>
+                state is CaptureState.Starting or CaptureState.Recording,
+            CaptureAdmissionOperation.Resume =>
+                state is CaptureState.Resuming or CaptureState.Recording,
+            _ => false,
+        };
+    }
+
+    private static TimeSpan GetRuntimeResumeRetryDelay(int attempt)
+    {
+        var exponent = Math.Clamp(
+            attempt - 1,
+            0,
+            RuntimeResumeRetryBackoffLimit);
+        return RuntimeResumeRetryDelay * (1 << exponent);
+    }
+
     private static bool MayRetainCaptureResources(CaptureState state)
     {
         return ShouldInitiateConsentStop(state)
@@ -938,9 +1225,27 @@ public sealed class ConsentGatedCaptureService : ICaptureService, IDisposable
             CaptureState.Recording or
             CaptureState.Pausing or
             CaptureState.Resuming => CaptureUserIntent.Recording,
+            CaptureState.Paused when IsAutomaticProtectionReason(
+                backendStatus.Reason) => CaptureUserIntent.Recording,
             CaptureState.Paused => CaptureUserIntent.Paused,
             _ => CaptureUserIntent.Stopped,
         };
+    }
+
+    private static bool IsAutomaticProtectionReason(CaptureReasonCode reason)
+    {
+        return reason is
+            CaptureReasonCode.ExcludedApplication or
+            CaptureReasonCode.ExcludedWindow or
+            CaptureReasonCode.SessionLocked or
+            CaptureReasonCode.SecureDesktop or
+            CaptureReasonCode.RemoteSession or
+            CaptureReasonCode.PresentationMode or
+            CaptureReasonCode.SystemSleep or
+            CaptureReasonCode.DisplayUnavailable or
+            CaptureReasonCode.AccessLost or
+            CaptureReasonCode.StorageConstrained or
+            CaptureReasonCode.PolicyBlocked;
     }
 
     private bool HasCaptureAuthorization()
@@ -977,4 +1282,9 @@ public sealed class ConsentGatedCaptureService : ICaptureService, IDisposable
         Recording = 1,
         Paused = 2,
     }
+
+    private readonly record struct RuntimeRecoveryConfirmation(
+        CaptureAdmissionOperation Operation,
+        long InvalidationGeneration,
+        long IntentVersion);
 }

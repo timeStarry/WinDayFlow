@@ -69,6 +69,21 @@ bool TestBuildsStablePrivacySafeSchema() {
                 "manifest was not terminated predictably");
 }
 
+bool TestBuildsDisplayWideContinuousScope() {
+  auto manifest = ValidManifest();
+  manifest.display_wide_scope = true;
+  std::string json;
+  return Expect(windayflow::capture::BuildChunkManifestJson(manifest, &json),
+                "display-wide chunk manifest was rejected") &&
+         Expect(json.find(
+                    "\"captureScope\": \"authorized-display-continuous\"") !=
+                    std::string::npos,
+                "display-wide chunk manifest omitted its continuous scope") &&
+         Expect(json.find("authorized-foreground-display") ==
+                    std::string::npos,
+                "display-wide chunk manifest retained foreground scope");
+}
+
 bool TestRejectsInvalidFieldsAndClearsOutput() {
   const auto Reject = [](windayflow::capture::ChunkManifest manifest) {
     std::string output = "stale";
@@ -118,6 +133,7 @@ bool TestRejectsInvalidFieldsAndClearsOutput() {
 
 int main() {
   if (!TestBuildsStablePrivacySafeSchema() ||
+      !TestBuildsDisplayWideContinuousScope() ||
       !TestRejectsInvalidFieldsAndClearsOutput()) {
     return 1;
   }

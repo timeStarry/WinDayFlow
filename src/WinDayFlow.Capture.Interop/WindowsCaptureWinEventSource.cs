@@ -18,6 +18,10 @@ internal enum WindowsCaptureWinEventChange
     PowerResumed = 12,
 }
 
+internal readonly record struct WindowsCaptureWinEventNotification(
+    WindowsCaptureWinEventChange Change,
+    ulong WindowHandle);
+
 internal enum WindowsCaptureWinEventSourceFault
 {
     UnsupportedPlatform = 1,
@@ -42,7 +46,7 @@ internal enum WindowsCaptureWinEventSourceFault
 internal interface IWindowsCaptureEventSource : IDisposable
 {
     void Start(
-        Action<WindowsCaptureWinEventChange> changeCallback,
+        Action<WindowsCaptureWinEventNotification> changeCallback,
         Action<WindowsCaptureWinEventSourceFault> faultCallback);
 }
 
@@ -118,7 +122,7 @@ internal sealed class WindowsCaptureWinEventSource : IWindowsCaptureEventSource
         Volatile.Read(ref _bridge)?.HasRetainedRoot == true;
 
     public void Start(
-        Action<WindowsCaptureWinEventChange> changeCallback,
+        Action<WindowsCaptureWinEventNotification> changeCallback,
         Action<WindowsCaptureWinEventSourceFault> faultCallback)
     {
         ArgumentNullException.ThrowIfNull(changeCallback);
@@ -622,7 +626,7 @@ internal sealed class WindowsCaptureWinEventCallbackBridge
     private readonly object _cleanupSync = new();
     private Func<bool>? _requestOwnerStop;
     private WindowsCaptureDefWindowProc? _defWindowProc;
-    private Action<WindowsCaptureWinEventChange>? _changeCallback;
+    private Action<WindowsCaptureWinEventNotification>? _changeCallback;
     private Action<WindowsCaptureWinEventSourceFault>? _faultCallback;
     private GCHandle _selfRoot;
     private int _acceptChanges;
@@ -630,7 +634,7 @@ internal sealed class WindowsCaptureWinEventCallbackBridge
     private int _retainedRoot;
 
     internal WindowsCaptureWinEventCallbackBridge(
-        Action<WindowsCaptureWinEventChange> changeCallback,
+        Action<WindowsCaptureWinEventNotification> changeCallback,
         Action<WindowsCaptureWinEventSourceFault> faultCallback,
         Func<bool> requestOwnerStop,
         WindowsCaptureDefWindowProc defWindowProc)
@@ -768,7 +772,9 @@ internal sealed class WindowsCaptureWinEventCallbackBridge
             if (Volatile.Read(ref _acceptChanges) == 1
                 && TryMapWindowMessage(message, wParam, out var change))
             {
-                PublishChange(change);
+                PublishChange(new WindowsCaptureWinEventNotification(
+                    change,
+                    WindowHandle: 0));
                 return message == WindowsCaptureWinEventSource
                         .WindowMessagePowerBroadcast
                     ? WindowsCaptureWinEventSource.HandledPowerBroadcastResult
@@ -790,7 +796,7 @@ internal sealed class WindowsCaptureWinEventCallbackBridge
         }
     }
 
-    private void PublishChange(WindowsCaptureWinEventChange change)
+    private void PublishChange(WindowsCaptureWinEventNotification notification)
     {
         var callback = Volatile.Read(ref _changeCallback);
         if (callback is null)
@@ -800,7 +806,7 @@ internal sealed class WindowsCaptureWinEventCallbackBridge
 
         try
         {
-            callback(change);
+            callback(notification);
         }
         catch
         {
@@ -837,15 +843,20 @@ internal sealed class WindowsCaptureWinEventCallbackBridge
         nint windowHandle,
         int objectId,
         int childId,
-        out WindowsCaptureWinEventChange change)
+        out WindowsCaptureWinEventNotification notification)
     {
+        WindowsCaptureWinEventChange change;
         switch (eventType)
         {
             case WindowsCaptureWinEventSource.EventSystemForeground:
-                change = WindowsCaptureWinEventChange.Foreground;
+                notification = new WindowsCaptureWinEventNotification(
+                    WindowsCaptureWinEventChange.Foreground,
+                    ToUnsignedWindowHandle(windowHandle));
                 return true;
             case WindowsCaptureWinEventSource.EventSystemDesktopSwitch:
-                change = WindowsCaptureWinEventChange.DesktopSwitch;
+                notification = new WindowsCaptureWinEventNotification(
+                    WindowsCaptureWinEventChange.DesktopSwitch,
+                    WindowHandle: 0);
                 return true;
             case WindowsCaptureWinEventSource.EventObjectCreate:
                 change = WindowsCaptureWinEventChange.ObjectCreated;
@@ -860,14 +871,26 @@ internal sealed class WindowsCaptureWinEventCallbackBridge
                 change = WindowsCaptureWinEventChange.ObjectNameChanged;
                 break;
             default:
-                change = default;
+                notification = default;
                 return false;
         }
 
-        return windowHandle != 0
-            && objectId == WindowsCaptureWinEventSource.ObjectIdWindow
-            && childId == WindowsCaptureWinEventSource.ChildIdSelf;
+        if (windowHandle == 0
+            || objectId != WindowsCaptureWinEventSource.ObjectIdWindow
+            || childId != WindowsCaptureWinEventSource.ChildIdSelf)
+        {
+            notification = default;
+            return false;
+        }
+
+        notification = new WindowsCaptureWinEventNotification(
+            change,
+            ToUnsignedWindowHandle(windowHandle));
+        return true;
     }
+
+    private static ulong ToUnsignedWindowHandle(nint windowHandle) =>
+        unchecked((ulong)(nuint)windowHandle);
 
     private static bool TryMapWindowMessage(
         uint message,

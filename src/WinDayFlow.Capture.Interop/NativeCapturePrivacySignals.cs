@@ -113,30 +113,50 @@ public static class NativeCapturePrivacyPolicy
         var presentationAllowed = settings.CapturePrivacy.PauseDuringScreenSharing
             ? RequireInactive(signals.PresentationMode)
             : NativeCapturePolicyDecision.Allow;
+        var allowAllApplications = settings.CapturePrivacy.ApplicationPrivacyMode
+            == CaptureApplicationPrivacyMode.AllowAllApplications;
         var exclusion = NativeCaptureExclusionRuleMatcher.Evaluate(
             settings.CapturePrivacy.ExclusionRules,
             signals.CaptureIdentity);
-        var applicationAllowed = CombineExclusionPolicies(
-            settings.CapturePrivacy.ExcludeSensitiveApplications,
-            signals.ApplicationAllowed,
-            exclusion.Application.HasEnabledRules,
-            exclusion.Application.Decision);
-        var windowAllowed = CombineExclusionPolicies(
-            settings.CapturePrivacy.ExcludeSensitiveApplications,
-            signals.WindowAllowed,
-            exclusion.Window.HasEnabledRules,
-            exclusion.Window.Decision);
+        var applicationAllowed = allowAllApplications
+            ? NativeCapturePolicyDecision.Allow
+            : CombineExclusionPolicies(
+                settings.CapturePrivacy.ExcludeSensitiveApplications,
+                signals.ApplicationAllowed,
+                exclusion.Application.HasEnabledRules,
+                exclusion.Application.Decision);
+        var windowAllowed = allowAllApplications
+            ? NativeCapturePolicyDecision.Allow
+            : CombineExclusionPolicies(
+                settings.CapturePrivacy.ExcludeSensitiveApplications,
+                signals.WindowAllowed,
+                exclusion.Window.HasEnabledRules,
+                exclusion.Window.Decision);
+        var secureDesktopClear = IsWindowsLockScreen(signals.CaptureIdentity)
+            ? NativeCapturePolicyDecision.Block
+            : signals.SecureDesktopClear;
 
         return new NativeCapturePrivacyContext(
             consentGranted,
             signals.SessionUnlocked,
-            signals.SecureDesktopClear,
+            secureDesktopClear,
             remoteSessionAllowed,
             presentationAllowed,
             applicationAllowed,
             windowAllowed,
             signals.StorageAvailable,
             runtimePolicyRevision);
+    }
+
+    private static bool IsWindowsLockScreen(
+        NativeCaptureIdentitySnapshot identity)
+    {
+        var executable = identity.ExecutableNameObservation;
+        return executable.State == NativeCaptureObservationState.Present
+            && string.Equals(
+                executable.Value,
+                "LockApp.exe",
+                StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool HasCurrentRecordingConsent(AppSettings settings)

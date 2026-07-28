@@ -132,13 +132,30 @@ bool IsValidDeviceKey(std::wstring_view value) noexcept {
   return !all_whitespace;
 }
 
-bool IsValidExpectedTarget(const CaptureTargetIdentity& expected) noexcept {
-  return IsRepresentableHandleValue(expected.window_handle) &&
+bool IsValidExpectedForegroundTarget(
+    const CaptureTargetIdentity& expected) noexcept {
+  return expected.scope == CaptureAuthorizationScope::kForegroundTarget &&
+         IsRepresentableHandleValue(expected.window_handle) &&
          expected.process_id != 0 &&
          expected.process_creation_time_100ns != 0 &&
          expected.target_epoch != 0 &&
          IsRepresentableHandleValue(expected.display_monitor_handle) &&
          IsValidDeviceKey(expected.display_device_key);
+}
+
+bool IsValidExpectedDisplayWideTarget(
+    const CaptureTargetIdentity& expected) noexcept {
+  return expected.scope == CaptureAuthorizationScope::kDisplayWide &&
+         expected.window_handle == 0 && expected.process_id == 0 &&
+         expected.process_creation_time_100ns == 0 &&
+         expected.target_epoch != 0 &&
+         IsRepresentableHandleValue(expected.display_monitor_handle) &&
+         IsValidDeviceKey(expected.display_device_key);
+}
+
+bool IsValidExpectedTarget(const CaptureTargetIdentity& expected) noexcept {
+  return IsValidExpectedForegroundTarget(expected) ||
+         IsValidExpectedDisplayWideTarget(expected);
 }
 
 bool DeviceKeysEqual(std::wstring_view left, std::wstring_view right) noexcept {
@@ -209,6 +226,32 @@ bool ReadDisplayAnchor(IWindowsCaptureTargetObserverApi& api, HWND window,
   return IsValidDeviceKey(anchor->device_key);
 }
 
+bool ReadDisplayAnchor(IWindowsCaptureTargetObserverApi& api, HMONITOR monitor,
+                       DisplayAnchor* anchor) {
+  if (anchor == nullptr || monitor == nullptr) {
+    return false;
+  }
+  *anchor = {};
+  anchor->monitor = monitor;
+
+  MONITORINFOEXW monitor_info{};
+  monitor_info.cbSize = sizeof(monitor_info);
+  if (api.ReadMonitorInfo(anchor->monitor, &monitor_info) == FALSE) {
+    return false;
+  }
+
+  size_t device_key_length = 0;
+  while (device_key_length < CCHDEVICENAME &&
+         monitor_info.szDevice[device_key_length] != L'\0') {
+    ++device_key_length;
+  }
+  if (device_key_length == CCHDEVICENAME) {
+    return false;
+  }
+  anchor->device_key.assign(monitor_info.szDevice, device_key_length);
+  return IsValidDeviceKey(anchor->device_key);
+}
+
 bool MatchesExpectedDisplay(const DisplayAnchor& anchor,
                             const CaptureTargetIdentity& expected) noexcept {
   return HandleValue(anchor.monitor) == expected.display_monitor_handle &&
@@ -220,7 +263,7 @@ bool MatchesExpectedDisplay(const DisplayAnchor& anchor,
 std::optional<CaptureTargetIdentity> ObserveWindowsCaptureTargetWithApi(
     IWindowsCaptureTargetObserverApi& api,
     const CaptureTargetIdentity& expected) noexcept {
-  if (!IsValidExpectedTarget(expected)) {
+  if (!IsValidExpectedForegroundTarget(expected)) {
     return std::nullopt;
   }
 
@@ -300,10 +343,45 @@ std::optional<CaptureTargetIdentity> ObserveWindowsCaptureTargetWithApi(
   }
 }
 
+std::optional<CaptureTargetIdentity> ObserveWindowsCaptureAuthorizationWithApi(
+    IWindowsCaptureTargetObserverApi& api,
+    const CaptureTargetIdentity& expected) noexcept {
+  if (!IsValidExpectedTarget(expected)) {
+    return std::nullopt;
+  }
+  if (expected.scope == CaptureAuthorizationScope::kForegroundTarget) {
+    return ObserveWindowsCaptureTargetWithApi(api, expected);
+  }
+
+  try {
+    const auto monitor = reinterpret_cast<HMONITOR>(
+        static_cast<uintptr_t>(expected.display_monitor_handle));
+    DisplayAnchor first_display;
+    DisplayAnchor second_display;
+    if (!ReadDisplayAnchor(api, monitor, &first_display) ||
+        !MatchesExpectedDisplay(first_display, expected) ||
+        !ReadDisplayAnchor(api, monitor, &second_display) ||
+        second_display.monitor != first_display.monitor ||
+        !DeviceKeysEqual(second_display.device_key, first_display.device_key) ||
+        !MatchesExpectedDisplay(second_display, expected)) {
+      return std::nullopt;
+    }
+    return expected;
+  } catch (...) {
+    return std::nullopt;
+  }
+}
+
 std::optional<CaptureTargetIdentity> ObserveWindowsCaptureTarget(
     const CaptureTargetIdentity& expected) noexcept {
   WindowsCaptureTargetObserverApi api;
   return ObserveWindowsCaptureTargetWithApi(api, expected);
+}
+
+std::optional<CaptureTargetIdentity> ObserveWindowsCaptureAuthorization(
+    const CaptureTargetIdentity& expected) noexcept {
+  WindowsCaptureTargetObserverApi api;
+  return ObserveWindowsCaptureAuthorizationWithApi(api, expected);
 }
 
 }  // namespace windayflow::capture

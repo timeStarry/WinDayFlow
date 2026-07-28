@@ -139,6 +139,11 @@ public sealed class NativeCapturePrivacyCoordinator
     public NativeCaptureRuntimeAuthorization LastAppliedAuthorization =>
         Volatile.Read(ref _lastApplied);
 
+    public CaptureApplicationPrivacyMode ApplicationPrivacyMode =>
+        Volatile.Read(ref _committedSettings)
+            .CapturePrivacy
+            .ApplicationPrivacyMode;
+
     public ulong LastPersistenceGeneration =>
         Volatile.Read(ref _lastPersistenceGeneration);
 
@@ -162,6 +167,8 @@ public sealed class NativeCapturePrivacyCoordinator
             }
         }
     }
+
+    internal event EventHandler? ApplicationPrivacyModeChanged;
 
     internal async Task<NativeCaptureAdmissionSnapshot?> TryIssueAdmissionAsync(
         Func<NativeCaptureAdmissionSnapshot, CancellationToken, Task<bool>> issueNative,
@@ -370,6 +377,9 @@ public sealed class NativeCapturePrivacyCoordinator
 
         var authorizingTransition = !HasUserAuthorization(previous)
             && HasUserAuthorization(current);
+        var applicationPrivacyModeChanged =
+            previous.CapturePrivacy.ApplicationPrivacyMode
+                != current.CapturePrivacy.ApplicationPrivacyMode;
         EnsurePreparedSettingsCommit(previous, current);
         try
         {
@@ -418,6 +428,11 @@ public sealed class NativeCapturePrivacyCoordinator
         {
             CompletePreparedSettingsCommit();
         }
+
+        if (applicationPrivacyModeChanged)
+        {
+            RaiseApplicationPrivacyModeChanged();
+        }
     }
 
     public async Task AbortedAsync(
@@ -431,6 +446,9 @@ public sealed class NativeCapturePrivacyCoordinator
         ArgumentNullException.ThrowIfNull(proposed);
         ArgumentNullException.ThrowIfNull(failure);
         _ = cancellationToken;
+        var applicationPrivacyModeChanged = settingsApplied
+            && previous.CapturePrivacy.ApplicationPrivacyMode
+                != proposed.CapturePrivacy.ApplicationPrivacyMode;
         try
         {
             if (!settingsApplied)
@@ -453,6 +471,11 @@ public sealed class NativeCapturePrivacyCoordinator
         finally
         {
             CompletePreparedSettingsCommit();
+        }
+
+        if (applicationPrivacyModeChanged)
+        {
+            RaiseApplicationPrivacyModeChanged();
         }
     }
 
@@ -720,7 +743,8 @@ public sealed class NativeCapturePrivacyCoordinator
             Volatile.Read(ref _committedSettings),
             signals,
             forceBlock: Volatile.Read(ref _forcedBlock) != 0,
-            LastAppliedContext.RuntimePolicyRevision);
+            LastAppliedContext.RuntimePolicyRevision,
+            Volatile.Read(ref _lastApplied).Target);
         lock (_disposeSync)
         {
             if (_disposed
@@ -772,7 +796,8 @@ public sealed class NativeCapturePrivacyCoordinator
             Volatile.Read(ref _committedSettings),
             signals,
             forceBlock: true,
-            LastAppliedContext.RuntimePolicyRevision);
+            LastAppliedContext.RuntimePolicyRevision,
+            Volatile.Read(ref _lastApplied).Target);
         lock (_disposeSync)
         {
             if (_disposed
@@ -895,7 +920,8 @@ public sealed class NativeCapturePrivacyCoordinator
             settings,
             observation.Signals,
             forceBlock,
-            _lastApplied.RuntimePolicyRevision);
+            _lastApplied.RuntimePolicyRevision,
+            _lastApplied.Target);
         if (!forceNativeUpdate && HasSameDecisions(_lastApplied, preview))
         {
             return new NativeAuthorizationApplication(
@@ -916,7 +942,8 @@ public sealed class NativeCapturePrivacyCoordinator
             settings,
             observation.Signals,
             forceBlock,
-            _lastApplied.RuntimePolicyRevision + 1);
+            _lastApplied.RuntimePolicyRevision + 1,
+            _lastApplied.Target);
         NativeCaptureAuthorizationUpdateResult update;
         try
         {
@@ -1060,14 +1087,19 @@ public sealed class NativeCapturePrivacyCoordinator
         AppSettings settings,
         NativeCapturePrivacySignals signals,
         bool forceBlock,
-        ulong runtimePolicyRevision)
+        ulong runtimePolicyRevision,
+        NativeCaptureTargetIdentity previousTarget)
     {
         var context = NativeCapturePrivacyPolicy.Compose(
             settings,
             signals,
             runtimePolicyRevision);
+        var target = SelectAuthorizationTarget(
+            settings.CapturePrivacy.ApplicationPrivacyMode,
+            signals.Target,
+            previousTarget);
         if (NativeCaptureRuntimeAuthorization.IsFullyAllowed(context)
-            && signals.Target.State != NativeCaptureTargetIdentityState.Present)
+            && target.State != NativeCaptureTargetIdentityState.Present)
         {
             context = new NativeCapturePrivacyContext(
                 context.ConsentGranted,
@@ -1081,27 +1113,78 @@ public sealed class NativeCapturePrivacyCoordinator
                 context.RuntimePolicyRevision);
         }
 
-        if (!forceBlock || context.ConsentGranted == NativeCapturePolicyDecision.Block)
+        if (!forceBlock || !IsFullyAllowed(context))
         {
             return new NativeCaptureRuntimeAuthorization(
                 context,
                 NativeCaptureRuntimeAuthorization.IsFullyAllowed(context)
-                    ? signals.Target
+                    ? target
                     : NativeCaptureTargetIdentity.Unknown);
         }
 
         return new NativeCaptureRuntimeAuthorization(
             new NativeCapturePrivacyContext(
-                NativeCapturePolicyDecision.Block,
+                context.ConsentGranted,
                 context.SessionUnlocked,
                 context.SecureDesktopClear,
                 context.RemoteSessionAllowed,
                 context.PresentationAllowed,
-                context.ApplicationAllowed,
+                NativeCapturePolicyDecision.Unknown,
                 context.WindowAllowed,
                 context.StorageAvailable,
                 context.RuntimePolicyRevision),
             NativeCaptureTargetIdentity.Unknown);
+    }
+
+    private static NativeCaptureTargetIdentity SelectAuthorizationTarget(
+        CaptureApplicationPrivacyMode mode,
+        NativeCaptureTargetIdentity observedTarget,
+        NativeCaptureTargetIdentity previousTarget)
+    {
+        if (mode != CaptureApplicationPrivacyMode.AllowAllApplications
+            || observedTarget.State != NativeCaptureTargetIdentityState.Present)
+        {
+            return observedTarget;
+        }
+
+        if (previousTarget.State == NativeCaptureTargetIdentityState.Present
+            && previousTarget.Scope == NativeCaptureAuthorizationScope.DisplayWide
+            && previousTarget.DisplayMonitorHandle
+                == observedTarget.DisplayMonitorHandle
+            && string.Equals(
+                previousTarget.DisplayDeviceKey,
+                observedTarget.DisplayDeviceKey,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            return previousTarget;
+        }
+
+        return NativeCaptureTargetIdentity.DisplayWide(
+            observedTarget.TargetEpoch,
+            observedTarget.DisplayMonitorHandle,
+            observedTarget.DisplayDeviceKey!);
+    }
+
+    private void RaiseApplicationPrivacyModeChanged()
+    {
+        var handler = ApplicationPrivacyModeChanged;
+        if (handler is null)
+        {
+            return;
+        }
+
+        foreach (EventHandler subscriber in handler.GetInvocationList())
+        {
+            try
+            {
+                subscriber(this, EventArgs.Empty);
+            }
+            catch (Exception exception)
+            {
+                Debug.WriteLine(
+                    $"A capture application privacy mode subscriber failed: {exception}");
+            }
+        }
     }
 
     private static bool IsRestrictiveChange(

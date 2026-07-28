@@ -21,6 +21,7 @@ using windayflow::capture::CaptureCommand;
 using windayflow::capture::CaptureCommandAdmission;
 using windayflow::capture::CaptureCommandAdmissionPermit;
 using windayflow::capture::CaptureCommandAdmissionResult;
+using windayflow::capture::CaptureAuthorizationScope;
 using windayflow::capture::CaptureRuntimeOwner;
 using windayflow::capture::CaptureRuntimePauseResult;
 using windayflow::capture::CaptureRuntimeStopResult;
@@ -89,6 +90,20 @@ CaptureTargetIdentity Target(
       window_handle,          process_id,
       creation_time,          target_epoch,
       display_monitor_handle, std::wstring(display_device_key)};
+}
+
+CaptureTargetIdentity DisplayWideTarget(
+    uint64_t target_epoch, uint64_t display_monitor_handle = 400,
+    std::wstring_view display_device_key = L"\\\\.\\DISPLAY1") {
+  return CaptureTargetIdentity{
+      0,
+      0,
+      0,
+      target_epoch,
+      display_monitor_handle,
+      std::wstring(display_device_key),
+      CaptureAuthorizationScope::kDisplayWide,
+  };
 }
 
 RuntimeAuthorization AllowedAuthorization(uint64_t revision,
@@ -278,6 +293,67 @@ bool TestCommandAdmissionRetainsDisplayBinding() {
                     token.target.display_monitor_handle == 401 &&
                     token.target.display_device_key == L"\\\\.\\DISPLAY2",
                 "command permit did not retain the complete display target");
+}
+
+bool TestDisplayWideTargetTupleAndPermits() {
+  CaptureSafetyCore core(45, 1);
+  const CaptureTargetIdentity display_wide = DisplayWideTarget(10);
+  uint64_t generation = 0;
+  if (!Expect(core.UpdateRuntimeAuthorization(
+                  AllowedAuthorization(1, display_wide), &generation) ==
+                      CaptureSafetyUpdateResult::kOk &&
+                  generation == 2,
+              "display-wide target authorization was rejected")) {
+    return false;
+  }
+
+  const auto token = core.MintPersistenceToken(display_wide);
+  if (!Expect(token.has_value() &&
+                  token->target.scope == CaptureAuthorizationScope::kDisplayWide &&
+                  token->target.window_handle == 0 &&
+                  token->target.process_id == 0 &&
+                  token->target.process_creation_time_100ns == 0,
+              "display-wide token retained an application identity")) {
+    return false;
+  }
+
+  CaptureTargetIdentity invalid = display_wide;
+  invalid.window_handle = 100;
+  if (!Expect(core.UpdateRuntimeAuthorization(
+                  AllowedAuthorization(2, invalid), &generation) ==
+                      CaptureSafetyUpdateResult::kInvalidArgument &&
+                  generation == 2,
+              "display-wide authorization accepted a window identity")) {
+    return false;
+  }
+
+  const CaptureTargetIdentity foreground = Target(100, 200, 300, 10);
+  if (!Expect(!core.MintPersistenceToken(foreground).has_value(),
+              "foreground scope matched a display-wide authorization") ||
+      !Expect(!core.AcquirePersistencePermit(*token, foreground),
+              "display-wide token admitted a foreground target")) {
+    return false;
+  }
+
+  const CaptureTargetIdentity changed_display_same_epoch =
+      DisplayWideTarget(10, 401, L"\\\\.\\DISPLAY2");
+  if (!Expect(core.UpdateRuntimeAuthorization(
+                  AllowedAuthorization(2, changed_display_same_epoch),
+                  &generation) == CaptureSafetyUpdateResult::kTargetMismatch &&
+                  generation == 2,
+              "display-wide monitor changed without an epoch advance")) {
+    return false;
+  }
+
+  const CaptureTargetIdentity next_display =
+      DisplayWideTarget(11, 401, L"\\\\.\\DISPLAY2");
+  return Expect(core.UpdateRuntimeAuthorization(
+                    AllowedAuthorization(2, next_display), &generation) ==
+                        CaptureSafetyUpdateResult::kOk &&
+                    generation == 3,
+                "epoch-advanced display-wide target was rejected") &&
+         Expect(!core.AcquirePersistencePermit(*token, display_wide),
+                "old display-wide token survived a monitor change");
 }
 
 bool TestRevisionAndGenerationRules() {
@@ -1791,6 +1867,7 @@ bool TestRuntimeOwnerCompletionRunsAfterExitPublication() {
 
 int main() {
   if (!TestTargetTupleAndInstanceEpoch() || !TestRevisionAndGenerationRules() ||
+      !TestDisplayWideTargetTupleAndPermits() ||
       !TestPermitLinearizationAndPersistenceStages() ||
       !TestPersistencePermitIssuerBinding() ||
       !TestCallbackTimeAuthorizationInvalidation() ||

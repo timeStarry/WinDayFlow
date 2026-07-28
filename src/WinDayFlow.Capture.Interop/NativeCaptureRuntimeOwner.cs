@@ -9,6 +9,8 @@ public sealed class NativeCaptureRuntimeOwner
       IAppSettingsCommitBarrier,
       ICaptureRuntimeAuthorization,
       INativeCapturePrivacySignalSink,
+      INativeCapturePrivacySignalSinkTermination,
+      INativeCaptureApplicationPrivacyModeSource,
       IAsyncDisposable
 {
     private readonly object _terminationSync = new();
@@ -39,12 +41,13 @@ public sealed class NativeCaptureRuntimeOwner
     {
         _backend = backend ?? throw new ArgumentNullException(nameof(backend));
         ArgumentNullException.ThrowIfNull(initialPrivacyContext);
-        if ((_backend.Capabilities & NativeCaptureAbiContract.RuntimeOwnerCapabilities)
-            != NativeCaptureAbiContract.RuntimeOwnerCapabilities)
+        if ((_backend.Capabilities
+                & NativeCaptureAbiContract.DisplayWideContinuousCapabilities)
+            != NativeCaptureAbiContract.DisplayWideContinuousCapabilities)
         {
             _backend.DisposeSafelyAfterConstructionFailure();
             throw new NotSupportedException(
-                "The native capture runtime owner requires display-scoped target authorization, a persistence generation barrier, deterministic stop, and command admission support.");
+                "The native capture runtime owner requires display-wide continuous authorization, display-scoped target authorization, a persistence generation barrier, deterministic stop, and command admission support.");
         }
 
         try
@@ -74,6 +77,11 @@ public sealed class NativeCaptureRuntimeOwner
 
     public long PrivacyObservationGeneration =>
         _coordinator.PrivacyObservationGeneration;
+
+    public CaptureApplicationPrivacyMode ApplicationPrivacyMode =>
+        _coordinator.ApplicationPrivacyMode;
+
+    public CaptureState CurrentCaptureState => _backend.CurrentStatus.State;
 
     public async ValueTask<ICaptureRuntimeAdmissionStamp?> TryIssueAdmissionAsync(
         CaptureAdmissionOperation operation,
@@ -132,6 +140,30 @@ public sealed class NativeCaptureRuntimeOwner
         }
     }
 
+    bool INativeCapturePrivacySignalSinkTermination.IsTerminationStarted
+    {
+        get
+        {
+            lock (_terminationSync)
+            {
+                return _terminationTask is not null;
+            }
+        }
+    }
+
+    Task INativeCapturePrivacySignalSinkTermination.Termination
+    {
+        get
+        {
+            lock (_terminationSync)
+            {
+                return _terminationTask
+                    ?? throw new InvalidOperationException(
+                        "The native capture runtime termination has not started.");
+            }
+        }
+    }
+
     public event EventHandler<CaptureStatusChangedEventArgs>? StatusChanged
     {
         add
@@ -171,6 +203,16 @@ public sealed class NativeCaptureRuntimeOwner
             _coordinator.AuthorizationChanged += value;
         }
         remove => _coordinator.AuthorizationChanged -= value;
+    }
+
+    public event EventHandler? ApplicationPrivacyModeChanged
+    {
+        add
+        {
+            ThrowIfTerminating();
+            _coordinator.ApplicationPrivacyModeChanged += value;
+        }
+        remove => _coordinator.ApplicationPrivacyModeChanged -= value;
     }
 
     public Task StartAsync(
@@ -313,7 +355,7 @@ public sealed class NativeCaptureRuntimeOwner
     private async Task TerminateCoreAsync()
     {
         var failures = new List<Exception>();
-        await CaptureFailureAsync(_coordinator.QuiesceAsync, failures)
+        await CaptureQuiesceFailureAsync(failures)
             .ConfigureAwait(false);
         await CaptureFailureAsync(_backend.RequestStopForShutdownAsync, failures)
             .ConfigureAwait(false);
@@ -396,6 +438,76 @@ public sealed class NativeCaptureRuntimeOwner
                 "The native capture runtime did not terminate cleanly.",
                 failures);
         }
+    }
+
+    private async Task CaptureQuiesceFailureAsync(List<Exception> failures)
+    {
+        try
+        {
+            await _coordinator.QuiesceAsync().ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            CaptureState state;
+            try
+            {
+                state = _backend.CurrentStatus.State;
+            }
+            catch (Exception statusFailure)
+            {
+                failures.Add(exception);
+                failures.Add(statusFailure);
+                return;
+            }
+
+            var failure = NormalizeTerminalQuiesceFailure(exception, state);
+            if (failure is not null)
+            {
+                failures.Add(failure);
+            }
+        }
+    }
+
+    private static Exception? NormalizeTerminalQuiesceFailure(
+        Exception failure,
+        CaptureState state)
+    {
+        if (state is not CaptureState.Faulted
+            and not CaptureState.Stopping
+            and not CaptureState.Stopped)
+        {
+            return failure;
+        }
+
+        if (IsExpectedTerminalAuthorizationRace(failure))
+        {
+            return null;
+        }
+
+        if (failure is not AggregateException aggregate)
+        {
+            return failure;
+        }
+
+        var remaining = aggregate.InnerExceptions
+            .Where(static exception =>
+                !IsExpectedTerminalAuthorizationRace(exception))
+            .ToList();
+        return remaining.Count switch
+        {
+            0 => null,
+            1 => remaining[0],
+            _ when remaining.Count == aggregate.InnerExceptions.Count => failure,
+            _ => new AggregateException(aggregate.Message, remaining),
+        };
+    }
+
+    private static bool IsExpectedTerminalAuthorizationRace(Exception failure)
+    {
+        return failure is NativeCaptureException nativeFailure
+            && nativeFailure.ResultCode == (int)NativeCaptureResult.InvalidState
+            && nativeFailure.Operation is "update_runtime_authorization"
+                or "revoke_runtime_authorization";
     }
 
     private static async Task CaptureFailureAsync(

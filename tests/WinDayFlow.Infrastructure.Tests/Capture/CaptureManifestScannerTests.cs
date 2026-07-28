@@ -9,7 +9,7 @@ public sealed class CaptureManifestScannerTests
         new(2026, 7, 23, 12, 0, 0, TimeSpan.Zero);
 
     [Fact]
-    public async Task StartupScanFindsCommittedChunksWithoutAnEvent()
+    public async Task StartupScanFindsBothCommittedCaptureScopesWithoutAnEvent()
     {
         using var directory = new TemporaryDirectory();
         var firstCommittedAt = new DateTimeOffset(
@@ -25,7 +25,8 @@ public sealed class CaptureManifestScannerTests
             "chunk-b",
             persistenceGeneration: ulong.MaxValue,
             targetEpoch: ulong.MaxValue - 1,
-            committedAtUtc: firstCommittedAt);
+            committedAtUtc: firstCommittedAt,
+            captureScope: CaptureManifestScanner.ContinuousDisplayCaptureScope);
         CreateValidChunk(directory.Path, "chunk-a");
         var scanner = CreateScanner(directory.Path);
 
@@ -389,7 +390,8 @@ public sealed class CaptureManifestScannerTests
         ulong targetEpoch = 11,
         DateTimeOffset? committedAtUtc = null,
         long startTimeUnixMs = 1_784_797_200_000,
-        long endTimeUnixMs = 1_784_797_260_000)
+        long endTimeUnixMs = 1_784_797_260_000,
+        string captureScope = CaptureManifestScanner.ForegroundDisplayCaptureScope)
     {
         var chunkDirectory = Path.Combine(dataRoot, "chunks", chunkId);
         return CreateValidChunkDirectory(
@@ -399,7 +401,8 @@ public sealed class CaptureManifestScannerTests
             targetEpoch,
             committedAtUtc,
             startTimeUnixMs,
-            endTimeUnixMs);
+            endTimeUnixMs,
+            captureScope);
     }
 
     private static ChunkPaths CreateValidChunkDirectory(
@@ -409,7 +412,8 @@ public sealed class CaptureManifestScannerTests
         ulong targetEpoch = 11,
         DateTimeOffset? committedAtUtc = null,
         long startTimeUnixMs = 1_784_797_200_000,
-        long endTimeUnixMs = 1_784_797_260_000)
+        long endTimeUnixMs = 1_784_797_260_000,
+        string captureScope = CaptureManifestScanner.ForegroundDisplayCaptureScope)
     {
         Directory.CreateDirectory(chunkDirectory);
         var videoPath = Path.Combine(chunkDirectory, "capture.mp4");
@@ -422,7 +426,8 @@ public sealed class CaptureManifestScannerTests
                 persistenceGeneration,
                 targetEpoch,
                 startTimeUnixMs,
-                endTimeUnixMs));
+                endTimeUnixMs,
+                captureScope));
 
         var committed = committedAtUtc
             ?? new DateTimeOffset(2026, 7, 23, 10, 0, 0, TimeSpan.Zero);
@@ -436,10 +441,11 @@ public sealed class CaptureManifestScannerTests
         ulong persistenceGeneration,
         ulong targetEpoch,
         long startTimeUnixMs,
-        long endTimeUnixMs) => $$"""
+        long endTimeUnixMs,
+        string captureScope) => $$"""
         {
           "schemaVersion": 1,
-          "captureScope": "authorized-foreground-display",
+          "captureScope": "{{captureScope}}",
           "chunkId": "{{chunkId}}",
           "startTimeUnixMs": {{startTimeUnixMs}},
           "endTimeUnixMs": {{endTimeUnixMs}},

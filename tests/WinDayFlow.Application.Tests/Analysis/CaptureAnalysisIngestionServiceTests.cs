@@ -479,6 +479,11 @@ public sealed class CaptureAnalysisIngestionServiceTests
             DateTimeOffset cancelledAtUtc,
             CancellationToken cancellationToken = default) => throw new NotSupportedException();
 
+        public Task<AnalysisJobRetryResult> TryRetryAsync(
+            Guid jobId,
+            DateTimeOffset requestedAtUtc,
+            CancellationToken cancellationToken = default) => throw new NotSupportedException();
+
         public Task<int> RecoverExpiredLeasesAsync(
             DateTimeOffset recoveredAtUtc,
             TimeSpan retryDelay,

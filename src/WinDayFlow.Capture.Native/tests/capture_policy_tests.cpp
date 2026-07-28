@@ -102,7 +102,57 @@ bool TestIndependentSchedule() {
          Expect(!no_burst.capture_frame && !no_burst.sample_context,
                 "late poll replayed missed work in a burst") &&
          Expect(schedule.DelayUntilNextMs(2'600) == 400,
-                "next schedule delay was incorrect");
+                 "next schedule delay was incorrect");
+}
+
+bool TestFrameReanchorPreservesContextCadence() {
+  const windayflow::capture::CapturePolicy policy{2'500, 750, 120'000};
+  windayflow::capture::CaptureSchedule schedule(policy);
+  schedule.Reset(0);
+  const auto initial = schedule.Poll(0);
+  schedule.ReanchorFrame(1'000);
+  const auto overdue_context = schedule.Poll(1'000);
+  const auto original_context_deadline = schedule.Poll(1'500);
+  const auto old_frame_deadline = schedule.Poll(2'500);
+  const auto reanchored_frame_deadline = schedule.Poll(3'500);
+  return Expect(initial.capture_frame && initial.sample_context,
+                "frame-reanchor fixture did not consume its initial work") &&
+         Expect(!overdue_context.capture_frame &&
+                    overdue_context.sample_context,
+                "frame reanchor discarded an overdue context deadline") &&
+         Expect(!original_context_deadline.capture_frame &&
+                    original_context_deadline.sample_context,
+                "frame reanchor changed the context deadline") &&
+         Expect(!old_frame_deadline.capture_frame,
+                "frame reanchor retained the old frame deadline") &&
+         Expect(reanchored_frame_deadline.capture_frame,
+                "frame reanchor omitted its full-interval deadline");
+}
+
+bool TestFrameReanchorIsOverflowSafe() {
+  constexpr int64_t kMaximum = std::numeric_limits<int64_t>::max();
+  const windayflow::capture::CapturePolicy policy{2'500, 750, 120'000};
+  windayflow::capture::CaptureSchedule exact_schedule(policy);
+  exact_schedule.Reset(0);
+  static_cast<void>(exact_schedule.Poll(0));
+  exact_schedule.ReanchorFrame(kMaximum - 2'500);
+  const auto before_maximum = exact_schedule.Poll(kMaximum - 1);
+  const auto at_maximum = exact_schedule.Poll(kMaximum);
+  const auto after_exhaustion = exact_schedule.Poll(kMaximum);
+
+  windayflow::capture::CaptureSchedule exhausted_schedule(policy);
+  exhausted_schedule.Reset(0);
+  static_cast<void>(exhausted_schedule.Poll(0));
+  exhausted_schedule.ReanchorFrame(kMaximum - 2'499);
+  const auto insufficient_room = exhausted_schedule.Poll(kMaximum);
+  return Expect(!before_maximum.capture_frame,
+                "maximum frame deadline fired early") &&
+         Expect(at_maximum.capture_frame,
+                "exact maximum frame deadline was lost") &&
+         Expect(!after_exhaustion.capture_frame,
+                "maximum frame deadline replayed after exhaustion") &&
+         Expect(!insufficient_room.capture_frame,
+                "overflowing frame reanchor wrapped its deadline");
 }
 
 bool TestChunkAndResourceCalculations() {
@@ -176,7 +226,10 @@ bool TestPrivacyGuardFailsClosed() {
 
 int main() {
   if (!TestPolicyValidationAndWorkerOrder() || !TestTiming() ||
-      !TestIndependentSchedule() || !TestChunkAndResourceCalculations() ||
+      !TestIndependentSchedule() ||
+      !TestFrameReanchorPreservesContextCadence() ||
+      !TestFrameReanchorIsOverflowSafe() ||
+      !TestChunkAndResourceCalculations() ||
       !TestPrivacyGuardFailsClosed()) {
     return 1;
   }

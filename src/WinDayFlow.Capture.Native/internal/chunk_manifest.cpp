@@ -41,7 +41,11 @@ bool BuildChunkManifestJson(const ChunkManifest& manifest,
     output.imbue(std::locale::classic());
     output << "{\n"
            << "  \"schemaVersion\": 1,\n"
-           << "  \"captureScope\": \"authorized-foreground-display\",\n"
+           << "  \"captureScope\": \""
+           << (manifest.display_wide_scope
+                   ? "authorized-display-continuous"
+                   : "authorized-foreground-display")
+           << "\",\n"
            << "  \"chunkId\": \"" << manifest.chunk_id << "\",\n"
            << "  \"startTimeUnixMs\": " << manifest.start_time_unix_ms << ",\n"
            << "  \"endTimeUnixMs\": " << manifest.end_time_unix_ms << ",\n"

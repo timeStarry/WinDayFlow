@@ -23,6 +23,7 @@ struct ChunkManifest {
   uint32_t frame_rate_denominator = 0;
   uint64_t persistence_generation = 0;
   uint64_t target_epoch = 0;
+  bool display_wide_scope = false;
 };
 
 bool IsValidChunkManifest(const ChunkManifest& manifest) noexcept;

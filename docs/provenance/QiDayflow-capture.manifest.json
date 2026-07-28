@@ -30,7 +30,7 @@
     {
       "local": {
         "path": "src/WinDayFlow.Capture.Native/internal/capture_policy.h",
-        "sha256": "90C3A37EE700DFBC53E4F4FD05BEFFC2FC502852ADB5AA7188D91DC9764D05E2"
+        "sha256": "134EEC71A54F0AE13EFC24045A97360221401FB5611E950BE1C92476B036752D"
       },
       "upstream": {
         "path": "windows/runner/capture_runtime.h",
@@ -41,7 +41,7 @@
     {
       "local": {
         "path": "src/WinDayFlow.Capture.Native/internal/capture_policy.cpp",
-        "sha256": "51A526E9C101721CF0E54A675103665121A1373EC3C1C38BD9A5FA1080F8E69E"
+        "sha256": "0285D25EB24D9D81495226DD2DC0FF055ECA9A1E336BBE5AF5FA507DB8E0B132"
       },
       "upstream": {
         "path": "windows/runner/capture_runtime.cpp",
@@ -63,7 +63,7 @@
     {
       "local": {
         "path": "src/WinDayFlow.Capture.Native/tests/capture_policy_tests.cpp",
-        "sha256": "9E6461B6ABF628A9C81FB4789A6132510063BBC6AA062ED85E299CB1016A65FF"
+        "sha256": "F013F0005A5E07D32BF02B41FDFDCA652003AAAC64E3B73EC49B3988CB23610A"
       },
       "upstream": {
         "path": "windows/runner/capture_runtime_test.cpp",
@@ -96,7 +96,7 @@
     {
       "local": {
         "path": "src/WinDayFlow.Capture.Native/internal/chunk_manifest.h",
-        "sha256": "E2B0A7412309D88B1A9995794E0C935246C262BEDF9718507948E1E60228DFF8"
+        "sha256": "D3BF80F1F359C0E8B3EA904E10588D034B85780F2C720BA4895A7C5FE247E045"
       },
       "upstream": {
         "path": "windows/runner/capture_service.cpp",
@@ -107,7 +107,7 @@
     {
       "local": {
         "path": "src/WinDayFlow.Capture.Native/internal/chunk_manifest.cpp",
-        "sha256": "3C3F60B7AF4EEFD425DF583018A0890C3C64DBBBD66B4869EA9C558967CC8AD4"
+        "sha256": "2FEF2FAC5523B4C3206023948A3C63FC536C4C666CAC23D9781E5B459AC99119"
       },
       "upstream": {
         "path": "windows/runner/capture_service.cpp",
@@ -118,7 +118,7 @@
     {
       "local": {
         "path": "src/WinDayFlow.Capture.Native/internal/dxgi_desktop_frame_source.h",
-        "sha256": "4FB1176088AF85D57804428CCC13BE277B73F702993767EF52DA1BADFB9FEDAB"
+        "sha256": "96DFE4CC5CB7D9AC849015D007B3B50841927E3405C1E9F8F6BD50A14A9CA89C"
       },
       "upstream": {
         "path": "windows/runner/capture_service.cpp",
@@ -129,7 +129,7 @@
     {
       "local": {
         "path": "src/WinDayFlow.Capture.Native/internal/dxgi_desktop_frame_source.cpp",
-        "sha256": "3F3ED39083483E2CA6137D56ECCBAA760037C53577FAEC1BEAE83A48593987E1"
+        "sha256": "1C6F70182B11FC040C7E16A6151AF7BF3A650435E85EA8E08A47CE31A081BCEB"
       },
       "upstream": {
         "path": "windows/runner/capture_service.cpp",

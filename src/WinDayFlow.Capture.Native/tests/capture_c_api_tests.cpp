@@ -110,6 +110,22 @@ wdf_capture_runtime_authorization_v1 RuntimeAuthorization(
   return context;
 }
 
+wdf_capture_runtime_authorization_v1 DisplayWideRuntimeAuthorization(
+    uint64_t revision,
+    uint64_t target_epoch = 1,
+    uint64_t display_monitor_handle = 400,
+    std::string_view display_device_key = "\\\\.\\DISPLAY1") {
+  auto context = RuntimeAuthorization(
+      WDF_CAPTURE_POLICY_ALLOW, revision, target_epoch, 100, 200, 300,
+      display_monitor_handle, display_device_key);
+  context.target_window_handle = 0;
+  context.target_process_creation_time_100ns = 0;
+  context.target_process_id = 0;
+  context.target_flags = WDF_CAPTURE_TARGET_DISPLAY_PRESENT |
+                         WDF_CAPTURE_TARGET_DISPLAY_WIDE_SCOPE;
+  return context;
+}
+
 wdf_capture_command_admission_v1 EmptyAdmission() {
   wdf_capture_command_admission_v1 admission{};
   admission.struct_size = sizeof(admission);
@@ -337,6 +353,9 @@ bool TestAbiAndArgumentValidation() {
                    (capabilities &
                     WDF_CAPTURE_CAPABILITY_CALLBACK_TIME_AUTHORIZATION_INVALIDATION) !=
                        0 &&
+                  (capabilities &
+                   WDF_CAPTURE_CAPABILITY_DISPLAY_WIDE_CONTINUOUS_AUTHORIZATION) !=
+                      0 &&
                   (capabilities &
                    WDF_CAPTURE_CAPABILITY_EVIDENCE_EXTRACTION) == 0,
               "foundation capabilities were incorrect")) {
@@ -742,6 +761,26 @@ bool TestRuntimeAuthorizationDisplayStructureContract() {
   invalid.target_display_reserved = 1;
   valid = Reject(&invalid, "nonzero display reserved data was accepted") && valid;
 
+  invalid = DisplayWideRuntimeAuthorization(1);
+  invalid.target_flags |= WDF_CAPTURE_TARGET_PRESENT;
+  valid = Reject(&invalid, "overlapping foreground and display-wide scopes were accepted") &&
+          valid;
+
+  invalid = DisplayWideRuntimeAuthorization(1);
+  invalid.target_window_handle = 100;
+  valid = Reject(&invalid, "display-wide authorization retained a window identity") &&
+          valid;
+
+  invalid = DisplayWideRuntimeAuthorization(1);
+  invalid.target_flags &= ~WDF_CAPTURE_TARGET_DISPLAY_PRESENT;
+  valid = Reject(&invalid, "display-wide authorization omitted its display") &&
+          valid;
+
+  invalid = DisplayWideRuntimeAuthorization(1);
+  invalid.struct_size = WDF_CAPTURE_RUNTIME_AUTHORIZATION_V1_LEGACY_SIZE;
+  valid = Reject(&invalid, "legacy authorization claimed display-wide scope") &&
+          valid;
+
   invalid = RuntimeAuthorization(WDF_CAPTURE_POLICY_BLOCK, 1);
   invalid.target_display_monitor_handle = 400;
   valid = Reject(&invalid, "restrictive authorization retained display data") &&
@@ -780,6 +819,54 @@ bool TestRuntimeAuthorizationDisplayStructureContract() {
                      generation == 3,
                  "maximum display key after legacy block was rejected") &&
           valid;
+
+  wdf_capture_destroy(&handle);
+  return valid;
+}
+
+bool TestDisplayWideRuntimeAuthorizationContract() {
+  wdf_capture_config_v1 config = ValidConfig();
+  wdf_capture_handle handle = 0;
+  if (wdf_capture_create(&config, &handle) != WDF_CAPTURE_RESULT_OK) {
+    return Expect(false, "display-wide authorization handle could not be created");
+  }
+
+  uint64_t generation = 0;
+  auto display_wide_v1 = DisplayWideRuntimeAuthorization(1);
+  auto case_only_v1 = DisplayWideRuntimeAuthorization(
+      1, 1, 400, "\\\\.\\display1");
+  auto changed_display_reused_epoch_v2 = DisplayWideRuntimeAuthorization(
+      2, 1, 401, "\\\\.\\DISPLAY2");
+  auto foreground_reused_epoch_v2 = RuntimeAuthorization(
+      WDF_CAPTURE_POLICY_ALLOW, 2, 1, 100, 200, 300, 400,
+      "\\\\.\\DISPLAY1");
+  auto changed_display_v2 = DisplayWideRuntimeAuthorization(
+      2, 2, 401, "\\\\.\\DISPLAY2");
+
+  const bool valid =
+      Expect(wdf_capture_update_runtime_authorization(
+                 handle, &display_wide_v1, &generation) ==
+                     WDF_CAPTURE_RESULT_OK &&
+                 generation == 2,
+             "initial display-wide authorization was rejected") &&
+      Expect(wdf_capture_update_runtime_authorization(
+                 handle, &case_only_v1, &generation) ==
+                     WDF_CAPTURE_RESULT_OK &&
+                 generation == 2,
+             "case-only display-wide identity advanced generation") &&
+      Expect(wdf_capture_update_runtime_authorization(
+                 handle, &changed_display_reused_epoch_v2, &generation) ==
+                 WDF_CAPTURE_RESULT_TARGET_MISMATCH,
+             "display-wide monitor changed without an epoch advance") &&
+      Expect(wdf_capture_update_runtime_authorization(
+                 handle, &foreground_reused_epoch_v2, &generation) ==
+                 WDF_CAPTURE_RESULT_TARGET_MISMATCH,
+             "authorization scope changed without an epoch advance") &&
+      Expect(wdf_capture_update_runtime_authorization(
+                 handle, &changed_display_v2, &generation) ==
+                     WDF_CAPTURE_RESULT_OK &&
+                 generation == 3,
+             "epoch-advanced display-wide authorization was rejected");
 
   wdf_capture_destroy(&handle);
   return valid;
@@ -1868,6 +1955,7 @@ int main() {
       !TestLifecycleIsPrivacyGatedAndUnavailable() ||
       !TestPrivacyRevisionNeverRegresses() ||
       !TestRuntimeAuthorizationDisplayStructureContract() ||
+      !TestDisplayWideRuntimeAuthorizationContract() ||
       !TestRuntimeAuthorizationBarrierContract() ||
       !TestCallbackTimeAuthorizationInvalidationContract() ||
       !TestCommandAdmissionAuthenticityAndOwnership() ||

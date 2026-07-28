@@ -1,6 +1,4 @@
 #if WDF_DEV_LIVE_CAPTURE
-using System.Collections.Frozen;
-
 namespace WinDayFlow.Capture.Interop;
 
 public static class DevLiveCapturePrivacy
@@ -17,23 +15,21 @@ public static class DevLiveCapturePrivacy
             minimumStorageHeadroomBytes);
         return new WindowsCapturePrivacyMonitor(
             sink,
-            new DevAllowlistedWindowsCapturePrivacySampler(baseSampler),
+            new DevLiveQaWindowsCapturePrivacySampler(baseSampler),
             new WindowsCaptureWinEventSource());
     }
 }
 
-internal sealed class DevAllowlistedWindowsCapturePrivacySampler
-    : IWindowsCapturePrivacySampler
+internal sealed class DevLiveQaWindowsCapturePrivacySampler
+    : IWindowsCapturePrivacySampler,
+      IWindowsCaptureStorageSampler
 {
-    private static readonly FrozenSet<string> AllowedExecutableNames = new[]
-    {
-        "WinDayFlow.App.exe",
-        "cmd.exe",
-    }.ToFrozenSet(StringComparer.OrdinalIgnoreCase);
+    private const string WinDayFlowExecutableName = "WinDayFlow.App.exe";
+    private const string WindowsLockScreenExecutableName = "LockApp.exe";
 
     private readonly IWindowsCapturePrivacySampler _inner;
 
-    internal DevAllowlistedWindowsCapturePrivacySampler(
+    internal DevLiveQaWindowsCapturePrivacySampler(
         IWindowsCapturePrivacySampler inner)
     {
         _inner = inner ?? throw new ArgumentNullException(nameof(inner));
@@ -53,6 +49,15 @@ internal sealed class DevAllowlistedWindowsCapturePrivacySampler
         return ApplyPolicy(observation);
     }
 
+    ValueTask<NativeCapturePolicyDecision>
+        IWindowsCaptureStorageSampler.SampleStorageAsync(
+            CancellationToken cancellationToken)
+    {
+        return _inner is IWindowsCaptureStorageSampler storageSampler
+            ? storageSampler.SampleStorageAsync(cancellationToken)
+            : ValueTask.FromResult(NativeCapturePolicyDecision.Unknown);
+    }
+
     internal static WindowsCapturePrivacyObservation ApplyPolicy(
         WindowsCapturePrivacyObservation observation)
     {
@@ -61,39 +66,97 @@ internal sealed class DevAllowlistedWindowsCapturePrivacySampler
         var signals = observation.Signals;
         var identity = signals.CaptureIdentity;
         var executable = identity.ExecutableNameObservation;
-        var packageFamily = identity.PackageFamilyNameObservation;
-        var windowTitle = identity.WindowTitleObservation;
 
-        if (signals.Target.State != NativeCaptureTargetIdentityState.Present
-            || observation.DisplayTarget.State
-                != WindowsCaptureDisplayTargetState.Present
-            || executable.State != NativeCaptureObservationState.Present
-            || executable.Value is null
-            || !AllowedExecutableNames.Contains(executable.Value)
-            || packageFamily.State != NativeCaptureObservationState.Absent
-            || windowTitle.State != NativeCaptureObservationState.Present
-            || string.IsNullOrWhiteSpace(windowTitle.Value)
-            || signals.ApplicationAllowed == NativeCapturePolicyDecision.Block
-            || signals.WindowAllowed == NativeCapturePolicyDecision.Block)
+        if (HasTargetPolicyBlock(signals))
         {
-            return WindowsCapturePrivacyObservation.FailClosed;
+            return observation;
         }
 
-        // Dev-only executable-name admission is not signer proof. Publisher identity
-        // remains non-authoritative here and this policy must not be used in production.
-        var authorizedSignals = new NativeCapturePrivacySignals(
+        if (IsAlwaysBlockedProcess(executable))
+        {
+            return WithApplicationAndWindowPolicy(
+                observation,
+                NativeCapturePolicyDecision.Block,
+                NativeCapturePolicyDecision.Block);
+        }
+
+        if (signals.Target.State == NativeCaptureTargetIdentityState.Absent
+            && observation.DisplayTarget.State
+                == WindowsCaptureDisplayTargetState.Absent)
+        {
+            return observation;
+        }
+
+        var targetUnresolved =
+            signals.Target.State != NativeCaptureTargetIdentityState.Present
+            || observation.DisplayTarget.State
+                != WindowsCaptureDisplayTargetState.Present
+            || !IsPresentValue(executable);
+        if (targetUnresolved)
+        {
+            return HasIndependentBlockingDecision(signals)
+                ? observation
+                : WindowsCapturePrivacyObservation.FailClosed;
+        }
+
+        // This admission exists only in a dev-live build selected by the App's explicit
+        // activation argument. A stable external process and display are enough for QA;
+        // optional identity fields remain untouched so configured exclusion rules can
+        // still fail closed when a field required by a rule could not be observed.
+        // This is not application trust or signer proof and must never ship in production.
+        // Every non-target privacy signal is retained for the normal policy composer.
+        return WithApplicationAndWindowPolicy(
+            observation,
+            NativeCapturePolicyDecision.Allow,
+            NativeCapturePolicyDecision.Allow);
+    }
+
+    private static WindowsCapturePrivacyObservation WithApplicationAndWindowPolicy(
+        WindowsCapturePrivacyObservation observation,
+        NativeCapturePolicyDecision applicationAllowed,
+        NativeCapturePolicyDecision windowAllowed)
+    {
+        var signals = observation.Signals;
+        var updatedSignals = new NativeCapturePrivacySignals(
             signals.SessionUnlocked,
             signals.SecureDesktopClear,
             signals.RemoteSession,
             signals.PresentationMode,
-            NativeCapturePolicyDecision.Allow,
-            NativeCapturePolicyDecision.Allow,
+            applicationAllowed,
+            windowAllowed,
             signals.StorageAvailable,
-            identity,
+            signals.CaptureIdentity,
             signals.Target);
         return new WindowsCapturePrivacyObservation(
-            authorizedSignals,
+            updatedSignals,
             observation.DisplayTarget);
     }
+
+    private static bool IsPresentValue(NativeCaptureObservation observation) =>
+        observation.State == NativeCaptureObservationState.Present
+        && !string.IsNullOrWhiteSpace(observation.Value);
+
+    private static bool IsAlwaysBlockedProcess(
+        NativeCaptureObservation executable) =>
+        executable.State == NativeCaptureObservationState.Present
+        && (string.Equals(
+                executable.Value,
+                WinDayFlowExecutableName,
+                StringComparison.OrdinalIgnoreCase)
+            || string.Equals(
+                executable.Value,
+                WindowsLockScreenExecutableName,
+                StringComparison.OrdinalIgnoreCase));
+
+    private static bool HasTargetPolicyBlock(
+        NativeCapturePrivacySignals signals) =>
+        signals.ApplicationAllowed == NativeCapturePolicyDecision.Block
+        || signals.WindowAllowed == NativeCapturePolicyDecision.Block;
+
+    private static bool HasIndependentBlockingDecision(
+        NativeCapturePrivacySignals signals) =>
+        signals.SessionUnlocked == NativeCapturePolicyDecision.Block
+        || signals.SecureDesktopClear == NativeCapturePolicyDecision.Block
+        || signals.StorageAvailable == NativeCapturePolicyDecision.Block;
 }
 #endif

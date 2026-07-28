@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
 using WinDayFlow.Application.Capture;
@@ -63,6 +64,10 @@ public sealed class NativeCaptureInteropTests
             1UL << 11,
             (ulong)NativeCaptureCapabilities
                 .CallbackTimeAuthorizationInvalidation);
+        Assert.Equal(
+            1UL << 12,
+            (ulong)NativeCaptureCapabilities
+                .DisplayWideContinuousAuthorization);
     }
 
     [Fact]
@@ -99,6 +104,8 @@ public sealed class NativeCaptureInteropTests
         | NativeCaptureCapabilities.PersistenceGenerationBarrier
         | NativeCaptureCapabilities.DeterministicStop
         | NativeCaptureCapabilities.CallbackTimeAuthorizationInvalidation))]
+    [InlineData((ulong)NativeCaptureCapabilities
+        .DisplayWideContinuousAuthorization)]
     [InlineData((ulong)(NativeCaptureCapabilities.PrivacyGuard
         | NativeCaptureCapabilities.EventQueue
         | NativeCaptureCapabilities.ScreenCapture
@@ -518,6 +525,34 @@ public sealed class NativeCaptureInteropTests
             nativeApi.LastAuthorizationConsent);
         Assert.True(await backend.RevokeRuntimeAuthorizationAsync() >= generation);
         Assert.Equal(1, nativeApi.RevokeRuntimeAuthorizationCallCount);
+    }
+
+    [Fact]
+    public async Task ManagedDisplayWideAuthorizationClearsApplicationIdentityBytes()
+    {
+        using var directory = new TemporaryDirectory();
+        using var nativeApi = new FakeNativeCaptureApi();
+        using var backend = CreateBackend(directory.Path, nativeApi);
+        var allowed = CreateAllowedRuntimeAuthorization(runtimePolicyRevision: 2);
+        var target = NativeCaptureTargetIdentity.DisplayWide(
+            targetEpoch: 7,
+            displayMonitorHandle: 0x6007,
+            displayDeviceKey: @"\\.\DISPLAY7");
+        var authorization = new NativeCaptureRuntimeAuthorization(
+            allowed.PrivacyContext,
+            target);
+
+        await backend.UpdateRuntimeAuthorizationAsync(authorization);
+
+        Assert.True(backend.SupportsDisplayWideContinuousAuthorization);
+        Assert.Equal(NativeCaptureAuthorizationScope.DisplayWide, target.Scope);
+        Assert.Equal<ulong>(0, nativeApi.LastAuthorizationWindowHandle);
+        Assert.Equal<uint>(0, nativeApi.LastAuthorizationProcessId);
+        Assert.Equal<ulong>(0, nativeApi.LastAuthorizationProcessCreationTime100ns);
+        Assert.Equal<uint>(6, nativeApi.LastAuthorizationTargetFlags);
+        Assert.Equal<ulong>(7, nativeApi.LastAuthorizationTargetEpoch);
+        Assert.Equal<ulong>(0x6007, nativeApi.LastAuthorizationDisplayMonitorHandle);
+        Assert.Equal<uint>(12, nativeApi.LastAuthorizationDisplayDeviceKeyUtf8Length);
     }
 
     [Fact]
@@ -954,6 +989,235 @@ public sealed class NativeCaptureInteropTests
             await wakeHint.Task.WaitAsync(TimeSpan.FromSeconds(2)));
     }
 
+    [Theory]
+    [InlineData(CaptureAdmissionOperation.Start, CaptureState.Starting)]
+    [InlineData(CaptureAdmissionOperation.Resume, CaptureState.Resuming)]
+    public async Task AuthorizedLifecycleWaitsForANewExactTransitionEvent(
+        CaptureAdmissionOperation operation,
+        CaptureState expectedState)
+    {
+        using var directory = new TemporaryDirectory();
+        using var nativeApi = new FakeNativeCaptureApi();
+        using var backend = CreateBackend(directory.Path, nativeApi);
+        var admission = await IssueAllowedCommandAdmissionAsync(
+            backend,
+            operation);
+        nativeApi.Enqueue(
+            sequence: 1,
+            NativeCaptureEventKind.StateChanged,
+            expectedState,
+            detail: "old transition");
+        await WaitUntilAsync(
+            () => backend.CurrentStatus.Sequence == 1,
+            TimeSpan.FromSeconds(2));
+
+        var command = InvokeAuthorizedCommandAsync(
+            backend,
+            operation,
+            admission);
+        await WaitUntilAsync(
+            () => GetAuthorizedCommandCallCount(nativeApi, operation) == 1,
+            TimeSpan.FromSeconds(2));
+
+        Assert.False(command.IsCompleted);
+        nativeApi.Enqueue(
+            sequence: 2,
+            NativeCaptureEventKind.StateChanged,
+            CaptureState.Paused,
+            detail: "unrelated transition");
+        await WaitUntilAsync(
+            () => backend.CurrentStatus.Sequence == 2,
+            TimeSpan.FromSeconds(2));
+        Assert.False(command.IsCompleted);
+
+        nativeApi.Enqueue(
+            sequence: 3,
+            NativeCaptureEventKind.StateChanged,
+            expectedState,
+            detail: "new transition");
+
+        await command.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.Equal(expectedState, backend.CurrentStatus.State);
+    }
+
+    [Theory]
+    [InlineData(CaptureAdmissionOperation.Start)]
+    [InlineData(CaptureAdmissionOperation.Resume)]
+    public async Task AuthorizedLifecycleAcceptsRecordingAsAdvancedConfirmation(
+        CaptureAdmissionOperation operation)
+    {
+        using var directory = new TemporaryDirectory();
+        using var nativeApi = new FakeNativeCaptureApi();
+        using var backend = CreateBackend(directory.Path, nativeApi);
+        var admission = await IssueAllowedCommandAdmissionAsync(
+            backend,
+            operation);
+
+        var command = InvokeAuthorizedCommandAsync(
+            backend,
+            operation,
+            admission);
+        await WaitUntilAsync(
+            () => GetAuthorizedCommandCallCount(nativeApi, operation) == 1,
+            TimeSpan.FromSeconds(2));
+        Assert.False(command.IsCompleted);
+
+        nativeApi.Enqueue(
+            sequence: 1,
+            NativeCaptureEventKind.StateChanged,
+            CaptureState.Recording,
+            detail: "recording");
+
+        await command.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.Equal(CaptureState.Recording, backend.CurrentStatus.State);
+    }
+
+    [Theory]
+    [InlineData(CaptureAdmissionOperation.Start)]
+    [InlineData(CaptureAdmissionOperation.Resume)]
+    public async Task AuthorizedLifecycleManagedPumpWaitObservesCallerCancellation(
+        CaptureAdmissionOperation operation)
+    {
+        using var directory = new TemporaryDirectory();
+        using var nativeApi = new FakeNativeCaptureApi();
+        using var backend = CreateBackend(directory.Path, nativeApi);
+        var admission = await IssueAllowedCommandAdmissionAsync(
+            backend,
+            operation);
+        using var cancellation = new CancellationTokenSource();
+
+        var command = InvokeAuthorizedCommandAsync(
+            backend,
+            operation,
+            admission,
+            cancellation.Token);
+        await WaitUntilAsync(
+            () => GetAuthorizedCommandCallCount(nativeApi, operation) == 1,
+            TimeSpan.FromSeconds(2));
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            async () => await command.WaitAsync(TimeSpan.FromSeconds(2)));
+    }
+
+    [Theory]
+    [InlineData(CaptureAdmissionOperation.Start)]
+    [InlineData(CaptureAdmissionOperation.Resume)]
+    public async Task AuthorizedLifecycleFailsWhenManagedEventPumpFaults(
+        CaptureAdmissionOperation operation)
+    {
+        using var directory = new TemporaryDirectory();
+        using var nativeApi = new FakeNativeCaptureApi();
+        using var backend = CreateBackend(directory.Path, nativeApi);
+        var admission = await IssueAllowedCommandAdmissionAsync(
+            backend,
+            operation);
+        nativeApi.BlockNextPollEvent();
+        await nativeApi.PollEventBlocked.WaitAsync(TimeSpan.FromSeconds(2));
+
+        Task command;
+        try
+        {
+            command = InvokeAuthorizedCommandAsync(
+                backend,
+                operation,
+                admission);
+            await WaitUntilAsync(
+                () => GetAuthorizedCommandCallCount(nativeApi, operation) == 1,
+                TimeSpan.FromSeconds(2));
+            nativeApi.ForcedPollEventResult = NativeCaptureResult.InternalError;
+        }
+        finally
+        {
+            nativeApi.ReleasePollEvent();
+        }
+
+        var failure = await Assert.ThrowsAsync<InvalidOperationException>(
+            async () => await command.WaitAsync(TimeSpan.FromSeconds(2)));
+        Assert.Contains("event pump faulted", failure.Message, StringComparison.Ordinal);
+        Assert.Contains(
+            GetAuthorizedOperationName(operation),
+            failure.Message,
+            StringComparison.Ordinal);
+        Assert.IsType<NativeCaptureException>(failure.InnerException);
+    }
+
+    [Theory]
+    [InlineData(CaptureAdmissionOperation.Start)]
+    [InlineData(CaptureAdmissionOperation.Resume)]
+    public async Task AuthorizedLifecycleFailsWhenManagedEventPumpExits(
+        CaptureAdmissionOperation operation)
+    {
+        using var directory = new TemporaryDirectory();
+        using var nativeApi = new FakeNativeCaptureApi();
+        using var backend = CreateBackend(directory.Path, nativeApi);
+        var admission = await IssueAllowedCommandAdmissionAsync(
+            backend,
+            operation);
+        nativeApi.BlockNextPollEvent();
+        await nativeApi.PollEventBlocked.WaitAsync(TimeSpan.FromSeconds(2));
+
+        Task command;
+        try
+        {
+            command = InvokeAuthorizedCommandAsync(
+                backend,
+                operation,
+                admission);
+            await WaitUntilAsync(
+                () => GetAuthorizedCommandCallCount(nativeApi, operation) == 1,
+                TimeSpan.FromSeconds(2));
+            nativeApi.ForcedPollEventException = new OperationCanceledException(
+                "unexpected poll exit");
+        }
+        finally
+        {
+            nativeApi.ReleasePollEvent();
+        }
+
+        var failure = await Assert.ThrowsAsync<InvalidOperationException>(
+            async () => await command.WaitAsync(TimeSpan.FromSeconds(2)));
+        Assert.Contains("event pump exited", failure.Message, StringComparison.Ordinal);
+        Assert.Contains(
+            GetAuthorizedOperationName(operation),
+            failure.Message,
+            StringComparison.Ordinal);
+        Assert.Null(failure.InnerException);
+    }
+
+    [Fact]
+    public async Task AuthorizedLifecycleTimesOutAfterFiveSecondsWithoutConfirmation()
+    {
+        using var directory = new TemporaryDirectory();
+        using var nativeApi = new FakeNativeCaptureApi();
+        using var backend = CreateBackend(directory.Path, nativeApi);
+        var admission = await IssueAllowedCommandAdmissionAsync(
+            backend,
+            CaptureAdmissionOperation.Start);
+        var stopwatch = Stopwatch.StartNew();
+
+        var failure = await Assert.ThrowsAsync<TimeoutException>(
+            async () => await backend
+                .StartAuthorizedAsync(admission)
+                .WaitAsync(TimeSpan.FromSeconds(7)));
+
+        Assert.Equal<uint>(
+            5_000,
+            NativeCaptureBackend.AuthorizedLifecycleConfirmationTimeoutMilliseconds);
+        Assert.Contains(
+            "start_authorized command confirmation event",
+            failure.Message,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "authorized lifecycle timeout",
+            failure.Message,
+            StringComparison.Ordinal);
+        Assert.InRange(
+            stopwatch.Elapsed,
+            TimeSpan.FromMilliseconds(4_500),
+            TimeSpan.FromSeconds(7));
+    }
+
     [Fact]
     public async Task StopWaitsForTheManagedPumpToConsumeChunkBeforeStopped()
     {
@@ -1126,12 +1390,21 @@ public sealed class NativeCaptureInteropTests
             persistenceGeneration,
             authorization.Target.TargetEpoch);
         Assert.NotNull(admission);
-        await backend.StartAuthorizedAsync(admission.Value);
-        Assert.Equal(CaptureState.Stopped, backend.CurrentStatus.State);
+        var start = backend.StartAuthorizedAsync(admission.Value);
+        await WaitUntilAsync(
+            () => nativeApi.StartAuthorizedCallCount == 1,
+            TimeSpan.FromSeconds(2));
+        nativeApi.Enqueue(
+            sequence: 2,
+            NativeCaptureEventKind.StateChanged,
+            CaptureState.Starting,
+            detail: "starting");
+        await start.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.Equal(CaptureState.Starting, backend.CurrentStatus.State);
         nativeApi.BlockNextPollEvent();
         await nativeApi.PollEventBlocked.WaitAsync(TimeSpan.FromSeconds(2));
         nativeApi.AfterRequestStop = () => nativeApi.Enqueue(
-            sequence: 2,
+            sequence: 3,
             NativeCaptureEventKind.StateChanged,
             CaptureState.Stopped,
             detail: "second stop",
@@ -1398,6 +1671,59 @@ public sealed class NativeCaptureInteropTests
         }
     }
 
+    private static async Task<NativeCaptureCommandAdmissionV1>
+        IssueAllowedCommandAdmissionAsync(
+            NativeCaptureBackend backend,
+            CaptureAdmissionOperation operation)
+    {
+        var authorization = CreateAllowedRuntimeAuthorization(
+            runtimePolicyRevision: 2);
+        var persistenceGeneration = await backend
+            .UpdateRuntimeAuthorizationAsync(authorization);
+        var admission = await backend.TryIssueCommandAdmissionAsync(
+            operation,
+            authorization.RuntimePolicyRevision,
+            persistenceGeneration,
+            authorization.Target.TargetEpoch);
+        Assert.True(admission.HasValue);
+        return admission.Value;
+    }
+
+    private static Task InvokeAuthorizedCommandAsync(
+        NativeCaptureBackend backend,
+        CaptureAdmissionOperation operation,
+        NativeCaptureCommandAdmissionV1 admission,
+        CancellationToken cancellationToken = default) =>
+        operation switch
+        {
+            CaptureAdmissionOperation.Start => backend.StartAuthorizedAsync(
+                admission,
+                cancellationToken),
+            CaptureAdmissionOperation.Resume => backend.ResumeAuthorizedAsync(
+                admission,
+                cancellationToken),
+            _ => throw new ArgumentOutOfRangeException(nameof(operation)),
+        };
+
+    private static int GetAuthorizedCommandCallCount(
+        FakeNativeCaptureApi nativeApi,
+        CaptureAdmissionOperation operation) =>
+        operation switch
+        {
+            CaptureAdmissionOperation.Start => nativeApi.StartAuthorizedCallCount,
+            CaptureAdmissionOperation.Resume => nativeApi.ResumeAuthorizedCallCount,
+            _ => throw new ArgumentOutOfRangeException(nameof(operation)),
+        };
+
+    private static string GetAuthorizedOperationName(
+        CaptureAdmissionOperation operation) =>
+        operation switch
+        {
+            CaptureAdmissionOperation.Start => "start_authorized",
+            CaptureAdmissionOperation.Resume => "resume_authorized",
+            _ => throw new ArgumentOutOfRangeException(nameof(operation)),
+        };
+
     private static NativeCaptureBackend CreateBackend(string outputDirectory)
     {
         return new NativeCaptureBackend(
@@ -1536,7 +1862,8 @@ public sealed class NativeCaptureInteropTests
             | NativeCaptureCapabilities.DeterministicStop
             | NativeCaptureCapabilities.DisplayScopedAuthorization
             | NativeCaptureCapabilities.DisplayBoundCommandAdmission
-            | NativeCaptureCapabilities.CallbackTimeAuthorizationInvalidation;
+            | NativeCaptureCapabilities.CallbackTimeAuthorizationInvalidation
+            | NativeCaptureCapabilities.DisplayWideContinuousAuthorization;
 
         private ulong _persistenceGeneration;
         private ulong _runtimePolicyRevision;

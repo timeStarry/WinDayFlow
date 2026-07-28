@@ -50,6 +50,11 @@ public interface IAnalysisJobStore
         DateTimeOffset cancelledAtUtc,
         CancellationToken cancellationToken = default);
 
+    Task<AnalysisJobRetryResult> TryRetryAsync(
+        Guid jobId,
+        DateTimeOffset requestedAtUtc,
+        CancellationToken cancellationToken = default);
+
     Task<int> RecoverExpiredLeasesAsync(
         DateTimeOffset recoveredAtUtc,
         TimeSpan retryDelay,

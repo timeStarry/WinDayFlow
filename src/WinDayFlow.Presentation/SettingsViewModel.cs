@@ -10,6 +10,8 @@ public sealed partial class SettingsViewModel : ObservableObject, IDisposable
 {
     private const string SaveErrorText = "无法保存设置，请稍后重试。";
     private const string CaptureErrorText = "无法更改录制状态，请稍后重试。";
+    private const string CaptureModeStopConfirmationErrorText =
+        "应用录制范围已保存，旧授权也已失效，但未能确认录制已停止。请退出 WinDayFlow 后重新打开，再重新同意并启用录制。";
     private const string ExclusionRuleErrorText = "无法更改排除规则，请稍后重试。";
 
     private readonly AppSettingsService _settingsService;
@@ -26,6 +28,8 @@ public sealed partial class SettingsViewModel : ObservableObject, IDisposable
     [NotifyPropertyChangedFor(nameof(CanGrantConsent))]
     [NotifyPropertyChangedFor(nameof(CanRevokeConsent))]
     [NotifyPropertyChangedFor(nameof(CanChangePrivacy))]
+    [NotifyPropertyChangedFor(nameof(CanChangeApplicationPrivacyMode))]
+    [NotifyPropertyChangedFor(nameof(CanChangeApplicationProtection))]
     [NotifyPropertyChangedFor(nameof(CanAddExclusionRule))]
     [NotifyPropertyChangedFor(nameof(CanChangeExclusionRules))]
     private bool _isBusy;
@@ -82,6 +86,17 @@ public sealed partial class SettingsViewModel : ObservableObject, IDisposable
     public bool PauseDuringScreenSharing =>
         _settingsService.Current.CapturePrivacy.PauseDuringScreenSharing;
 
+    public CaptureApplicationPrivacyMode ApplicationPrivacyMode =>
+        _settingsService.Current.CapturePrivacy.ApplicationPrivacyMode;
+
+    public bool IsForegroundApplicationProtectionEnabled =>
+        ApplicationPrivacyMode
+            == CaptureApplicationPrivacyMode.ProtectByForegroundApplication;
+
+    public bool IsAllowAllApplicationsMode =>
+        ApplicationPrivacyMode
+            == CaptureApplicationPrivacyMode.AllowAllApplications;
+
     public long CapturePrivacyRevision =>
         _settingsService.Current.CapturePrivacy.Revision;
 
@@ -109,10 +124,16 @@ public sealed partial class SettingsViewModel : ObservableObject, IDisposable
 
     public bool CanChangePrivacy => !IsBusy;
 
-    public bool CanAddExclusionRule =>
-        !IsBusy && ExclusionRuleCount < CaptureExclusionRuleSet.MaximumRuleCount;
+    public bool CanChangeApplicationPrivacyMode => !IsBusy;
 
-    public bool CanChangeExclusionRules => !IsBusy;
+    public bool CanChangeApplicationProtection =>
+        !IsBusy && IsForegroundApplicationProtectionEnabled;
+
+    public bool CanAddExclusionRule =>
+        CanChangeApplicationProtection
+        && ExclusionRuleCount < CaptureExclusionRuleSet.MaximumRuleCount;
+
+    public bool CanChangeExclusionRules => CanChangeApplicationProtection;
 
     public bool HasError => ErrorMessage.Length > 0;
 
@@ -121,7 +142,9 @@ public sealed partial class SettingsViewModel : ObservableObject, IDisposable
     public bool IsExclusionEngineAvailable => _isExclusionEngineAvailable;
 
     public string ExclusionEngineStatusText => IsExclusionEngineAvailable
-        ? "排除规则监视器已就绪；规则本身不会开启录制。"
+        ? IsAllowAllApplicationsMode
+            ? "连续录制模式已启用；规则保留在本机，切回前台应用保护后恢复生效。"
+            : "排除规则监视器已就绪；规则本身不会开启录制。"
         : "规则已保存到本机，尚未接入录制监视器；当前不会用于录制。";
 
     public string ConsentStatusText => HasValidRecordingConsent
@@ -148,9 +171,29 @@ public sealed partial class SettingsViewModel : ObservableObject, IDisposable
 
     public string RetentionSummaryText => $"屏幕证据保留 {EvidenceRetentionDays} 天";
 
+    public string ApplicationPrivacyModeDetailText => IsAllowAllApplicationsMode
+        ? "每次开始录制时固定当时授权的一个显示器。录制期间切换应用或把焦点移到其他显示器都不会改换目标，因此不会反复重建授权或丢弃未完成录制块；其他显示器不会被录制。要更换录制显示器，请等待录制完全停止，将 WinDayFlow 窗口移到目标显示器，并在那里重新开始录制。该固定显示器上的普通桌面内容都可能进入本地证据。"
+        : "切换前台应用时重新验证敏感应用和自定义排除规则；无法确认的窗口会暂停录制。如需减少切换应用造成的暂停、恢复和时间线空档，可选择“固定一个显示器并允许全部应用”；切换范围会停止录制并要求重新同意。";
+
+    public string ContinuousCaptureDisclosureText => IsAllowAllApplicationsMode
+        ? "连续录制每次只覆盖开始时授权的一个显示器，不会录制所有显示器。该固定显示器上可见的普通桌面内容都可能进入本地录制证据，包括 WinDayFlow 设置页、AI 提供方配置，以及原本匹配敏感应用或自定义排除规则的内容；这些应用级保护在此模式下暂不生效。录制期间切换应用或把焦点移到其他显示器都不会改换录制目标，这能避免授权反复暂停、恢复和丢弃未完成录制块，使时间线更连续。要更换录制显示器，请等待录制完全停止，将 WinDayFlow 窗口移到目标显示器，并在那里重新开始录制。显示器断开或显示拓扑变化、锁屏或安全桌面、睡眠或唤醒、Windows 会话切换、存储不足或不可读、撤销同意，以及手动暂停或停止仍会中断或停止录制。远程会话和 Windows 演示模式继续遵循下方设置。切换应用录制范围会先停录、使旧授权失效，并要求重新同意。"
+        : "选择连续录制后会在这里显示完整的采集范围和暂停边界。";
+
+    public string SensitiveApplicationProtectionDetailText =>
+        IsAllowAllApplicationsMode
+            ? "当前模式下暂不生效。设置会保留，切回“按前台应用保护”后恢复使用。"
+            : "识别到身份验证、密码、财务、健康或私密浏览上下文时将暂停录制。";
+
     public string PrivacySummaryText => string.Join(
         " · ",
-        ExcludeSensitiveApplications ? "排除敏感应用" : "不自动排除敏感应用",
+        IsAllowAllApplicationsMode
+            ? "固定一个显示器并允许全部应用"
+            : "按前台应用保护",
+        IsAllowAllApplicationsMode
+            ? "敏感应用和自定义排除暂不生效"
+            : ExcludeSensitiveApplications
+                ? "排除敏感应用"
+                : "不自动排除敏感应用",
         PauseInRemoteSessions ? "远程会话暂停" : "远程会话继续",
         PauseDuringScreenSharing ? "Windows 演示模式暂停" : "Windows 演示模式继续");
 
@@ -306,6 +349,43 @@ public sealed partial class SettingsViewModel : ObservableObject, IDisposable
             },
             CaptureErrorText,
             cancellationToken).ConfigureAwait(true);
+    }
+
+    public async Task<bool> SetCaptureApplicationPrivacyModeAsync(
+        CaptureApplicationPrivacyMode applicationPrivacyMode,
+        CancellationToken cancellationToken = default)
+    {
+        var settingsChanged = false;
+        var changed = await RunMutationAsync(
+            async token =>
+            {
+                if (_settingsService.Current.CapturePrivacy.ApplicationPrivacyMode
+                    == applicationPrivacyMode)
+                {
+                    return;
+                }
+
+                var shouldStop = ShouldStopCapture(_captureService.CurrentStatus.State);
+                await _settingsService
+                    .SetCaptureApplicationPrivacyModeAsync(
+                        applicationPrivacyMode,
+                        token)
+                    .ConfigureAwait(false);
+                settingsChanged = true;
+                if (shouldStop)
+                {
+                    await _captureService.StopAsync(token).ConfigureAwait(false);
+                }
+            },
+            CaptureErrorText,
+            cancellationToken).ConfigureAwait(true);
+
+        if (!changed && settingsChanged && !_disposed)
+        {
+            ErrorMessage = CaptureModeStopConfirmationErrorText;
+        }
+
+        return changed;
     }
 
     public async Task<bool> AddExclusionRuleAsync(
@@ -614,20 +694,30 @@ public sealed partial class SettingsViewModel : ObservableObject, IDisposable
         OnPropertyChanged(nameof(ExcludeSensitiveApplications));
         OnPropertyChanged(nameof(PauseInRemoteSessions));
         OnPropertyChanged(nameof(PauseDuringScreenSharing));
+        OnPropertyChanged(nameof(ApplicationPrivacyMode));
+        OnPropertyChanged(nameof(IsForegroundApplicationProtectionEnabled));
+        OnPropertyChanged(nameof(IsAllowAllApplicationsMode));
         OnPropertyChanged(nameof(CapturePrivacyRevision));
         OnPropertyChanged(nameof(CanChangeCapture));
         OnPropertyChanged(nameof(CanGrantConsent));
         OnPropertyChanged(nameof(CanRevokeConsent));
         OnPropertyChanged(nameof(CanChangePrivacy));
+        OnPropertyChanged(nameof(CanChangeApplicationPrivacyMode));
+        OnPropertyChanged(nameof(CanChangeApplicationProtection));
         OnPropertyChanged(nameof(ConsentStatusText));
         OnPropertyChanged(nameof(ConsentDetailText));
         OnPropertyChanged(nameof(RetentionSummaryText));
+        OnPropertyChanged(nameof(ApplicationPrivacyModeDetailText));
+        OnPropertyChanged(nameof(ContinuousCaptureDisclosureText));
+        OnPropertyChanged(nameof(SensitiveApplicationProtectionDetailText));
         OnPropertyChanged(nameof(PrivacySummaryText));
         OnPropertyChanged(nameof(HasExclusionRules));
         OnPropertyChanged(nameof(ExclusionRuleCount));
         OnPropertyChanged(nameof(EnabledExclusionRuleCount));
         OnPropertyChanged(nameof(ExclusionRuleSummaryText));
+        OnPropertyChanged(nameof(ExclusionEngineStatusText));
         OnPropertyChanged(nameof(CanAddExclusionRule));
+        OnPropertyChanged(nameof(CanChangeExclusionRules));
     }
 
     private void NotifyCaptureStatusChanged()

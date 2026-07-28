@@ -22,6 +22,9 @@ public sealed class AppSettingsServiceTests
         Assert.False(settings.CloudAnalysisEnabled);
         Assert.Null(settings.RecordingConsent);
         Assert.Equal(CapturePrivacySettings.Default, settings.CapturePrivacy);
+        Assert.Equal(
+            CaptureApplicationPrivacyMode.ProtectByForegroundApplication,
+            settings.CapturePrivacy.ApplicationPrivacyMode);
     }
 
     [Fact]
@@ -61,6 +64,14 @@ public sealed class AppSettingsServiceTests
                 PauseInRemoteSessions: true,
                 PauseDuringScreenSharing: true,
                 Revision: 0));
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => new CapturePrivacySettings(
+                CapturePrivacySettings.DefaultRetentionDays,
+                ExcludeSensitiveApplications: true,
+                PauseInRemoteSessions: true,
+                PauseDuringScreenSharing: true,
+                Revision: 1,
+                ApplicationPrivacyMode: (CaptureApplicationPrivacyMode)99));
     }
 
     [Fact]
@@ -202,6 +213,44 @@ public sealed class AppSettingsServiceTests
             privacy.PauseDuringScreenSharing);
 
         Assert.Same(privacy, service.Current.CapturePrivacy);
+        Assert.Empty(repository.SavedSettings);
+    }
+
+    [Fact]
+    public async Task ApplicationPrivacyModeChangeInvalidatesConsentAndDisablesCapture()
+    {
+        var repository = new TestSettingsRepository();
+        using var service = new AppSettingsService(
+            repository,
+            new FixedTimeProvider(ConsentTime));
+        await service.GrantRecordingConsentAsync();
+        await service.SetCaptureEnabledAsync(enabled: true);
+        var consent = Assert.IsType<RecordingConsent>(service.Current.RecordingConsent);
+
+        await service.SetCaptureApplicationPrivacyModeAsync(
+            CaptureApplicationPrivacyMode.AllowAllApplications);
+
+        Assert.False(service.Current.CaptureEnabled);
+        Assert.False(service.HasValidRecordingConsent);
+        Assert.Equal(
+            CaptureApplicationPrivacyMode.AllowAllApplications,
+            service.Current.CapturePrivacy.ApplicationPrivacyMode);
+        Assert.Equal(2, service.Current.CapturePrivacy.Revision);
+        Assert.Equal(1, consent.PrivacyRevision);
+        Assert.Equal(consent, service.Current.RecordingConsent);
+        Assert.Equal(3, repository.SavedSettings.Count);
+    }
+
+    [Fact]
+    public async Task ReapplyingApplicationPrivacyModeDoesNotPersist()
+    {
+        var repository = new TestSettingsRepository();
+        using var service = new AppSettingsService(repository);
+
+        await service.SetCaptureApplicationPrivacyModeAsync(
+            CaptureApplicationPrivacyMode.ProtectByForegroundApplication);
+
+        Assert.Equal(CapturePrivacySettings.Default, service.Current.CapturePrivacy);
         Assert.Empty(repository.SavedSettings);
     }
 

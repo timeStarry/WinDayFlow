@@ -66,11 +66,11 @@ State is published from completed work rather than optimistic commands:
 
 ```text
 Start accepted        -> STARTING
-acquisition ready     -> RECORDING
+first authorized frame encoded -> RECORDING
 Pause accepted        -> PAUSING
 old chunk cleared and acquisition reset -> PAUSED
 Resume accepted       -> RESUMING
-fresh token ready     -> RECORDING
+fresh token's first authorized frame encoded -> RECORDING
 Stop accepted         -> STOPPING
 join and revoke done  -> STOPPED
 fatal worker exit     -> ERROR with state FAULTED
@@ -79,7 +79,11 @@ fatal worker exit     -> ERROR with state FAULTED
 The Start worker waits behind a per-run gate until STARTING is appended, so a
 fast backend cannot publish RECORDING first. The runtime completion callback is
 invoked only after `worker_exited` is visible. A Paused checkpoint carries its
-Pause epoch and must match the controller's expected epoch.
+Pause epoch and must match the controller's expected epoch. Display-acquisition
+initialization alone does not publish Ready: Starting or Resuming remains
+visible through timeouts and first-frame failures, and each fresh Resume token
+must pass its first Acquire, Transform, Begin, and Encode authority post-checks
+before the worker may publish one Ready checkpoint.
 
 ### Authorization Replacement
 
@@ -94,11 +98,13 @@ authorization loss from every sensitive stage through one handler:
   acknowledges Paused, and waits for a fresh admitted Resume token; and
 - authorization loss with no Pause or Stop intent remains a fatal error.
 
-An allowed replacement uses a neutral Pause reason. A blocked replacement uses
-the privacy decision's concrete reason. Replacements folded into one pending
-Pause always overwrite that reason, including a later neutral Allow. Managed
-policy must still decide whether a blocked context remains paused and later
-resumes or becomes a sticky Stop.
+An allowed replacement that initiates a Pause uses a neutral reason. A blocked
+replacement uses the privacy decision's concrete reason. While Pausing, a later
+non-neutral authorization decision may refine an existing automatic reason, but
+a neutral Allow does not erase it. A user-initiated Pause remains UserPaused
+through folded authorization updates. Once Paused is acknowledged, its reason
+remains stable until Resume or Stop. Managed policy must still decide whether a
+blocked context remains paused and later resumes or becomes a sticky Stop.
 
 ### Stop Single Flight
 
@@ -138,22 +144,24 @@ observing the old run's reserved capacity.
 
 ## Verification
 
-The fifteenth native CTest executable, `capture_instance_controller_tests`,
+The native `capture_instance_controller_tests` CTest executable
 covers disabled admission consumption, no backend calls, revoke compatibility,
 STARTING/Ready/Pause/Resume/Stop ordering, stale run callbacks, two-waiter Stop,
 stale deferred-Stop rejection across replacement runs, leader timeout and
 takeover, leader-exception takeover, pre-Start revoke, fatal ERROR publication,
-atomic terminal-failure sharing, required-queue saturation, latest Pause-reason
-folding, reservation release, and destructor join ordering.
+atomic terminal-failure sharing, required-queue saturation, non-neutral
+automatic Pause-reason refinement, sticky user Pause reasons, reservation
+release, and destructor join ordering.
 
-Worker tests cover Ready/Paused/Ready checkpoint order, callback execution after
-permit release, and provisional Pause recovery during Initialize, Acquire,
-Finalize, and Commit with a fresh generation. Runtime-owner tests prove the
-completion callback observes the worker as exited. C ABI tests retain the
-versioned header, admission, destroy-race, and disabled-mode compatibility
-contract.
+Worker tests cover Ready/Paused/Ready checkpoint order, no early Ready on
+timeout or first-frame failure, exactly-once Ready after a first authorized
+encoded frame, per-Resume readiness, callback execution after permit release,
+and provisional Pause recovery during Initialize, Acquire, Finalize, and Commit
+with a fresh generation. Runtime-owner tests prove the completion callback
+observes the worker as exited. C ABI tests retain the versioned header,
+admission, destroy-race, and disabled-mode compatibility contract.
 
-Debug and Release each pass all 15 native CTest executables. No automated test
+Debug and Release each pass all 18 native CTest executables. No automated test
 captures the user's desktop.
 
 ## Provenance

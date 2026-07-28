@@ -60,7 +60,13 @@ internal static class AnalysisPipelineServiceCollectionExtensions
         services.AddSingleton(AnalysisPipelineSupervisorOptions.Default);
         services.AddSingleton<AnalysisPipelineSupervisor>();
         services.AddSingleton(AnalysisPipelineBackgroundRunnerOptions.Default);
+        services.AddSingleton<AnalysisPipelineStatusSource>();
+        services.AddSingleton<IAnalysisPipelineStatusSource>(static provider =>
+            provider.GetRequiredService<AnalysisPipelineStatusSource>());
         services.AddSingleton<AnalysisPipelineBackgroundRunner>();
+        services.AddSingleton<IAnalysisPipelineScheduler>(static provider =>
+            provider.GetRequiredService<AnalysisPipelineBackgroundRunner>());
+        services.AddSingleton<AnalysisJobRetryService>();
         services.AddHostedService<AnalysisPipelineHostedService>();
 
         return services;

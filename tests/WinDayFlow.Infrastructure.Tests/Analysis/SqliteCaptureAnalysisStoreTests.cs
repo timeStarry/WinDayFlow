@@ -521,6 +521,294 @@ public sealed class SqliteCaptureAnalysisStoreTests
         Assert.Equal(Now.AddSeconds(32), terminal.CompletedAtUtc);
     }
 
+    [Theory]
+    [InlineData(1, 2)]
+    [InlineData(3, 3)]
+    public async Task ManualRetryReschedulesTerminalJobAndOnlyExtendsExhaustedAttemptBudget(
+        int maxAttempts,
+        int expectedMaxAttempts)
+    {
+        using var database = new TemporaryDatabase();
+        var (_, store) = await CreateStoreAsync(database);
+        var chunk = CreateChunk("chunk-manual-retry-terminal");
+        await store.IngestCommittedAsync(chunk);
+        var job = CreatePendingJob(
+            Guid.Parse("41000000-0000-0000-0000-000000000001"),
+            chunk.Id,
+            maxAttempts: maxAttempts);
+        await store.EnqueueAsync(job);
+        var claimed = Assert.IsType<AnalysisJob>(await store.TryClaimNextAsync(
+            "worker-manual-terminal",
+            Now,
+            TimeSpan.FromMinutes(5)));
+        var failed = Assert.IsType<AnalysisJob>(await store.TryFailAsync(
+            claimed.Lease!,
+            new AnalysisJobFailure(
+                AnalysisJobErrorCode.ProviderRejected,
+                "provider policy rejected the request"),
+            AnalysisFailureDisposition.Terminal,
+            Now.AddSeconds(1),
+            TimeSpan.Zero));
+        var requestedAt = Now.AddSeconds(2);
+
+        var result = await store.TryRetryAsync(job.Id, requestedAt);
+
+        Assert.Equal(AnalysisJobRetryOutcome.Scheduled, result.Outcome);
+        Assert.True(result.Accepted);
+        var retried = Assert.IsType<AnalysisJob>(result.Job);
+        Assert.Equal(AnalysisJobState.FailedRetryable, retried.State);
+        Assert.Equal(1, retried.Attempt);
+        Assert.Equal(expectedMaxAttempts, retried.MaxAttempts);
+        Assert.Equal(requestedAt, retried.NotBeforeUtc);
+        Assert.Equal(requestedAt, retried.UpdatedAtUtc);
+        Assert.Null(retried.CompletedAtUtc);
+        Assert.Equal(failed.Failure, retried.Failure);
+        Assert.Null(retried.Lease);
+    }
+
+    [Fact]
+    public async Task ManualRetryAdvancesRetryableBackoffWithoutChangingAttemptBudget()
+    {
+        using var database = new TemporaryDatabase();
+        var (_, store) = await CreateStoreAsync(database);
+        var chunk = CreateChunk("chunk-manual-retry-backoff");
+        await store.IngestCommittedAsync(chunk);
+        var job = CreatePendingJob(
+            Guid.Parse("41000000-0000-0000-0000-000000000002"),
+            chunk.Id,
+            maxAttempts: 3);
+        await store.EnqueueAsync(job);
+        var claimed = Assert.IsType<AnalysisJob>(await store.TryClaimNextAsync(
+            "worker-manual-backoff",
+            Now,
+            TimeSpan.FromMinutes(5)));
+        var failed = Assert.IsType<AnalysisJob>(await store.TryFailAsync(
+            claimed.Lease!,
+            new AnalysisJobFailure(
+                AnalysisJobErrorCode.ProviderUnavailable,
+                "provider offline"),
+            AnalysisFailureDisposition.Retryable,
+            Now.AddSeconds(1),
+            TimeSpan.FromMinutes(5)));
+        var requestedAt = Now.AddSeconds(2);
+
+        var first = await store.TryRetryAsync(job.Id, requestedAt);
+        var duplicate = await store.TryRetryAsync(job.Id, requestedAt);
+        var alreadyDue = await store.TryRetryAsync(job.Id, requestedAt.AddSeconds(1));
+
+        Assert.Equal(AnalysisJobRetryOutcome.Scheduled, first.Outcome);
+        Assert.Equal(AnalysisJobRetryOutcome.AlreadyScheduled, duplicate.Outcome);
+        Assert.Equal(AnalysisJobRetryOutcome.AlreadyScheduled, alreadyDue.Outcome);
+        Assert.Equal(3, first.Job?.MaxAttempts);
+        Assert.Equal(1, first.Job?.Attempt);
+        Assert.Equal(requestedAt, first.Job?.NotBeforeUtc);
+        Assert.Equal(failed.Failure, first.Job?.Failure);
+        Assert.Equal(first.Job, duplicate.Job);
+        Assert.Equal(first.Job, alreadyDue.Job);
+    }
+
+    [Fact]
+    public async Task ManualRetryRejectsNonexistentAndNonfailedJobs()
+    {
+        using var database = new TemporaryDatabase();
+        var (_, store) = await CreateStoreAsync(database);
+        var chunk = CreateChunk("chunk-manual-retry-state");
+        await store.IngestCommittedAsync(chunk);
+        var pending = CreatePendingJob(
+            Guid.Parse("41000000-0000-0000-0000-000000000003"),
+            chunk.Id);
+        await store.EnqueueAsync(pending);
+
+        var missing = await store.TryRetryAsync(
+            Guid.Parse("41000000-0000-0000-0000-000000000004"),
+            Now);
+        var wrongState = await store.TryRetryAsync(pending.Id, Now);
+
+        Assert.Equal(AnalysisJobRetryOutcome.NotFound, missing.Outcome);
+        Assert.Null(missing.Job);
+        Assert.Equal(AnalysisJobRetryOutcome.StateNotRetryable, wrongState.Outcome);
+        Assert.Equal(pending, wrongState.Job);
+    }
+
+    [Fact]
+    public async Task ManualRetryOnlyAcceptsLatestJobUsingStableRetryOrdering()
+    {
+        using var database = new TemporaryDatabase();
+        var (_, store) = await CreateStoreAsync(database);
+        var chunk = CreateChunk("chunk-manual-retry-latest");
+        await store.IngestCommittedAsync(chunk);
+        var earlierWithHigherRevisionAndId = CreatePendingJob(
+            Guid.Parse("ffffffff-0000-0000-0000-000000000001"),
+            chunk.Id,
+            providerProfileRevision: 99,
+            analysisVersion: "analysis-earlier",
+            createdAt: Now);
+        var laterCreated = CreatePendingJob(
+            Guid.Parse("10000000-0000-0000-0000-000000000001"),
+            chunk.Id,
+            providerProfileRevision: 1,
+            analysisVersion: "analysis-later-created",
+            createdAt: Now.AddSeconds(10));
+        var sameTimeHigherRevision = CreatePendingJob(
+            Guid.Parse("05000000-0000-0000-0000-000000000001"),
+            chunk.Id,
+            providerProfileRevision: 2,
+            analysisVersion: "analysis-higher-revision",
+            createdAt: Now.AddSeconds(10));
+        var sameTimeAndRevisionHigherId = CreatePendingJob(
+            Guid.Parse("90000000-0000-0000-0000-000000000001"),
+            chunk.Id,
+            providerProfileRevision: 2,
+            analysisVersion: "analysis-higher-id",
+            createdAt: Now.AddSeconds(10));
+        await FailTerminalJobAsync(store, earlierWithHigherRevisionAndId, Now.AddSeconds(1));
+        await FailTerminalJobAsync(store, laterCreated, Now.AddSeconds(11));
+        await FailTerminalJobAsync(store, sameTimeHigherRevision, Now.AddSeconds(11));
+        await FailTerminalJobAsync(store, sameTimeAndRevisionHigherId, Now.AddSeconds(11));
+        var requestedAt = Now.AddSeconds(12);
+
+        var earlier = await store.TryRetryAsync(earlierWithHigherRevisionAndId.Id, requestedAt);
+        var lowerRevision = await store.TryRetryAsync(laterCreated.Id, requestedAt);
+        var lowerId = await store.TryRetryAsync(sameTimeHigherRevision.Id, requestedAt);
+        var latest = await store.TryRetryAsync(sameTimeAndRevisionHigherId.Id, requestedAt);
+
+        Assert.Equal(AnalysisJobRetryOutcome.StaleJob, earlier.Outcome);
+        Assert.Equal(AnalysisJobRetryOutcome.StaleJob, lowerRevision.Outcome);
+        Assert.Equal(AnalysisJobRetryOutcome.StaleJob, lowerId.Outcome);
+        Assert.Equal(AnalysisJobRetryOutcome.Scheduled, latest.Outcome);
+    }
+
+    [Theory]
+    [InlineData(CaptureChunkAvailability.Missing)]
+    [InlineData(CaptureChunkAvailability.Deleted)]
+    public async Task ManualRetryRejectsUnavailableEvidence(
+        CaptureChunkAvailability availability)
+    {
+        using var database = new TemporaryDatabase();
+        var (factory, store) = await CreateStoreAsync(database);
+        var chunk = CreateChunk($"chunk-manual-retry-{availability.ToString().ToLowerInvariant()}");
+        await store.IngestCommittedAsync(chunk);
+        var job = CreatePendingJob(
+            Guid.Parse("41000000-0000-0000-0000-00000000000a"),
+            chunk.Id,
+            maxAttempts: 1);
+        var failed = await FailTerminalJobAsync(store, job, Now.AddSeconds(1));
+        await SetChunkAvailabilityAsync(factory, chunk.Id, availability);
+
+        var result = await store.TryRetryAsync(job.Id, Now.AddSeconds(2));
+
+        Assert.Equal(AnalysisJobRetryOutcome.EvidenceUnavailable, result.Outcome);
+        Assert.Equal(failed, result.Job);
+    }
+
+    [Fact]
+    public async Task ManualRetryRejectsChunkThatAlreadyHasCompletedAnalysis()
+    {
+        using var database = new TemporaryDatabase();
+        var (_, store) = await CreateStoreAsync(database);
+        var chunk = CreateChunk("chunk-manual-retry-completed");
+        await store.IngestCommittedAsync(chunk);
+        await store.EnqueueAsync(CreatePendingJob(
+            Guid.Parse("41000000-0000-0000-0000-000000000005"),
+            chunk.Id,
+            analysisVersion: "analysis-completed",
+            createdAt: Now));
+        await CompleteNextJobAsync(store, "worker-before-manual-retry");
+        var failedJob = CreatePendingJob(
+            Guid.Parse("41000000-0000-0000-0000-000000000006"),
+            chunk.Id,
+            providerProfileRevision: 2,
+            analysisVersion: "analysis-newer-failed",
+            maxAttempts: 1,
+            createdAt: Now.AddSeconds(10));
+        var failed = await FailTerminalJobAsync(store, failedJob, Now.AddSeconds(11));
+
+        var result = await store.TryRetryAsync(failedJob.Id, Now.AddSeconds(12));
+
+        Assert.Equal(AnalysisJobRetryOutcome.AnalysisAlreadyCompleted, result.Outcome);
+        Assert.Equal(failed, result.Job);
+    }
+
+    [Fact]
+    public async Task ManualRetryStopsAtAbsoluteAttemptLimit()
+    {
+        using var database = new TemporaryDatabase();
+        var (factory, store) = await CreateStoreAsync(database);
+        var chunk = CreateChunk("chunk-manual-retry-attempt-limit");
+        await store.IngestCommittedAsync(chunk);
+        var job = CreatePendingJob(
+            Guid.Parse("41000000-0000-0000-0000-000000000007"),
+            chunk.Id,
+            maxAttempts: 100);
+        await store.EnqueueAsync(job);
+        await SetTerminalJobAsync(
+            factory,
+            job.Id,
+            attempt: 100,
+            maxAttempts: 100,
+            Now.AddSeconds(1));
+
+        var result = await store.TryRetryAsync(job.Id, Now.AddSeconds(2));
+
+        Assert.Equal(AnalysisJobRetryOutcome.AttemptLimitReached, result.Outcome);
+        Assert.Equal(100, result.Job?.Attempt);
+        Assert.Equal(100, result.Job?.MaxAttempts);
+        Assert.Equal(AnalysisJobState.FailedTerminal, result.Job?.State);
+    }
+
+    [Fact]
+    public async Task ConcurrentManualRetrySchedulesExactlyOnce()
+    {
+        using var database = new TemporaryDatabase();
+        var (_, store) = await CreateStoreAsync(database);
+        var chunk = CreateChunk("chunk-manual-retry-concurrent");
+        await store.IngestCommittedAsync(chunk);
+        var job = CreatePendingJob(
+            Guid.Parse("41000000-0000-0000-0000-000000000008"),
+            chunk.Id,
+            maxAttempts: 1);
+        await FailTerminalJobAsync(store, job, Now.AddSeconds(1));
+        var requestedAt = Now.AddSeconds(2);
+
+        var results = await Task.WhenAll(Enumerable.Range(0, 16).Select(_ =>
+            store.TryRetryAsync(job.Id, requestedAt)));
+
+        Assert.Single(results, static result =>
+            result.Outcome == AnalysisJobRetryOutcome.Scheduled);
+        Assert.Equal(15, results.Count(static result =>
+            result.Outcome == AnalysisJobRetryOutcome.AlreadyScheduled));
+        var persisted = Assert.IsType<AnalysisJob>(
+            await ((IAnalysisJobStore)store).GetAsync(job.Id));
+        Assert.Equal(AnalysisJobState.FailedRetryable, persisted.State);
+        Assert.Equal(1, persisted.Attempt);
+        Assert.Equal(2, persisted.MaxAttempts);
+        Assert.Equal(requestedAt, persisted.NotBeforeUtc);
+    }
+
+    [Fact]
+    public async Task ManualRetryValidatesIdentifierTimestampAndCancellation()
+    {
+        using var database = new TemporaryDatabase();
+        var (_, store) = await CreateStoreAsync(database);
+        var chunk = CreateChunk("chunk-manual-retry-validation");
+        await store.IngestCommittedAsync(chunk);
+        var job = CreatePendingJob(
+            Guid.Parse("41000000-0000-0000-0000-000000000009"),
+            chunk.Id,
+            maxAttempts: 1);
+        await FailTerminalJobAsync(store, job, Now.AddSeconds(1));
+
+        await Assert.ThrowsAsync<ArgumentException>(() =>
+            store.TryRetryAsync(Guid.Empty, Now.AddSeconds(2)));
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() =>
+            store.TryRetryAsync(job.Id, Now));
+
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            store.TryRetryAsync(job.Id, Now.AddSeconds(2), cancellation.Token));
+    }
+
     [Fact]
     public async Task ExpiredLeaseRecoveryRetriesWhenPossibleAndTerminatesAtLimit()
     {
@@ -657,6 +945,27 @@ public sealed class SqliteCaptureAnalysisStoreTests
         }
     }
 
+    private static async Task<AnalysisJob> FailTerminalJobAsync(
+        SqliteCaptureAnalysisStore store,
+        AnalysisJob pendingJob,
+        DateTimeOffset failedAt)
+    {
+        await store.EnqueueAsync(pendingJob);
+        var claimed = Assert.IsType<AnalysisJob>(await store.TryClaimNextAsync(
+            $"worker-{pendingJob.Id:N}",
+            failedAt.AddTicks(-1),
+            TimeSpan.FromMinutes(5)));
+        Assert.Equal(pendingJob.Id, claimed.Id);
+        return Assert.IsType<AnalysisJob>(await store.TryFailAsync(
+            claimed.Lease!,
+            new AnalysisJobFailure(
+                AnalysisJobErrorCode.ProviderRejected,
+                "manual retry regression"),
+            AnalysisFailureDisposition.Terminal,
+            failedAt,
+            TimeSpan.Zero));
+    }
+
     private static CaptureChunk CreateChunk(
         string id,
         ulong persistenceGeneration = 1,
@@ -698,6 +1007,44 @@ public sealed class SqliteCaptureAnalysisStoreTests
             """;
         command.Parameters.AddWithValue("$availability", (int)availability);
         command.Parameters.AddWithValue("$id", chunkId);
+
+        Assert.Equal(1, await command.ExecuteNonQueryAsync());
+    }
+
+    private static async Task SetTerminalJobAsync(
+        SqliteConnectionFactory factory,
+        Guid jobId,
+        int attempt,
+        int maxAttempts,
+        DateTimeOffset failedAt)
+    {
+        await using var connection = await factory.OpenConnectionAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            UPDATE analysis_jobs
+            SET state = $terminal_state,
+                attempt = $attempt,
+                max_attempts = $max_attempts,
+                not_before_utc_ticks = NULL,
+                error_code = $error_code,
+                error_detail = $error_detail,
+                updated_at_utc_ticks = $failed_at_utc_ticks,
+                completed_at_utc_ticks = $failed_at_utc_ticks
+            WHERE id = $id;
+            """;
+        command.Parameters.AddWithValue(
+            "$terminal_state",
+            (int)AnalysisJobState.FailedTerminal);
+        command.Parameters.AddWithValue("$attempt", attempt);
+        command.Parameters.AddWithValue("$max_attempts", maxAttempts);
+        command.Parameters.AddWithValue(
+            "$error_code",
+            (int)AnalysisJobErrorCode.ProviderRejected);
+        command.Parameters.AddWithValue("$error_detail", "manual retry attempt limit");
+        command.Parameters.AddWithValue(
+            "$failed_at_utc_ticks",
+            failedAt.UtcDateTime.Ticks);
+        command.Parameters.AddWithValue("$id", jobId.ToString("D"));
 
         Assert.Equal(1, await command.ExecuteNonQueryAsync());
     }

@@ -85,7 +85,7 @@ public sealed partial class AiProviderSettingsViewModel : ObservableObject, IDis
     };
 
     public string CloudAnalysisStatusText => CloudAnalysisEnabled
-        ? "新证据可以发送到当前提供方进行分析"
+        ? "本机待分析证据和新证据可以发送到当前提供方进行分析"
         : "云端分析保持关闭";
 
     public Task<bool> SaveAsync(

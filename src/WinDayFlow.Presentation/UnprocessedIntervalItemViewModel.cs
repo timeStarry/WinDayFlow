@@ -12,6 +12,8 @@ public sealed class UnprocessedIntervalItemViewModel
         Start = interval.Range.Start;
         End = interval.Range.End;
         Duration = interval.Range.Duration;
+        CaptureChunkId = interval.CaptureChunkId;
+        LatestJobId = interval.LatestJobId;
         State = interval.State;
         Attempt = interval.Attempt;
         ErrorCode = interval.ErrorCode;
@@ -23,11 +25,19 @@ public sealed class UnprocessedIntervalItemViewModel
 
     public TimeSpan Duration { get; }
 
+    public string CaptureChunkId { get; }
+
+    public Guid? LatestJobId { get; }
+
     public UnprocessedIntervalState State { get; }
 
     public int? Attempt { get; }
 
     public AnalysisJobErrorCode? ErrorCode { get; }
+
+    public bool CanRetry => State is
+        UnprocessedIntervalState.RetryScheduled or
+        UnprocessedIntervalState.Failed;
 
     public string TimeText => Start.Date == End.Date
         ? $"{Start:HH:mm} - {End:HH:mm}"

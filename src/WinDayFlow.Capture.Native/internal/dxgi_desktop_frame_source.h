@@ -28,6 +28,7 @@ enum class DxgiDesktopFrameResult {
   kInvalidArgument,
   kOutputUnavailable,
   kTopologyChanged,
+  kAccessDenied,
   kAccessLost,
   kUnsupportedFormat,
   kDeviceFailure,

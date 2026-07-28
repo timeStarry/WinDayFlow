@@ -5,6 +5,7 @@ internal sealed class CaptureAwareWindowCloseCoordinator
     private static readonly TimeSpan DefaultStopTimeout = TimeSpan.FromSeconds(15);
 
     private readonly Func<CancellationToken, Task> _stopCaptureAsync;
+    private readonly Func<Task> _completeShutdownAsync;
     private readonly Action _requestWindowClose;
     private readonly Action<Exception> _reportFailure;
     private readonly TimeSpan _stopTimeout;
@@ -13,10 +14,12 @@ internal sealed class CaptureAwareWindowCloseCoordinator
 
     public CaptureAwareWindowCloseCoordinator(
         Func<CancellationToken, Task> stopCaptureAsync,
+        Func<Task> completeShutdownAsync,
         Action requestWindowClose,
         Action<Exception> reportFailure)
         : this(
             stopCaptureAsync,
+            completeShutdownAsync,
             requestWindowClose,
             reportFailure,
             DefaultStopTimeout,
@@ -26,6 +29,7 @@ internal sealed class CaptureAwareWindowCloseCoordinator
 
     internal CaptureAwareWindowCloseCoordinator(
         Func<CancellationToken, Task> stopCaptureAsync,
+        Func<Task> completeShutdownAsync,
         Action requestWindowClose,
         Action<Exception> reportFailure,
         TimeSpan stopTimeout,
@@ -33,6 +37,8 @@ internal sealed class CaptureAwareWindowCloseCoordinator
     {
         _stopCaptureAsync = stopCaptureAsync
             ?? throw new ArgumentNullException(nameof(stopCaptureAsync));
+        _completeShutdownAsync = completeShutdownAsync
+            ?? throw new ArgumentNullException(nameof(completeShutdownAsync));
         _requestWindowClose = requestWindowClose
             ?? throw new ArgumentNullException(nameof(requestWindowClose));
         _reportFailure = reportFailure
@@ -70,16 +76,41 @@ internal sealed class CaptureAwareWindowCloseCoordinator
                     (int)CloseState.Open)
                 == (int)CloseState.Open)
             {
-                _ = StopCaptureThenCloseAsync();
+                _ = StopCaptureAndShutdownThenCloseAsync();
                 return true;
             }
         }
     }
 
-    private async Task StopCaptureThenCloseAsync()
+    private async Task StopCaptureAndShutdownThenCloseAsync()
     {
         await Task.Yield();
 
+        await StopCaptureAsync();
+        try
+        {
+            await _completeShutdownAsync();
+        }
+        catch (Exception exception)
+        {
+            ReportFailure(exception);
+        }
+        finally
+        {
+            Volatile.Write(ref _state, (int)CloseState.ReadyToClose);
+            try
+            {
+                _requestWindowClose();
+            }
+            catch (Exception exception)
+            {
+                ReportFailure(exception);
+            }
+        }
+    }
+
+    private async Task StopCaptureAsync()
+    {
         Task? stopTask = null;
         try
         {
@@ -111,18 +142,6 @@ internal sealed class CaptureAwareWindowCloseCoordinator
             }
 
             ReportFailure(exception);
-        }
-        finally
-        {
-            Volatile.Write(ref _state, (int)CloseState.ReadyToClose);
-            try
-            {
-                _requestWindowClose();
-            }
-            catch (Exception exception)
-            {
-                ReportFailure(exception);
-            }
         }
     }
 

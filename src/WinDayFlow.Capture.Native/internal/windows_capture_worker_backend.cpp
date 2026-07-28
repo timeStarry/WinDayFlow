@@ -18,6 +18,7 @@
 #include "atomic_chunk_store.h"
 #include "dxgi_desktop_frame_source.h"
 #include "windows_capture_target_observer.h"
+#include "windows_graphics_capture_frame_source.h"
 
 namespace windayflow::capture {
 namespace {
@@ -33,6 +34,7 @@ CaptureWorkerBackendResult MapDxgiResult(
     case DxgiDesktopFrameResult::kTopologyChanged:
     case DxgiDesktopFrameResult::kAccessLost:
       return CaptureWorkerBackendResult::kRebuildRequired;
+    case DxgiDesktopFrameResult::kAccessDenied:
     case DxgiDesktopFrameResult::kInvalidArgument:
     case DxgiDesktopFrameResult::kUnsupportedFormat:
       return CaptureWorkerBackendResult::kInvalidFrame;
@@ -91,7 +93,7 @@ class WindowsCaptureWorkerBackend final : public CaptureWorkerBackend {
 
   std::optional<CaptureTargetIdentity> ObserveTarget(
       const CaptureTargetIdentity& expected) noexcept override {
-    return ObserveWindowsCaptureTarget(expected);
+    return ObserveWindowsCaptureAuthorization(expected);
   }
 
   CaptureWorkerBackendResult InitializeAcquisition(
@@ -99,7 +101,23 @@ class WindowsCaptureWorkerBackend final : public CaptureWorkerBackend {
     if (!EnsureThreadRuntime()) {
       return CaptureWorkerBackendResult::kInternalFailure;
     }
-    return MapDxgiResult(frame_source_.Initialize(target));
+    ResetAcquisition();
+    const DxgiDesktopFrameResult dxgi_result =
+        frame_source_.Initialize(target);
+    if (dxgi_result == DxgiDesktopFrameResult::kOk) {
+      frame_source_kind_ = FrameSourceKind::kDxgi;
+      return CaptureWorkerBackendResult::kOk;
+    }
+    if (!ShouldFallbackToWindowsGraphicsCapture(dxgi_result)) {
+      return MapDxgiResult(dxgi_result);
+    }
+
+    const DxgiDesktopFrameResult graphics_capture_result =
+        graphics_capture_frame_source_.Initialize(target);
+    if (graphics_capture_result == DxgiDesktopFrameResult::kOk) {
+      frame_source_kind_ = FrameSourceKind::kWindowsGraphicsCapture;
+    }
+    return MapDxgiResult(graphics_capture_result);
   }
 
   CaptureWorkerBackendResult AcquireFrame(uint32_t timeout_ms,
@@ -110,12 +128,26 @@ class WindowsCaptureWorkerBackend final : public CaptureWorkerBackend {
       }
       return CaptureWorkerBackendResult::kInternalFailure;
     }
-    return MapDxgiResult(frame_source_.Acquire(timeout_ms, frame));
+    switch (frame_source_kind_) {
+      case FrameSourceKind::kDxgi:
+        return MapDxgiResult(frame_source_.Acquire(timeout_ms, frame));
+      case FrameSourceKind::kWindowsGraphicsCapture:
+        return MapDxgiResult(
+            graphics_capture_frame_source_.Acquire(timeout_ms, frame));
+      case FrameSourceKind::kNone:
+      default:
+        if (frame != nullptr) {
+          *frame = {};
+        }
+        return CaptureWorkerBackendResult::kInternalFailure;
+    }
   }
 
   void ResetAcquisition() noexcept override {
     if (owner_thread_id_ == 0 || IsOwnerThread()) {
       frame_source_.Reset();
+      graphics_capture_frame_source_.Reset();
+      frame_source_kind_ = FrameSourceKind::kNone;
     }
   }
 
@@ -241,7 +273,7 @@ class WindowsCaptureWorkerBackend final : public CaptureWorkerBackend {
       return;
     }
     static_cast<void>(writer_.Reset());
-    frame_source_.Reset();
+    ResetAcquisition();
     wic_factory_.Reset();
     if (uninitialize_com_) {
       CoUninitialize();
@@ -251,6 +283,12 @@ class WindowsCaptureWorkerBackend final : public CaptureWorkerBackend {
   }
 
  private:
+  enum class FrameSourceKind {
+    kNone,
+    kDxgi,
+    kWindowsGraphicsCapture,
+  };
+
   bool IsOwnerThread() const noexcept {
     return owner_thread_id_ != 0 && owner_thread_id_ == GetCurrentThreadId();
   }
@@ -273,13 +311,20 @@ class WindowsCaptureWorkerBackend final : public CaptureWorkerBackend {
 
   AtomicChunkStore store_;
   DxgiDesktopFrameSource frame_source_;
+  WindowsGraphicsCaptureFrameSource graphics_capture_frame_source_;
   Microsoft::WRL::ComPtr<IWICImagingFactory> wic_factory_;
   MfH264ChunkWriter writer_;
   DWORD owner_thread_id_ = 0;
   bool uninitialize_com_ = false;
+  FrameSourceKind frame_source_kind_ = FrameSourceKind::kNone;
 };
 
 }  // namespace
+
+bool ShouldFallbackToWindowsGraphicsCapture(
+    DxgiDesktopFrameResult result) noexcept {
+  return result == DxgiDesktopFrameResult::kAccessDenied;
+}
 
 bool TryConvertCaptureOutputDirectory(std::string_view utf8,
                                       std::wstring* utf16) noexcept {

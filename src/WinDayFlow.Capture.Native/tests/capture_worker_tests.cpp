@@ -4,6 +4,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <new>
@@ -23,6 +24,7 @@ using windayflow::capture::CaptureCommand;
 using windayflow::capture::CaptureCommandAdmission;
 using windayflow::capture::CaptureCommandAdmissionPermit;
 using windayflow::capture::CaptureCommandAdmissionResult;
+using windayflow::capture::CaptureAuthorizationScope;
 using windayflow::capture::CaptureEventQueue;
 using windayflow::capture::CaptureEventReadResult;
 using windayflow::capture::CaptureRuntimeOwner;
@@ -82,6 +84,18 @@ CaptureTargetIdentity TestTarget() {
                                1,   400, std::wstring(L"\\\\.\\DISPLAY1")};
 }
 
+CaptureTargetIdentity TestDisplayWideTarget() {
+  return CaptureTargetIdentity{
+      0,
+      0,
+      0,
+      1,
+      400,
+      std::wstring(L"\\\\.\\DISPLAY1"),
+      CaptureAuthorizationScope::kDisplayWide,
+  };
+}
+
 RuntimeAuthorization AllowedAuthorization(uint64_t revision,
                                           const CaptureTargetIdentity& target) {
   return RuntimeAuthorization{AllowedPrivacy(revision), target};
@@ -108,6 +122,7 @@ CaptureWorkerConfiguration TestConfiguration() {
   configuration.maximum_height = 2;
   configuration.acquire_timeout_ms = 0;
   configuration.topology_retry_ms = 5;
+  configuration.topology_retry_limit = 4;
   configuration.rollback_retry_limit = 3;
   configuration.rollback_retry_delay_ms = 0;
   configuration.average_bitrate = 1'000;
@@ -269,9 +284,15 @@ class FakeBackend final : public CaptureWorkerBackend {
     if (frame == nullptr) {
       return CaptureWorkerBackendResult::kInternalFailure;
     }
+    const CaptureWorkerBackendResult result = acquire_result.load();
+    if (result != CaptureWorkerBackendResult::kOk) {
+      signals_.Notify();
+      return result;
+    }
     frame->width = 2;
     frame->height = 2;
     frame->pixels.assign(16, 0x2A);
+    AdvanceClocks(acquire_clock_advance_ms.load());
     InvalidateAt(FaultStage::kAcquire);
     signals_.Notify();
     return CaptureWorkerBackendResult::kOk;
@@ -290,6 +311,7 @@ class FakeBackend final : public CaptureWorkerBackend {
       return CaptureWorkerBackendResult::kInternalFailure;
     }
     *destination = source;
+    AdvanceClocks(transform_clock_advance_ms.load());
     InvalidateAt(FaultStage::kTransform);
     signals_.Notify();
     return CaptureWorkerBackendResult::kOk;
@@ -333,6 +355,7 @@ class FakeBackend final : public CaptureWorkerBackend {
       return CaptureWorkerBackendResult::kEncoderFailure;
     }
     encoded_mp4->assign({0x00, 0x00, 0x00, 0x01});
+    AdvanceClocks(finalize_clock_advance_ms.load());
     InvalidateAt(FaultStage::kFinalize);
     signals_.Notify();
     return CaptureWorkerBackendResult::kOk;
@@ -392,10 +415,15 @@ class FakeBackend final : public CaptureWorkerBackend {
           gate_changed_.wait_for(lock, std::chrono::milliseconds(2'000),
                                  [this] { return steady_now_released_; }));
     }
-    return steady_now_ms;
+    const int64_t value = steady_now_ms.load();
+    observed_steady_now_ms.store(value);
+    signals_.Notify();
+    return value;
   }
 
-  int64_t UnixNowMilliseconds() noexcept override { return unix_now_ms; }
+  int64_t UnixNowMilliseconds() noexcept override {
+    return unix_now_ms.load();
+  }
 
   void ShutdownThread() noexcept override {
     shutdown_calls.fetch_add(1);
@@ -405,6 +433,11 @@ class FakeBackend final : public CaptureWorkerBackend {
   bool WaitForEncodeCount(uint32_t count) {
     return signals_.WaitFor(
         [this, count] { return encode_calls.load() >= count; });
+  }
+
+  bool WaitForAcquireCount(uint32_t count) {
+    return signals_.WaitFor(
+        [this, count] { return acquire_calls.load() >= count; });
   }
 
   bool WaitForAcknowledgeCount(uint32_t count) {
@@ -422,6 +455,11 @@ class FakeBackend final : public CaptureWorkerBackend {
   bool WaitForSteadyNowCount(uint32_t count) {
     return signals_.WaitFor(
         [this, count] { return steady_now_calls.load() >= count; });
+  }
+
+  bool WaitForObservedSteadyNow(int64_t value) {
+    return signals_.WaitFor(
+        [this, value] { return observed_steady_now_ms.load() == value; });
   }
 
   bool WaitForResetChunkCount(uint32_t count) {
@@ -465,8 +503,15 @@ class FakeBackend final : public CaptureWorkerBackend {
   bool always_fail_rollback = false;
   bool block_first_encode = false;
   uint32_t blocked_steady_now_call = 0;
-  int64_t steady_now_ms = 1'000;
-  int64_t unix_now_ms = 1'700'000'000'000;
+  std::atomic<CaptureWorkerBackendResult> acquire_result{
+      CaptureWorkerBackendResult::kOk};
+  std::atomic<int64_t> acquire_clock_advance_ms{0};
+  std::atomic<int64_t> finalize_clock_advance_ms{0};
+  std::atomic<int64_t> transform_clock_advance_ms{0};
+  std::atomic<int64_t> steady_now_ms{1'000};
+  std::atomic<int64_t> unix_now_ms{1'700'000'000'000};
+  std::atomic<int64_t> observed_steady_now_ms{
+      std::numeric_limits<int64_t>::min()};
 
   std::atomic<uint32_t> observe_calls{0};
   std::atomic<uint32_t> initialize_calls{0};
@@ -483,6 +528,13 @@ class FakeBackend final : public CaptureWorkerBackend {
   std::atomic<uint32_t> shutdown_calls{0};
 
  private:
+  void AdvanceClocks(int64_t advance_ms) noexcept {
+    if (advance_ms > 0) {
+      steady_now_ms.fetch_add(advance_ms);
+      unix_now_ms.fetch_add(advance_ms);
+    }
+  }
+
   void InvalidateAt(FaultStage stage) noexcept {
     if (fault_stage == stage && !invalidation_fired_.exchange(true)) {
       if (request_provisional_pause_on_invalidation &&
@@ -641,15 +693,140 @@ bool StopAfterFirstFrame(WorkerFixture& fixture) {
              CaptureRuntimeWaitResult::kStopped;
 }
 
+bool TestBoundaryFrameStartsNextChunk() {
+  CaptureWorkerConfiguration configuration;
+  WorkerFixture fixture(8, nullptr, configuration);
+  constexpr int64_t kScheduleStartSteadyMs = 1'000;
+  constexpr int64_t kScheduleStartUnixMs = 1'700'000'000'000;
+  constexpr int64_t kFirstFrameDelayMs = 7;
+  constexpr int64_t kFirstFrameSteadyMs =
+      kScheduleStartSteadyMs + kFirstFrameDelayMs;
+  constexpr int64_t kFirstFrameUnixMs =
+      kScheduleStartUnixMs + kFirstFrameDelayMs;
+  constexpr int64_t kCaptureIntervalMs = 10'000;
+  constexpr int64_t kChunkDurationMs = 60'000;
+  constexpr int64_t kFinalizationDelayMs = 500;
+  constexpr int64_t kSecondChunkSteadyMs =
+      kFirstFrameSteadyMs + kChunkDurationMs + kFinalizationDelayMs;
+  constexpr int64_t kSecondChunkUnixMs =
+      kFirstFrameUnixMs + kChunkDurationMs + kFinalizationDelayMs;
+  fixture.backend.acquire_clock_advance_ms.store(3);
+  fixture.backend.transform_clock_advance_ms.store(4);
+  fixture.backend.finalize_clock_advance_ms.store(kFinalizationDelayMs);
+  if (!Expect(fixture.Authorize(1) && fixture.Start(),
+              "chunk-boundary worker could not start") ||
+      !Expect(fixture.backend.WaitForEncodeCount(1),
+              "chunk-boundary worker did not encode its first frame")) {
+    return false;
+  }
+  fixture.backend.acquire_clock_advance_ms.store(0);
+  fixture.backend.transform_clock_advance_ms.store(0);
+
+  for (uint32_t frame_count = 2; frame_count <= 6; ++frame_count) {
+    const int64_t frame_offset_ms =
+        static_cast<int64_t>(frame_count - 1U) * kCaptureIntervalMs;
+    fixture.backend.steady_now_ms.store(kFirstFrameSteadyMs + frame_offset_ms);
+    fixture.backend.unix_now_ms.store(kFirstFrameUnixMs + frame_offset_ms);
+    fixture.runtime.NotifyAuthorizationChanged();
+    if (!Expect(fixture.backend.WaitForEncodeCount(frame_count),
+                "chunk-boundary worker missed a pre-boundary frame")) {
+      return false;
+    }
+  }
+
+  fixture.backend.steady_now_ms.store(kScheduleStartSteadyMs +
+                                      kChunkDurationMs);
+  fixture.backend.unix_now_ms.store(kScheduleStartUnixMs + kChunkDurationMs);
+  fixture.runtime.NotifyAuthorizationChanged();
+  if (!Expect(fixture.backend.WaitForObservedSteadyNow(
+                  kScheduleStartSteadyMs + kChunkDurationMs),
+              "chunk-boundary worker did not evaluate the stale schedule") ||
+      !Expect(fixture.backend.acquire_calls.load() == 6 &&
+                  fixture.backend.encode_calls.load() == 6,
+              "pre-anchor schedule admitted a seventh frame")) {
+    return false;
+  }
+
+  fixture.backend.steady_now_ms.store(kFirstFrameSteadyMs +
+                                      kChunkDurationMs);
+  fixture.backend.unix_now_ms.store(kFirstFrameUnixMs + kChunkDurationMs);
+  fixture.runtime.NotifyAuthorizationChanged();
+  if (!Expect(fixture.backend.WaitForAcknowledgeCount(1),
+              "chunk-boundary worker did not commit its first chunk") ||
+      !Expect(fixture.backend.WaitForEncodeCount(7),
+              "chunk-boundary frame was not encoded")) {
+    return false;
+  }
+
+  fixture.backend.steady_now_ms.store(kFirstFrameSteadyMs +
+                                      kChunkDurationMs + kCaptureIntervalMs);
+  fixture.backend.unix_now_ms.store(kFirstFrameUnixMs + kChunkDurationMs +
+                                    kCaptureIntervalMs);
+  fixture.runtime.NotifyAuthorizationChanged();
+  if (!Expect(fixture.backend.WaitForObservedSteadyNow(
+                  kFirstFrameSteadyMs + kChunkDurationMs +
+                  kCaptureIntervalMs),
+              "second chunk did not evaluate the stale frame deadline") ||
+      !Expect(fixture.backend.acquire_calls.load() == 7 &&
+                  fixture.backend.encode_calls.load() == 7,
+              "second chunk retained the previous frame deadline")) {
+    return false;
+  }
+
+  fixture.backend.steady_now_ms.store(kSecondChunkSteadyMs +
+                                      kCaptureIntervalMs);
+  fixture.backend.unix_now_ms.store(kSecondChunkUnixMs + kCaptureIntervalMs);
+  fixture.runtime.NotifyAuthorizationChanged();
+  if (!Expect(fixture.backend.WaitForEncodeCount(8),
+              "second chunk missed its reanchored frame deadline")) {
+    return false;
+  }
+
+  if (!Expect(fixture.runtime.RequestStop() ==
+                      CaptureRuntimeStopResult::kStopRequested &&
+                  fixture.runtime.WaitStopped(kTestTimeoutMs) ==
+                      CaptureRuntimeWaitResult::kStopped,
+              "chunk-boundary worker did not stop")) {
+    return false;
+  }
+
+  const std::vector<ChunkManifest> manifests = fixture.backend.Manifests();
+  const auto result = fixture.worker.last_result();
+  return Expect(result.reason == CaptureWorkerExitReason::kStopped &&
+                    result.encoded_frames == 8 &&
+                    result.committed_chunks == 2,
+                "chunk-boundary worker reported incorrect progress") &&
+         Expect(manifests.size() == 2 && manifests[0].frame_count == 6 &&
+                    manifests[0].end_time_unix_ms -
+                            manifests[0].start_time_unix_ms ==
+                        kChunkDurationMs &&
+                    manifests[1].frame_count == 2 &&
+                    manifests[0].end_time_unix_ms <=
+                        manifests[1].start_time_unix_ms &&
+                    manifests[1].start_time_unix_ms -
+                            manifests[0].end_time_unix_ms ==
+                        kFinalizationDelayMs,
+                "boundary frame was written into the completed chunk") &&
+         Expect(fixture.backend.begin_calls.load() == 2 &&
+                    fixture.backend.finalize_calls.load() == 2,
+                "chunk boundary did not create exactly two writers");
+}
+
 bool TestCheckpointOrderAndCleanup() {
   WorkerFixture fixture;
   CheckpointLog checkpoints;
-  std::atomic<bool> ready_after_initialize{false};
+  std::atomic<bool> ready_after_first_frame{false};
   std::atomic<bool> paused_after_cleanup{false};
   CaptureWorkerCheckpointSink sink = [&](const CaptureWorkerCheckpoint& value) {
     if (value.kind == CaptureWorkerCheckpointKind::kReady) {
-      ready_after_initialize.store(
-          fixture.backend.initialize_calls.load(std::memory_order_acquire) > 0,
+      ready_after_first_frame.store(
+          fixture.backend.initialize_calls.load(std::memory_order_acquire) > 0 &&
+              fixture.backend.acquire_calls.load(std::memory_order_acquire) >
+                  0 &&
+              fixture.backend.transform_calls.load(std::memory_order_acquire) >
+                  0 &&
+              fixture.backend.begin_calls.load(std::memory_order_acquire) > 0 &&
+              fixture.backend.encode_calls.load(std::memory_order_acquire) > 0,
           std::memory_order_release);
     } else {
       paused_after_cleanup.store(fixture.backend.reset_acquisition_calls.load(
@@ -693,10 +870,258 @@ bool TestCheckpointOrderAndCleanup() {
                         CaptureWorkerCheckpoint{
                             CaptureWorkerCheckpointKind::kReady, 0},
                 "checkpoint order was not Ready, Paused(1), Ready") &&
-         Expect(ready_after_initialize.load(std::memory_order_acquire),
-                "ready checkpoint preceded acquisition initialization") &&
+         Expect(ready_after_first_frame.load(std::memory_order_acquire),
+                "ready checkpoint preceded the first encoded frame") &&
          Expect(paused_after_cleanup.load(std::memory_order_acquire),
                 "paused checkpoint preceded chunk/acquisition cleanup");
+}
+
+bool TestTimeoutDoesNotPublishReady() {
+  WorkerFixture fixture;
+  CheckpointLog checkpoints;
+  fixture.backend.acquire_result.store(CaptureWorkerBackendResult::kTimeout);
+  CaptureWorkerCheckpointSink sink = [&](const CaptureWorkerCheckpoint& value) {
+    return checkpoints.Push(value);
+  };
+  if (!Expect(fixture.Authorize(1) && fixture.Start(std::move(sink)),
+              "timeout checkpoint worker could not start") ||
+      !Expect(fixture.backend.WaitForAcquireCount(1),
+              "timeout checkpoint worker did not attempt acquisition")) {
+    return false;
+  }
+
+  const uint32_t steady_now_count = fixture.backend.steady_now_calls.load();
+  if (!Expect(fixture.backend.WaitForSteadyNowCount(steady_now_count + 1U),
+              "timeout checkpoint worker did not leave acquisition")) {
+    return false;
+  }
+  const bool no_ready = checkpoints.Values().empty();
+  const bool stopped =
+      fixture.runtime.RequestStop() ==
+          CaptureRuntimeStopResult::kStopRequested &&
+      fixture.runtime.WaitStopped(kTestTimeoutMs) ==
+          CaptureRuntimeWaitResult::kStopped;
+  const auto result = fixture.worker.last_result();
+  return Expect(no_ready, "acquisition timeout published a ready checkpoint") &&
+         Expect(stopped, "timeout checkpoint worker did not stop") &&
+         Expect(result.reason == CaptureWorkerExitReason::kStopped &&
+                    result.encoded_frames == 0 &&
+                    fixture.backend.transform_calls.load() == 0 &&
+                    fixture.backend.begin_calls.load() == 0,
+                "timeout checkpoint worker advanced before a frame existed");
+}
+
+bool TestFirstSuccessfulFrameReanchorsAfterTimeouts() {
+  CaptureWorkerConfiguration configuration;
+  WorkerFixture fixture(8, nullptr, configuration);
+  constexpr int64_t kScheduleStartSteadyMs = 1'000;
+  constexpr int64_t kScheduleStartUnixMs = 1'700'000'000'000;
+  constexpr int64_t kCaptureIntervalMs = 10'000;
+  constexpr int64_t kFrameDelayMs = 7;
+  constexpr int64_t kFirstFrameAttemptSteadyMs =
+      kScheduleStartSteadyMs + (2 * kCaptureIntervalMs);
+  constexpr int64_t kFirstFrameSteadyMs =
+      kFirstFrameAttemptSteadyMs + kFrameDelayMs;
+  fixture.backend.acquire_result.store(CaptureWorkerBackendResult::kTimeout);
+  if (!Expect(fixture.Authorize(1) && fixture.Start(),
+              "timeout-reanchor worker could not start") ||
+      !Expect(fixture.backend.WaitForAcquireCount(1),
+              "timeout-reanchor worker missed its first attempt")) {
+    return false;
+  }
+
+  fixture.backend.steady_now_ms.store(kScheduleStartSteadyMs +
+                                      kCaptureIntervalMs);
+  fixture.backend.unix_now_ms.store(kScheduleStartUnixMs + kCaptureIntervalMs);
+  fixture.runtime.NotifyAuthorizationChanged();
+  if (!Expect(fixture.backend.WaitForAcquireCount(2),
+              "timeout-reanchor worker missed its second attempt")) {
+    return false;
+  }
+
+  fixture.backend.acquire_result.store(CaptureWorkerBackendResult::kOk);
+  fixture.backend.acquire_clock_advance_ms.store(3);
+  fixture.backend.transform_clock_advance_ms.store(4);
+  fixture.backend.steady_now_ms.store(kFirstFrameAttemptSteadyMs);
+  fixture.backend.unix_now_ms.store(kScheduleStartUnixMs +
+                                    (2 * kCaptureIntervalMs));
+  fixture.runtime.NotifyAuthorizationChanged();
+  if (!Expect(fixture.backend.WaitForEncodeCount(1),
+              "timeout-reanchor worker did not encode its first frame")) {
+    return false;
+  }
+  fixture.backend.acquire_clock_advance_ms.store(0);
+  fixture.backend.transform_clock_advance_ms.store(0);
+
+  fixture.backend.steady_now_ms.store(kFirstFrameAttemptSteadyMs +
+                                      kCaptureIntervalMs);
+  fixture.backend.unix_now_ms.store(kScheduleStartUnixMs +
+                                    (3 * kCaptureIntervalMs));
+  fixture.runtime.NotifyAuthorizationChanged();
+  if (!Expect(fixture.backend.WaitForObservedSteadyNow(
+                  kFirstFrameAttemptSteadyMs + kCaptureIntervalMs),
+              "timeout-reanchor worker did not evaluate its stale deadline") ||
+      !Expect(fixture.backend.acquire_calls.load() == 3 &&
+                  fixture.backend.encode_calls.load() == 1,
+              "a timeout or stale deadline reanchored the frame schedule")) {
+    return false;
+  }
+
+  fixture.backend.steady_now_ms.store(kFirstFrameSteadyMs +
+                                      kCaptureIntervalMs);
+  fixture.backend.unix_now_ms.store(kScheduleStartUnixMs +
+                                    (3 * kCaptureIntervalMs) + kFrameDelayMs);
+  fixture.runtime.NotifyAuthorizationChanged();
+  if (!Expect(fixture.backend.WaitForEncodeCount(2),
+              "timeout-reanchor worker missed the first anchored interval")) {
+    return false;
+  }
+
+  const bool stopped =
+      fixture.runtime.RequestStop() ==
+          CaptureRuntimeStopResult::kStopRequested &&
+      fixture.runtime.WaitStopped(kTestTimeoutMs) ==
+          CaptureRuntimeWaitResult::kStopped;
+  const auto result = fixture.worker.last_result();
+  return Expect(stopped, "timeout-reanchor worker did not stop") &&
+         Expect(result.reason == CaptureWorkerExitReason::kStopped &&
+                    result.encoded_frames == 2 &&
+                    result.committed_chunks == 1,
+                "timeout-reanchor worker reported incorrect progress");
+}
+
+bool TestFirstFrameFailureDoesNotPublishReady() {
+  WorkerFixture fixture;
+  CheckpointLog checkpoints;
+  fixture.backend.acquire_result.store(
+      CaptureWorkerBackendResult::kDeviceUnavailable);
+  CaptureWorkerCheckpointSink sink = [&](const CaptureWorkerCheckpoint& value) {
+    return checkpoints.Push(value);
+  };
+  if (!Expect(fixture.Authorize(1) && fixture.Start(std::move(sink)),
+              "first-frame failure worker could not start") ||
+      !Expect(fixture.runtime.WaitStopped(kTestTimeoutMs) ==
+                  CaptureRuntimeWaitResult::kStopped,
+              "first-frame failure worker did not exit")) {
+    return false;
+  }
+
+  const auto result = fixture.worker.last_result();
+  return Expect(checkpoints.Values().empty(),
+                "first-frame failure published a ready checkpoint") &&
+         Expect(result.reason == CaptureWorkerExitReason::kDeviceFailure &&
+                    result.encoded_frames == 0 &&
+                    fixture.backend.transform_calls.load() == 0 &&
+                    fixture.backend.begin_calls.load() == 0,
+                "first-frame failure advanced or reported the wrong result");
+}
+
+bool TestFirstFramePublishesReadyExactlyOnce() {
+  WorkerFixture fixture;
+  CheckpointLog checkpoints;
+  std::atomic<bool> ready_after_first_frame{false};
+  CaptureWorkerCheckpointSink sink = [&](const CaptureWorkerCheckpoint& value) {
+    if (value.kind == CaptureWorkerCheckpointKind::kReady) {
+      ready_after_first_frame.store(
+          fixture.backend.acquire_calls.load(std::memory_order_acquire) > 0 &&
+              fixture.backend.transform_calls.load(std::memory_order_acquire) >
+                  0 &&
+              fixture.backend.begin_calls.load(std::memory_order_acquire) > 0 &&
+              fixture.backend.encode_calls.load(std::memory_order_acquire) > 0,
+          std::memory_order_release);
+    }
+    return checkpoints.Push(value);
+  };
+  if (!Expect(fixture.Authorize(1) && fixture.Start(std::move(sink)),
+              "single-ready worker could not start") ||
+      !Expect(checkpoints.WaitForSize(1),
+              "single-ready worker did not publish its first checkpoint")) {
+    return false;
+  }
+
+  fixture.backend.steady_now_ms.store(1'250);
+  fixture.runtime.NotifyAuthorizationChanged();
+  if (!Expect(fixture.backend.WaitForEncodeCount(2),
+              "single-ready worker did not encode a second frame")) {
+    return false;
+  }
+
+  const bool stopped =
+      fixture.runtime.RequestStop() ==
+          CaptureRuntimeStopResult::kStopRequested &&
+      fixture.runtime.WaitStopped(kTestTimeoutMs) ==
+          CaptureRuntimeWaitResult::kStopped;
+  const std::vector<CaptureWorkerCheckpoint> values = checkpoints.Values();
+  return Expect(ready_after_first_frame.load(std::memory_order_acquire),
+                "ready checkpoint preceded the first encoded frame") &&
+         Expect(values.size() == 1 &&
+                    values[0] == CaptureWorkerCheckpoint{
+                                     CaptureWorkerCheckpointKind::kReady, 0},
+                "one token published more than one ready checkpoint") &&
+         Expect(stopped, "single-ready worker did not stop");
+}
+
+bool TestResumeWaitsForFreshFrameBeforeReady() {
+  WorkerFixture fixture;
+  CheckpointLog checkpoints;
+  CaptureWorkerCheckpointSink sink = [&](const CaptureWorkerCheckpoint& value) {
+    return checkpoints.Push(value);
+  };
+  if (!Expect(fixture.Authorize(1) && fixture.Start(std::move(sink)),
+              "resume-ready worker could not start") ||
+      !Expect(checkpoints.WaitForSize(1),
+              "resume-ready worker did not publish its initial ready") ||
+      !Expect(fixture.runtime.RequestPause() ==
+                  CaptureRuntimePauseResult::kPauseRequested,
+              "resume-ready pause was rejected") ||
+      !Expect(checkpoints.WaitForSize(2),
+              "resume-ready worker did not publish paused")) {
+    return false;
+  }
+
+  fixture.backend.acquire_result.store(CaptureWorkerBackendResult::kTimeout);
+  const uint32_t acquire_count = fixture.backend.acquire_calls.load();
+  if (!Expect(fixture.Authorize(2) && fixture.Resume(),
+              "resume-ready worker could not resume") ||
+      !Expect(fixture.backend.WaitForAcquireCount(acquire_count + 1U),
+              "resumed token did not attempt a fresh acquisition")) {
+    return false;
+  }
+
+  const uint32_t steady_now_count = fixture.backend.steady_now_calls.load();
+  if (!Expect(fixture.backend.WaitForSteadyNowCount(steady_now_count + 1U),
+              "resumed token did not leave its timed-out acquisition")) {
+    return false;
+  }
+  const bool no_early_ready = checkpoints.Values().size() == 2 &&
+                              fixture.backend.encode_calls.load() == 1;
+  fixture.backend.acquire_result.store(CaptureWorkerBackendResult::kOk);
+  fixture.backend.steady_now_ms.store(1'250);
+  fixture.runtime.NotifyAuthorizationChanged();
+  if (!Expect(checkpoints.WaitForSize(3),
+              "fresh resumed frame did not publish ready") ||
+      !Expect(fixture.backend.WaitForEncodeCount(2),
+              "fresh resumed frame was not encoded")) {
+    return false;
+  }
+
+  const bool stopped =
+      fixture.runtime.RequestStop() ==
+          CaptureRuntimeStopResult::kStopRequested &&
+      fixture.runtime.WaitStopped(kTestTimeoutMs) ==
+          CaptureRuntimeWaitResult::kStopped;
+  const std::vector<CaptureWorkerCheckpoint> values = checkpoints.Values();
+  return Expect(no_early_ready,
+                "Resume published ready before its token encoded a frame") &&
+         Expect(values.size() == 3 &&
+                    values[0] == CaptureWorkerCheckpoint{
+                                     CaptureWorkerCheckpointKind::kReady, 0} &&
+                    values[1] == CaptureWorkerCheckpoint{
+                                     CaptureWorkerCheckpointKind::kPaused, 1} &&
+                    values[2] == CaptureWorkerCheckpoint{
+                                     CaptureWorkerCheckpointKind::kReady, 0},
+                "Resume did not publish Ready, Paused, Ready") &&
+         Expect(stopped, "resume-ready worker did not stop");
 }
 
 bool TestReadyCheckpointRunsAfterPermitRelease() {
@@ -757,7 +1182,8 @@ bool TestProvisionalPauseRecoversAuthorizationLossAtCriticalStages() {
     }
 
     const size_t paused_checkpoint_count =
-        stage == FaultStage::kInitialize ? 1U : 2U;
+        stage == FaultStage::kInitialize || stage == FaultStage::kAcquire ? 1U
+                                                                         : 2U;
     if (!Expect(checkpoints.WaitForSize(paused_checkpoint_count),
                 "authorization loss did not reach a paused checkpoint")) {
       return false;
@@ -1343,6 +1769,44 @@ bool TestAuthorizationNotificationWakesLongWait() {
                 "authorization wakeup published stale output");
 }
 
+bool TestDisplayWideForegroundSwitchKeepsCurrentChunk() {
+  WorkerFixture fixture;
+  fixture.target = TestDisplayWideTarget();
+  if (!Expect(fixture.Authorize(1) && fixture.Start(),
+              "display-wide worker could not start") ||
+      !Expect(fixture.backend.WaitForEncodeCount(1),
+              "display-wide worker did not encode its first frame")) {
+    return false;
+  }
+
+  fixture.backend.steady_now_ms.store(1'250);
+  fixture.backend.unix_now_ms.store(1'700'000'000'250);
+  fixture.runtime.NotifyAuthorizationChanged();
+  if (!Expect(fixture.backend.WaitForEncodeCount(2),
+              "foreground switch notification interrupted display-wide capture") ||
+      !Expect(fixture.backend.finalize_calls.load() == 0 &&
+                  fixture.backend.reset_chunk_calls.load() == 0 &&
+                  fixture.backend.reset_acquisition_calls.load() == 0,
+              "foreground switch split or reset the display-wide chunk")) {
+    return false;
+  }
+
+  const bool stopped =
+      fixture.runtime.RequestStop() ==
+          CaptureRuntimeStopResult::kStopRequested &&
+      fixture.runtime.WaitStopped(kTestTimeoutMs) ==
+          CaptureRuntimeWaitResult::kStopped;
+  const auto manifests = fixture.backend.Manifests();
+  const auto result = fixture.worker.last_result();
+  return Expect(stopped, "display-wide worker did not stop") &&
+         Expect(result.reason == CaptureWorkerExitReason::kStopped &&
+                    result.encoded_frames == 2 &&
+                    result.committed_chunks == 1,
+                "display-wide worker did not commit one continuous chunk") &&
+         Expect(manifests.size() == 1 && manifests[0].display_wide_scope,
+                "display-wide worker persisted the wrong capture scope");
+}
+
 bool TestTopologyRebuildRecovers() {
   WorkerFixture fixture;
   fixture.backend.rebuild_initializations = 1;
@@ -1363,10 +1827,40 @@ bool TestTopologyRebuildRecovers() {
                 "topology rebuild did not resume chunk publication");
 }
 
+bool TestTopologyRebuildBudgetExhausts() {
+  CaptureWorkerConfiguration configuration = TestConfiguration();
+  configuration.topology_retry_ms = 0;
+  configuration.topology_retry_limit = 2;
+  WorkerFixture fixture(8, nullptr, configuration);
+  fixture.backend.rebuild_initializations = 3;
+  if (!Expect(fixture.Authorize(1) && fixture.Start(),
+              "topology-budget worker could not start") ||
+      !Expect(fixture.runtime.WaitStopped(kTestTimeoutMs) ==
+                  CaptureRuntimeWaitResult::kStopped,
+              "topology-budget worker did not stop after its retry budget")) {
+    return false;
+  }
+
+  const auto result = fixture.worker.last_result();
+  return Expect(fixture.backend.initialize_calls.load() == 3,
+                "topology rebuild exceeded its configured retry budget") &&
+         Expect(result.reason == CaptureWorkerExitReason::kDeviceFailure &&
+                    result.error == WDF_CAPTURE_ERROR_DEVICE_UNAVAILABLE &&
+                    result.encoded_frames == 0 &&
+                    result.committed_chunks == 0 && fixture.events.size() == 0,
+                "topology retry exhaustion reported the wrong result");
+}
+
 }  // namespace
 
 int main() {
-  if (!TestCheckpointOrderAndCleanup() ||
+  if (!TestBoundaryFrameStartsNextChunk() ||
+      !TestCheckpointOrderAndCleanup() ||
+      !TestTimeoutDoesNotPublishReady() ||
+      !TestFirstSuccessfulFrameReanchorsAfterTimeouts() ||
+      !TestFirstFrameFailureDoesNotPublishReady() ||
+      !TestFirstFramePublishesReadyExactlyOnce() ||
+      !TestResumeWaitsForFreshFrameBeforeReady() ||
       !TestReadyCheckpointRunsAfterPermitRelease() ||
       !TestProvisionalPauseRecoversAuthorizationLossAtCriticalStages() ||
       !TestStopCommitsValidPartialChunk() ||
@@ -1382,7 +1876,9 @@ int main() {
       !TestTransientRollbackFailureRetries() ||
       !TestPermanentRollbackFailureCanBeRetriedExplicitly() ||
       !TestAuthorizationNotificationWakesLongWait() ||
-      !TestTopologyRebuildRecovers()) {
+      !TestDisplayWideForegroundSwitchKeepsCurrentChunk() ||
+      !TestTopologyRebuildRecovers() ||
+      !TestTopologyRebuildBudgetExhausts()) {
     return 1;
   }
   std::cout << "capture worker tests passed\n";

@@ -89,6 +89,7 @@ class CaptureSchedule {
 
   void Configure(const CapturePolicy& policy);
   void Reset(int64_t now_ms);
+  void ReanchorFrame(int64_t anchor_ms);
   CaptureScheduleDecision Poll(int64_t now_ms);
   int64_t DelayUntilNextMs(int64_t now_ms) const;
 

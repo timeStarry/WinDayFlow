@@ -11,8 +11,11 @@ public sealed class CaptureAwareWindowCloseCoordinatorTests
         var operations = new List<string>();
         var stopStarted = NewCompletionSource();
         var releaseStop = NewCompletionSource();
+        var releaseShutdown = NewCompletionSource();
+        var shutdownStarted = NewCompletionSource();
         var closeRequested = NewCompletionSource();
         var stopCalls = 0;
+        var shutdownCalls = 0;
         bool? retryWasCanceled = null;
         CaptureAwareWindowCloseCoordinator? coordinator = null;
         coordinator = new CaptureAwareWindowCloseCoordinator(
@@ -23,6 +26,14 @@ public sealed class CaptureAwareWindowCloseCoordinatorTests
                 stopStarted.TrySetResult();
                 await releaseStop.Task.WaitAsync(cancellationToken);
                 operations.Add("stop-completed");
+            },
+            async () =>
+            {
+                Interlocked.Increment(ref shutdownCalls);
+                operations.Add("shutdown-started");
+                shutdownStarted.TrySetResult();
+                await releaseShutdown.Task;
+                operations.Add("shutdown-completed");
             },
             () =>
             {
@@ -39,11 +50,24 @@ public sealed class CaptureAwareWindowCloseCoordinatorTests
         Assert.Equal(["stop-started"], operations);
 
         releaseStop.TrySetResult();
+        await shutdownStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.True(coordinator.ShouldCancelClose());
+        Assert.False(closeRequested.Task.IsCompleted);
+        Assert.Equal(1, Volatile.Read(ref shutdownCalls));
+
+        releaseShutdown.TrySetResult();
         await closeRequested.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
         Assert.False(retryWasCanceled);
         Assert.Equal(
-            ["stop-started", "stop-completed", "close-requested"],
+            [
+                "stop-started",
+                "stop-completed",
+                "shutdown-started",
+                "shutdown-completed",
+                "close-requested",
+            ],
             operations);
     }
 
@@ -65,6 +89,7 @@ public sealed class CaptureAwareWindowCloseCoordinatorTests
                 await releaseFailure.Task;
                 throw failure;
             },
+            () => Task.CompletedTask,
             () =>
             {
                 retryWasCanceled = coordinator!.ShouldCancelClose();
@@ -104,6 +129,7 @@ public sealed class CaptureAwareWindowCloseCoordinatorTests
                 stopStarted.TrySetResult();
                 return stopCompletion.Task;
             },
+            () => Task.CompletedTask,
             () =>
             {
                 retryWasCanceled = coordinator!.ShouldCancelClose();
@@ -155,6 +181,7 @@ public sealed class CaptureAwareWindowCloseCoordinatorTests
                     stopExited.TrySetResult();
                 }
             },
+            () => Task.CompletedTask,
             () =>
             {
                 retryWasCanceled = coordinator!.ShouldCancelClose();
@@ -183,6 +210,33 @@ public sealed class CaptureAwareWindowCloseCoordinatorTests
             releaseStop.Set();
             await stopExited.Task.WaitAsync(TimeSpan.FromSeconds(5));
         }
+    }
+
+    [Fact]
+    public async Task ShutdownFailureIsReportedUnchangedBeforeClose()
+    {
+        var failure = new InvalidOperationException("wait_stopped failed");
+        var reported = new TaskCompletionSource<Exception>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var closeRequested = NewCompletionSource();
+        bool? retryWasCanceled = null;
+        CaptureAwareWindowCloseCoordinator? coordinator = null;
+        coordinator = new CaptureAwareWindowCloseCoordinator(
+            _ => Task.CompletedTask,
+            () => Task.FromException(failure),
+            () =>
+            {
+                retryWasCanceled = coordinator!.ShouldCancelClose();
+                closeRequested.TrySetResult();
+            },
+            exception => reported.TrySetResult(exception));
+
+        Assert.True(coordinator.ShouldCancelClose());
+        var actualFailure = await reported.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await closeRequested.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Same(failure, actualFailure);
+        Assert.False(retryWasCanceled);
     }
 
     private static TaskCompletionSource NewCompletionSource() => new(

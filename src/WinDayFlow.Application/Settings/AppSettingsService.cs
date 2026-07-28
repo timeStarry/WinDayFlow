@@ -185,6 +185,30 @@ public sealed class AppSettingsService : IDisposable
             cancellationToken);
     }
 
+    public Task SetCaptureApplicationPrivacyModeAsync(
+        CaptureApplicationPrivacyMode applicationPrivacyMode,
+        CancellationToken cancellationToken = default)
+    {
+        return UpdateAsync(
+            current =>
+            {
+                var privacy = current.CapturePrivacy.ChangeApplicationPrivacyMode(
+                    applicationPrivacyMode);
+                if (privacy == current.CapturePrivacy)
+                {
+                    return current;
+                }
+
+                return new AppSettings(
+                    current.Theme,
+                    CaptureEnabled: false,
+                    current.CloudAnalysisEnabled,
+                    current.RecordingConsent,
+                    privacy);
+            },
+            cancellationToken);
+    }
+
     public async Task<CaptureExclusionRule> AddCaptureExclusionRuleAsync(
         CaptureExclusionRule rule,
         CancellationToken cancellationToken = default)

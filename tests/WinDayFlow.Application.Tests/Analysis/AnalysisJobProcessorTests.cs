@@ -672,6 +672,14 @@ public sealed class AnalysisJobProcessorTests
             CancellationToken cancellationToken = default) =>
             Task.FromResult<AnalysisJob?>(null);
 
+        public Task<AnalysisJobRetryResult> TryRetryAsync(
+            Guid jobId,
+            DateTimeOffset requestedAtUtc,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult(new AnalysisJobRetryResult(
+                AnalysisJobRetryOutcome.StateNotRetryable,
+                Job: null));
+
         public Task<int> RecoverExpiredLeasesAsync(
             DateTimeOffset recoveredAtUtc,
             TimeSpan retryDelay,

@@ -6,11 +6,15 @@
 #include <string_view>
 
 #include "capture_worker.h"
+#include "dxgi_desktop_frame_source.h"
 
 namespace windayflow::capture {
 
 bool TryConvertCaptureOutputDirectory(std::string_view utf8,
                                       std::wstring* utf16) noexcept;
+
+bool ShouldFallbackToWindowsGraphicsCapture(
+    DxgiDesktopFrameResult result) noexcept;
 
 std::unique_ptr<CaptureWorkerBackend> CreateWindowsCaptureWorkerBackend(
     std::wstring output_root) noexcept;

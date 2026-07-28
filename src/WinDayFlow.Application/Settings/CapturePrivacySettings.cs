@@ -6,7 +6,9 @@ public sealed record CapturePrivacySettings(
     bool PauseInRemoteSessions,
     bool PauseDuringScreenSharing,
     long Revision,
-    CaptureExclusionRuleSet ExclusionRules)
+    CaptureExclusionRuleSet ExclusionRules,
+    CaptureApplicationPrivacyMode ApplicationPrivacyMode =
+        CaptureApplicationPrivacyMode.ProtectByForegroundApplication)
 {
     public const int MinimumRetentionDays = 1;
     public const int MaximumRetentionDays = 365;
@@ -18,7 +20,9 @@ public sealed record CapturePrivacySettings(
         PauseInRemoteSessions: true,
         PauseDuringScreenSharing: true,
         Revision: 1,
-        ExclusionRules: CaptureExclusionRuleSet.Empty);
+        ExclusionRules: CaptureExclusionRuleSet.Empty,
+        ApplicationPrivacyMode:
+            CaptureApplicationPrivacyMode.ProtectByForegroundApplication);
 
     public CapturePrivacySettings(
         int EvidenceRetentionDays,
@@ -36,6 +40,24 @@ public sealed record CapturePrivacySettings(
     {
     }
 
+    public CapturePrivacySettings(
+        int EvidenceRetentionDays,
+        bool ExcludeSensitiveApplications,
+        bool PauseInRemoteSessions,
+        bool PauseDuringScreenSharing,
+        long Revision,
+        CaptureApplicationPrivacyMode ApplicationPrivacyMode)
+        : this(
+            EvidenceRetentionDays,
+            ExcludeSensitiveApplications,
+            PauseInRemoteSessions,
+            PauseDuringScreenSharing,
+            Revision,
+            CaptureExclusionRuleSet.Empty,
+            ApplicationPrivacyMode)
+    {
+    }
+
     public int EvidenceRetentionDays { get; } =
         ValidateRetentionDays(EvidenceRetentionDays);
 
@@ -49,6 +71,9 @@ public sealed record CapturePrivacySettings(
 
     public CaptureExclusionRuleSet ExclusionRules { get; } = ExclusionRules
         ?? throw new ArgumentNullException(nameof(ExclusionRules));
+
+    public CaptureApplicationPrivacyMode ApplicationPrivacyMode { get; } =
+        ValidateApplicationPrivacyMode(ApplicationPrivacyMode);
 
     public CapturePrivacySettings Change(
         int evidenceRetentionDays,
@@ -77,7 +102,27 @@ public sealed record CapturePrivacySettings(
             pauseInRemoteSessions,
             pauseDuringScreenSharing,
             Revision + 1,
-            ExclusionRules);
+            ExclusionRules,
+            ApplicationPrivacyMode);
+    }
+
+    public CapturePrivacySettings ChangeApplicationPrivacyMode(
+        CaptureApplicationPrivacyMode applicationPrivacyMode)
+    {
+        _ = ValidateApplicationPrivacyMode(applicationPrivacyMode);
+        if (applicationPrivacyMode == ApplicationPrivacyMode)
+        {
+            return this;
+        }
+
+        return new CapturePrivacySettings(
+            EvidenceRetentionDays,
+            ExcludeSensitiveApplications,
+            PauseInRemoteSessions,
+            PauseDuringScreenSharing,
+            NextRevision(),
+            ExclusionRules,
+            applicationPrivacyMode);
     }
 
     public CapturePrivacySettings ChangeRules(CaptureExclusionRuleSet exclusionRules)
@@ -97,7 +142,8 @@ public sealed record CapturePrivacySettings(
             PauseInRemoteSessions,
             PauseDuringScreenSharing,
             revision,
-            exclusionRules);
+            exclusionRules,
+            ApplicationPrivacyMode);
     }
 
     public bool HasSameEffectivePolicy(CapturePrivacySettings other)
@@ -107,6 +153,7 @@ public sealed record CapturePrivacySettings(
             && ExcludeSensitiveApplications == other.ExcludeSensitiveApplications
             && PauseInRemoteSessions == other.PauseInRemoteSessions
             && PauseDuringScreenSharing == other.PauseDuringScreenSharing
+            && ApplicationPrivacyMode == other.ApplicationPrivacyMode
             && ExclusionRules.HasSameEffectivePolicy(other.ExclusionRules);
     }
 
@@ -145,5 +192,19 @@ public sealed record CapturePrivacySettings(
         }
 
         return revision;
+    }
+
+    private static CaptureApplicationPrivacyMode ValidateApplicationPrivacyMode(
+        CaptureApplicationPrivacyMode applicationPrivacyMode)
+    {
+        if (!Enum.IsDefined(applicationPrivacyMode))
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(applicationPrivacyMode),
+                applicationPrivacyMode,
+                "The capture application privacy mode is not supported.");
+        }
+
+        return applicationPrivacyMode;
     }
 }
