@@ -787,7 +787,11 @@ void CaptureInstanceController::OnWorkerExited(
       run->worker_exited = true;
       run->worker_result = result;
       request_stop = !run->stop_requested;
-      run->fatal_exit = result.reason != CaptureWorkerExitReason::kStopped;
+      const bool authorization_lost =
+          result.reason == CaptureWorkerExitReason::kAuthorizationLost;
+      run->fatal_exit =
+          result.reason != CaptureWorkerExitReason::kStopped &&
+          !authorization_lost;
       if (run->fatal_exit && !run->error_published) {
         const wdf_capture_error error =
             result.error == WDF_CAPTURE_ERROR_NONE
@@ -807,8 +811,11 @@ void CaptureInstanceController::OnWorkerExited(
     }
     run->changed.notify_all();
     if (request_stop) {
-      static_cast<void>(
-          RequestStopCore(WDF_CAPTURE_REASON_BACKEND_FAULT, run_id));
+      const wdf_capture_reason reason =
+          result.reason == CaptureWorkerExitReason::kAuthorizationLost
+              ? WDF_CAPTURE_REASON_POLICY_BLOCKED
+              : WDF_CAPTURE_REASON_BACKEND_FAULT;
+      static_cast<void>(RequestStopCore(reason, run_id));
     }
   } catch (...) {
   }

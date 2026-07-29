@@ -830,8 +830,9 @@ public sealed class ConsentGatedCaptureService : ICaptureService, IDisposable
                 return null;
             }
 
-            if (_startupStartPending
-                && backendStatus.State == CaptureState.Stopped)
+            if (backendStatus.State == CaptureState.Stopped
+                && (_startupStartPending
+                    || IsAutomaticProtectionReason(backendStatus.Reason)))
             {
                 return CaptureAdmissionOperation.Start;
             }

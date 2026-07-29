@@ -51,6 +51,11 @@ class CaptureInstanceControllerTestPeer {
     return controller.runtime_.ReadControlSnapshot().pause_epoch;
   }
 
+  static uint64_t InvalidateAuthorizationWithoutPausing(
+      CaptureInstanceController& controller) {
+    return controller.safety_.InvalidateAuthorizationAdmission();
+  }
+
   static bool AppendRequiredEvent(CaptureInstanceController& controller) {
     CaptureEventReservation reservation =
         controller.events_.ReserveRequiredEvent();
@@ -1225,6 +1230,58 @@ bool TestFatalExitPublishesErrorWithoutFakeStopping() {
                 "fatal exit leaked join or event reservations");
 }
 
+bool TestAuthorizationLossStopsWithoutPublishingError() {
+  auto backend_state = std::make_shared<BackendState>();
+  CaptureInstanceControllerConfiguration configuration;
+  configuration.activation_mode = CaptureActivationMode::kEnabled;
+  configuration.event_queue_capacity = 16;
+  CaptureInstanceController controller(
+      configuration,
+      std::make_unique<TestBackend>(true, false, backend_state));
+  if (!ExpectState(controller, WDF_CAPTURE_STATE_STOPPED,
+                   "authorization-loss fixture omitted initial state")) {
+    return false;
+  }
+  uint64_t generation = 0;
+  if (!Expect(Authorize(controller, 1, &generation) &&
+                  StartEnabled(controller, generation),
+              "authorization-loss fixture did not start") ||
+      !ExpectState(controller, WDF_CAPTURE_STATE_STARTING,
+                   "authorization-loss fixture omitted STARTING") ||
+      !PublishReadyAndExpectRecording(
+          controller, "authorization-loss fixture omitted RECORDING") ||
+      !Expect(windayflow::capture::CaptureInstanceControllerTestPeer::
+                      InvalidateAuthorizationWithoutPausing(controller) != 0,
+              "authorization-loss fixture failed to close authorization")) {
+    return false;
+  }
+
+  const ReadEvent stopping = ReadOne(controller);
+  if (!Expect(stopping.result == CaptureEventReadResult::kSuccess &&
+                  stopping.event.kind == WDF_CAPTURE_EVENT_STATE_CHANGED &&
+                  stopping.event.state == WDF_CAPTURE_STATE_STOPPING &&
+                  stopping.event.reason == WDF_CAPTURE_REASON_POLICY_BLOCKED,
+              "authorization loss did not publish policy-blocked STOPPING") ||
+      !Expect(controller.WaitStopped(2'000) == WDF_CAPTURE_RESULT_OK,
+              "authorization loss did not stop cleanly")) {
+    return false;
+  }
+
+  const ReadEvent stopped = ReadOne(controller);
+  return Expect(stopped.result == CaptureEventReadResult::kSuccess &&
+                    stopped.event.kind == WDF_CAPTURE_EVENT_STATE_CHANGED &&
+                    stopped.event.state == WDF_CAPTURE_STATE_STOPPED &&
+                    stopped.event.reason == WDF_CAPTURE_REASON_POLICY_BLOCKED &&
+                    stopped.detail ==
+                        "Capture worker exited because runtime authorization was lost.",
+                "authorization loss omitted policy-blocked STOPPED") &&
+         Expect(ReadOne(controller, 0).result == CaptureEventReadResult::kEmpty,
+                "authorization loss published an unexpected error event") &&
+         Expect(controller.join_count() == 1 &&
+                    controller.reserved_event_count() == 0,
+                "authorization loss leaked a join or event reservation");
+}
+
 bool TestTerminalFailureIsSharedWithConcurrentWaiter() {
   auto backend_state = std::make_shared<BackendState>();
   CaptureInstanceControllerConfiguration configuration;
@@ -1370,6 +1427,7 @@ int main() {
       !TestLateReadyDoesNotEscapeAuthorizationPause() ||
       !TestStopRevokesAuthorizationBeforeWorkerStart() ||
       !TestDestructorJoinsActiveWorker() ||
+      !TestAuthorizationLossStopsWithoutPublishingError() ||
       !TestFatalExitPublishesErrorWithoutFakeStopping() ||
       !TestTerminalFailureIsSharedWithConcurrentWaiter() ||
       !TestTerminalExceptionRelinquishesWaitLeadership()) {
