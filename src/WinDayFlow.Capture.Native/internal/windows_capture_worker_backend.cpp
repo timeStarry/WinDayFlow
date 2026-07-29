@@ -15,8 +15,8 @@
 #include <utility>
 #include <vector>
 
-#include "atomic_chunk_store.h"
 #include "dxgi_desktop_frame_source.h"
+#include "jpeg_frame_chunk_writer.h"
 #include "windows_capture_target_observer.h"
 #include "windows_graphics_capture_frame_source.h"
 
@@ -52,6 +52,21 @@ CaptureWorkerBackendResult MapAtomicStoreResult(
              : CaptureWorkerBackendResult::kStorageFailure;
 }
 
+CaptureWorkerBackendResult MapJpegWriterResult(
+    JpegFrameChunkWriterResult result) noexcept {
+  switch (result) {
+    case JpegFrameChunkWriterResult::kOk:
+      return CaptureWorkerBackendResult::kOk;
+    case JpegFrameChunkWriterResult::kEncoderFailure:
+      return CaptureWorkerBackendResult::kEncoderFailure;
+    case JpegFrameChunkWriterResult::kStorageFailure:
+      return CaptureWorkerBackendResult::kStorageFailure;
+    case JpegFrameChunkWriterResult::kInvalidArgument:
+    default:
+      return CaptureWorkerBackendResult::kInternalFailure;
+  }
+}
+
 class AtomicPublicationAdapter final : public CaptureWorkerPublication {
  public:
   AtomicPublicationAdapter() = default;
@@ -83,7 +98,7 @@ class AtomicPublicationAdapter final : public CaptureWorkerPublication {
 class WindowsCaptureWorkerBackend final : public CaptureWorkerBackend {
  public:
   explicit WindowsCaptureWorkerBackend(std::wstring output_root)
-      : store_(std::move(output_root)) {}
+      : writer_(std::move(output_root)) {}
 
   ~WindowsCaptureWorkerBackend() override {
     if (owner_thread_id_ == GetCurrentThreadId()) {
@@ -168,38 +183,49 @@ class WindowsCaptureWorkerBackend final : public CaptureWorkerBackend {
   }
 
   CaptureWorkerBackendResult BeginChunk(
-      const MfH264ChunkWriterConfig& config) noexcept override {
+      std::string_view artifact_id,
+      const JpegFrameChunkWriterConfig& config) noexcept override {
     if (!EnsureThreadRuntime()) {
       return CaptureWorkerBackendResult::kInternalFailure;
     }
-    return SUCCEEDED(writer_.Begin(config))
-               ? CaptureWorkerBackendResult::kOk
-               : CaptureWorkerBackendResult::kEncoderFailure;
+    if (wic_factory_ == nullptr &&
+        FAILED(CreateWicImagingFactory(&wic_factory_))) {
+      return CaptureWorkerBackendResult::kInternalFailure;
+    }
+    return MapJpegWriterResult(
+        writer_.Begin(wic_factory_.Get(), artifact_id, config));
   }
 
   CaptureWorkerBackendResult EncodeFrame(
       std::span<const uint8_t> top_down_bgra,
-      int64_t timestamp_ticks) noexcept override {
+      uint64_t offset_milliseconds) noexcept override {
     if (!IsOwnerThread()) {
       return CaptureWorkerBackendResult::kInternalFailure;
     }
-    return SUCCEEDED(writer_.AddFrame(top_down_bgra, timestamp_ticks))
-               ? CaptureWorkerBackendResult::kOk
-               : CaptureWorkerBackendResult::kEncoderFailure;
+    return MapJpegWriterResult(
+        writer_.AddFrame(top_down_bgra, offset_milliseconds));
   }
 
   CaptureWorkerBackendResult FinalizeChunk(
-      int64_t end_timestamp_ticks,
-      std::vector<uint8_t>* encoded_mp4) noexcept override {
-    if (!IsOwnerThread()) {
-      if (encoded_mp4 != nullptr) {
-        encoded_mp4->clear();
-      }
+      ChunkManifest* manifest,
+      std::unique_ptr<CaptureWorkerPublication>* publication) noexcept
+      override {
+    if (!IsOwnerThread() || manifest == nullptr || publication == nullptr ||
+        *publication != nullptr) {
       return CaptureWorkerBackendResult::kInternalFailure;
     }
-    return SUCCEEDED(writer_.Finalize(end_timestamp_ticks, encoded_mp4))
-               ? CaptureWorkerBackendResult::kOk
-               : CaptureWorkerBackendResult::kEncoderFailure;
+    std::unique_ptr<AtomicPublicationAdapter> prepared;
+    try {
+      prepared = std::make_unique<AtomicPublicationAdapter>();
+    } catch (...) {
+      return CaptureWorkerBackendResult::kStorageFailure;
+    }
+    const JpegFrameChunkWriterResult result = writer_.Finalize(
+        manifest, prepared->mutable_publication());
+    if (*prepared->mutable_publication()) {
+      *publication = std::move(prepared);
+    }
+    return MapJpegWriterResult(result);
   }
 
   void ResetChunk() noexcept override {
@@ -232,28 +258,6 @@ class WindowsCaptureWorkerBackend final : public CaptureWorkerBackend {
       return false;
     }
     return IsValidChunkArtifactId(*artifact_id);
-  }
-
-  CaptureWorkerBackendResult PreparePublication(
-      std::string_view artifact_id, std::span<const uint8_t> encoded_mp4,
-      const ChunkManifest& manifest,
-      std::unique_ptr<CaptureWorkerPublication>* publication) noexcept
-      override {
-    if (publication == nullptr || *publication != nullptr) {
-      return CaptureWorkerBackendResult::kInternalFailure;
-    }
-    std::unique_ptr<AtomicPublicationAdapter> prepared;
-    try {
-      prepared = std::make_unique<AtomicPublicationAdapter>();
-    } catch (...) {
-      return CaptureWorkerBackendResult::kStorageFailure;
-    }
-    const AtomicChunkStoreResult result = store_.Prepare(
-        artifact_id, encoded_mp4, manifest, prepared->mutable_publication());
-    if (*prepared->mutable_publication()) {
-      *publication = std::move(prepared);
-    }
-    return MapAtomicStoreResult(result);
   }
 
   int64_t SteadyNowMilliseconds() noexcept override {
@@ -309,11 +313,10 @@ class WindowsCaptureWorkerBackend final : public CaptureWorkerBackend {
     return true;
   }
 
-  AtomicChunkStore store_;
   DxgiDesktopFrameSource frame_source_;
   WindowsGraphicsCaptureFrameSource graphics_capture_frame_source_;
   Microsoft::WRL::ComPtr<IWICImagingFactory> wic_factory_;
-  MfH264ChunkWriter writer_;
+  JpegFrameChunkWriter writer_;
   DWORD owner_thread_id_ = 0;
   bool uninitialize_com_ = false;
   FrameSourceKind frame_source_kind_ = FrameSourceKind::kNone;

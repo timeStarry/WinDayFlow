@@ -7,12 +7,9 @@ using WinDayFlow.App.Services;
 using WinDayFlow.Application.Ai;
 using WinDayFlow.Application.Capture;
 using WinDayFlow.Application.Settings;
-using WinDayFlow.Application.Timeline;
 using WinDayFlow.Capture.Interop;
-using WinDayFlow.Infrastructure.Ai;
+using WinDayFlow.Composition;
 using WinDayFlow.Infrastructure.Persistence;
-using WinDayFlow.Infrastructure.Settings;
-using WinDayFlow.Infrastructure.Timeline;
 using WinDayFlow.Presentation.Capture;
 using WinDayFlow.Presentation.Settings;
 using WinDayFlow.Presentation.Shell;
@@ -20,7 +17,7 @@ using WinDayFlow.Presentation.Timeline;
 
 namespace WinDayFlow.App;
 
-public partial class App : Microsoft.UI.Xaml.Application
+public partial class App : Microsoft.UI.Xaml.Application, IDisposable
 {
     private static readonly TimeSpan HostStopTimeout = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan ShutdownCleanupBudget = TimeSpan.FromSeconds(10);
@@ -34,6 +31,8 @@ public partial class App : Microsoft.UI.Xaml.Application
     private MainWindow? _window;
     private AppWindow? _appWindow;
     private CaptureAwareWindowCloseCoordinator? _windowCloseCoordinator;
+    private TrayIconService? _trayIconService;
+    private bool _explicitExitRequested;
 
     public App()
     {
@@ -49,15 +48,8 @@ public partial class App : Microsoft.UI.Xaml.Application
             var hostBuilder = Host.CreateDefaultBuilder();
             hostBuilder.ConfigureServices(services =>
                 {
-                    var connectionFactory = new SqliteConnectionFactory(
-                        Path.Combine(DataDirectoryPath, "windayflow.db"));
                     var isExclusionEngineAvailable = false;
 
-                    services.AddSingleton(TimeProvider.System);
-                    services.AddSingleton(connectionFactory);
-                    services.AddSingleton<SqliteDatabaseInitializer>();
-                    services.AddSingleton<IAppSettingsRepository,
-                        SqliteAppSettingsRepository>();
 #if WDF_DEV_LIVE_CAPTURE
                     if (Program.IsDevLiveCaptureRequested)
                     {
@@ -70,28 +62,13 @@ public partial class App : Microsoft.UI.Xaml.Application
                     {
                         AddUnavailableCaptureServices(services);
                     }
-                    services.AddSingleton<AppSettingsService>();
-                    services.AddSingleton<WindowsDpapiCredentialProtector>();
-                    services.AddSingleton<SqliteAiProviderProfileStore>();
-                    services.AddSingleton<IAiProviderProfileStore>(static provider =>
-                        provider.GetRequiredService<SqliteAiProviderProfileStore>());
-                    services.AddSingleton<OpenAiCompatibleProviderFactory>();
-                    services.AddSingleton<IAiAnalysisProviderFactory>(static provider =>
-                        provider.GetRequiredService<OpenAiCompatibleProviderFactory>());
-                    services.AddSingleton<AiProviderConfigurationService>();
-                    services.AddSingleton<SqliteTimelineRepository>();
-                    services.AddSingleton<ITimelineStore>(static provider =>
-                        provider.GetRequiredService<SqliteTimelineRepository>());
-                    services.AddSingleton<ITimelineRepository>(static provider =>
-                        provider.GetRequiredService<SqliteTimelineRepository>());
-                    services.AddSingleton<TimelineQueryService>();
-                    services.AddSingleton<TimelineCommandService>();
+                    services.AddWinDayFlowProductionServices(DataDirectoryPath);
                     services.AddSingleton<ICaptureService,
                         ConsentGatedCaptureService>();
-                    services.AddAnalysisPipeline(
+                    services.AddSingleton(provider => new EvidenceMediaService(
                         DataDirectoryPath,
-                        static dataRoot =>
-                            new NativeAnalysisEvidenceExtractor(dataRoot));
+                        provider.GetRequiredService<ICaptureManifestScanner>(),
+                        provider.GetRequiredService<ICaptureFrameArchive>()));
 
                     services.AddTransient<TimelineViewModel>();
                     services.AddTransient(provider => new SettingsViewModel(
@@ -140,6 +117,10 @@ public partial class App : Microsoft.UI.Xaml.Application
         "WinDayFlow",
         "Data");
 
+    public nint MainWindowHandle => _window is null
+        ? throw new InvalidOperationException("The main window has not been created.")
+        : WinRT.Interop.WindowNative.GetWindowHandle(_window);
+
     public static T GetService<T>() where T : notnull =>
         Current._host.Services.GetRequiredService<T>();
 
@@ -181,11 +162,22 @@ public partial class App : Microsoft.UI.Xaml.Application
                 Program.WriteShutdownFailure);
             _appWindow.Closing += OnAppWindowClosing;
             _window.Closed += OnWindowClosed;
+            var iconPath = Path.Combine(
+                AppContext.BaseDirectory,
+                "Assets",
+                "WinDayFlow.ico");
+            _appWindow.SetIcon(iconPath);
+            _trayIconService = new TrayIconService(
+                MainWindowHandle,
+                iconPath,
+                ShowMainWindow,
+                RequestExplicitExit);
             _window.Activate();
             _window.SetInitialSize();
         }
         catch (Exception exception)
         {
+            Dispose();
             await DisposeDevLiveCaptureAfterFailureAsync();
             Program.WriteStartupFailure(exception);
             Program.ShowStartupFailure();
@@ -195,7 +187,13 @@ public partial class App : Microsoft.UI.Xaml.Application
 
     private void OnAppWindowClosing(AppWindow sender, AppWindowClosingEventArgs args)
     {
-        _ = sender;
+        if (!_explicitExitRequested)
+        {
+            args.Cancel = true;
+            sender.Hide();
+            return;
+        }
+
         if (_windowCloseCoordinator?.ShouldCancelClose() == true)
         {
             args.Cancel = true;
@@ -208,6 +206,8 @@ public partial class App : Microsoft.UI.Xaml.Application
         _ = args;
         var window = _window;
         var appWindow = _appWindow;
+        _trayIconService?.Dispose();
+        _trayIconService = null;
         if (appWindow is not null)
         {
             appWindow.Closing -= OnAppWindowClosing;
@@ -360,9 +360,34 @@ public partial class App : Microsoft.UI.Xaml.Application
         {
             if (ReferenceEquals(_window, window))
             {
-                window.Activate();
+                ShowMainWindow();
             }
         });
+    }
+
+    private void ShowMainWindow()
+    {
+        var window = _window;
+        var appWindow = _appWindow;
+        if (window is null || appWindow is null)
+        {
+            return;
+        }
+
+        appWindow.Show();
+        window.OpenHome();
+        window.Activate();
+    }
+
+    private void RequestExplicitExit()
+    {
+        if (_window is null)
+        {
+            return;
+        }
+
+        _explicitExitRequested = true;
+        _window.Close();
     }
 
     private void OnUnhandledException(object sender, Microsoft.UI.Xaml.UnhandledExceptionEventArgs e)
@@ -370,5 +395,12 @@ public partial class App : Microsoft.UI.Xaml.Application
         Program.WriteStartupFailure(e.Exception);
         Program.ShowStartupFailure();
         System.Diagnostics.Debug.WriteLine(e.Exception);
+    }
+
+    public void Dispose()
+    {
+        _trayIconService?.Dispose();
+        _trayIconService = null;
+        GC.SuppressFinalize(this);
     }
 }

@@ -13,6 +13,7 @@ public sealed class NativeCaptureRuntimeOwner
       INativeCaptureApplicationPrivacyModeSource,
       IAsyncDisposable
 {
+    private const uint AnalysisChunkDurationMilliseconds = 15 * 60 * 1_000;
     private readonly object _terminationSync = new();
     private readonly INativeCaptureRuntimeBackend _backend;
     private readonly NativeCapturePrivacyCoordinator _coordinator;
@@ -245,14 +246,26 @@ public sealed class NativeCaptureRuntimeOwner
             .ConfigureAwait(false);
     }
 
-    public Task PrepareAsync(
+    public async Task PrepareAsync(
         AppSettings previous,
         AppSettings proposed,
         CancellationToken cancellationToken = default)
     {
         ThrowIfTerminating();
-        return InvokeCoordinatorAsync(
-            () => _coordinator.PrepareAsync(previous, proposed, cancellationToken));
+        await InvokeCoordinatorAsync(
+                () => _coordinator.PrepareAsync(
+                    previous,
+                    proposed,
+                    cancellationToken))
+            .ConfigureAwait(false);
+        if (previous.CaptureIntervalSeconds != proposed.CaptureIntervalSeconds)
+        {
+            await _backend.UpdateTimingAsync(
+                    checked((uint)proposed.CaptureIntervalSeconds * 1_000U),
+                    AnalysisChunkDurationMilliseconds,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
     }
 
     public Task CommittedAsync(
@@ -265,7 +278,7 @@ public sealed class NativeCaptureRuntimeOwner
             () => _coordinator.CommittedAsync(previous, current, cancellationToken));
     }
 
-    public Task AbortedAsync(
+    public async Task AbortedAsync(
         AppSettings previous,
         AppSettings proposed,
         bool settingsApplied,
@@ -273,12 +286,46 @@ public sealed class NativeCaptureRuntimeOwner
         CancellationToken cancellationToken = default)
     {
         ThrowIfTerminating();
-        return InvokeCoordinatorAsync(() => _coordinator.AbortedAsync(
-            previous,
-            proposed,
-            settingsApplied,
-            failure,
-            cancellationToken));
+        Exception? timingRollbackFailure = null;
+        if (!settingsApplied
+            && previous.CaptureIntervalSeconds != proposed.CaptureIntervalSeconds)
+        {
+            try
+            {
+                await _backend.UpdateTimingAsync(
+                        checked((uint)previous.CaptureIntervalSeconds * 1_000U),
+                        AnalysisChunkDurationMilliseconds,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception exception)
+            {
+                timingRollbackFailure = exception;
+            }
+        }
+
+        try
+        {
+            await InvokeCoordinatorAsync(() => _coordinator.AbortedAsync(
+                    previous,
+                    proposed,
+                    settingsApplied,
+                    failure,
+                    cancellationToken))
+                .ConfigureAwait(false);
+        }
+        catch (Exception coordinatorFailure) when (timingRollbackFailure is not null)
+        {
+            throw new AggregateException(
+                "Capture timing rollback and privacy abort handling both failed.",
+                timingRollbackFailure,
+                coordinatorFailure);
+        }
+
+        if (timingRollbackFailure is not null)
+        {
+            throw timingRollbackFailure;
+        }
     }
 
     public Task UpdateSignalsAsync(

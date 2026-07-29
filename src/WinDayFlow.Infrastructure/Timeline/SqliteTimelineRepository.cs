@@ -56,7 +56,7 @@ public sealed class SqliteTimelineRepository : ITimelineStore
             SELECT {SelectColumns}
             FROM timeline_entries
             WHERE local_date = $local_date
-            ORDER BY start_utc_ticks, end_utc_ticks, id;
+            ORDER BY start_utc_ticks DESC, end_utc_ticks DESC, id DESC;
             """;
         command.Parameters.AddWithValue(
             "$local_date",
@@ -351,6 +351,40 @@ public sealed class SqliteTimelineRepository : ITimelineStore
         TimelineEntry entry,
         CancellationToken cancellationToken)
     {
+        for (var index = 0; index < entry.EvidenceReferences.Count; index++)
+        {
+            var evidence = entry.EvidenceReferences[index];
+            var contribution = evidence.ContributionRange ?? entry.Range;
+            await using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = """
+                INSERT INTO timeline_entry_evidence(
+                    timeline_entry_id,
+                    ordinal,
+                    capture_chunk_id,
+                    artifact_path,
+                    contribution_start_utc_ticks,
+                    contribution_start_offset_minutes,
+                    contribution_end_utc_ticks,
+                    contribution_end_offset_minutes)
+                VALUES (
+                    $timeline_entry_id,
+                    $ordinal,
+                    $capture_chunk_id,
+                    $artifact_path,
+                    $contribution_start_utc_ticks,
+                    $contribution_start_offset_minutes,
+                    $contribution_end_utc_ticks,
+                    $contribution_end_offset_minutes);
+                """;
+            command.Parameters.AddWithValue("$timeline_entry_id", FormatId(entry.Id));
+            command.Parameters.AddWithValue("$ordinal", index);
+            command.Parameters.AddWithValue("$capture_chunk_id", evidence.CaptureChunkId);
+            command.Parameters.AddWithValue("$artifact_path", evidence.ArtifactPath);
+            AddRangeParameters(command.Parameters, contribution, "contribution");
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
         for (var index = 0; index < entry.Apps.Count; index++)
         {
             var app = entry.Apps[index];
@@ -397,6 +431,7 @@ public sealed class SqliteTimelineRepository : ITimelineStore
         await using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = """
+            DELETE FROM timeline_entry_evidence WHERE timeline_entry_id = $id;
             DELETE FROM timeline_entry_apps WHERE timeline_entry_id = $id;
             DELETE FROM timeline_entry_tags WHERE timeline_entry_id = $id;
             """;
@@ -460,7 +495,13 @@ public sealed class SqliteTimelineRepository : ITimelineStore
                     storedEntry.Id,
                     cancellationToken)
                 .ConfigureAwait(false);
-            entries.Add(storedEntry.ToDomain(apps, tags));
+            var evidenceReferences = await ReadEvidenceAsync(
+                    connection,
+                    transaction,
+                    storedEntry,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            entries.Add(storedEntry.ToDomain(apps, tags, evidenceReferences));
         }
 
         return entries;
@@ -525,12 +566,79 @@ public sealed class SqliteTimelineRepository : ITimelineStore
         return tags;
     }
 
+    private static async Task<IReadOnlyList<EvidenceReference>> ReadEvidenceAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        StoredTimelineEntry storedEntry,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT
+                capture_chunk_id,
+                artifact_path,
+                contribution_start_utc_ticks,
+                contribution_start_offset_minutes,
+                contribution_end_utc_ticks,
+                contribution_end_offset_minutes
+            FROM timeline_entry_evidence
+            WHERE timeline_entry_id = $id
+            ORDER BY ordinal;
+            """;
+        command.Parameters.AddWithValue("$id", FormatId(storedEntry.Id));
+
+        var references = new List<EvidenceReference>();
+        await using var reader = await command
+            .ExecuteReaderAsync(cancellationToken)
+            .ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            var contribution = new TimeRange(
+                ReadTimestamp(reader.GetInt64(2), reader.GetInt32(3)),
+                ReadTimestamp(reader.GetInt64(4), reader.GetInt32(5)));
+            var entryRange = new TimeRange(storedEntry.Start, storedEntry.End);
+            references.Add(new EvidenceReference(
+                reader.GetString(0),
+                reader.GetString(1),
+                contribution == entryRange ? null : contribution));
+        }
+
+        if (references.Count == 0 && storedEntry.EvidenceCaptureChunkId is not null)
+        {
+            references.Add(new EvidenceReference(
+                storedEntry.EvidenceCaptureChunkId,
+                storedEntry.EvidenceArtifactPath!));
+        }
+
+        return references;
+    }
+
     private static void AddNullableParameter(
         SqliteParameterCollection parameters,
         string name,
         object? value)
     {
         parameters.AddWithValue(name, value ?? DBNull.Value);
+    }
+
+    private static void AddRangeParameters(
+        SqliteParameterCollection parameters,
+        TimeRange range,
+        string prefix)
+    {
+        parameters.AddWithValue(
+            $"${prefix}_start_utc_ticks",
+            range.Start.UtcDateTime.Ticks);
+        parameters.AddWithValue(
+            $"${prefix}_start_offset_minutes",
+            checked((int)range.Start.Offset.TotalMinutes));
+        parameters.AddWithValue(
+            $"${prefix}_end_utc_ticks",
+            range.End.UtcDateTime.Ticks);
+        parameters.AddWithValue(
+            $"${prefix}_end_offset_minutes",
+            checked((int)range.End.Offset.TotalMinutes));
     }
 
     private static string FormatId(Guid id) => id.ToString("D", CultureInfo.InvariantCulture);
@@ -578,11 +686,9 @@ public sealed class SqliteTimelineRepository : ITimelineStore
     {
         public TimelineEntry ToDomain(
             IReadOnlyList<AppUsage> apps,
-            IReadOnlyList<string> tags)
+            IReadOnlyList<string> tags,
+            IReadOnlyList<EvidenceReference> evidenceReferences)
         {
-            var evidence = EvidenceCaptureChunkId is null
-                ? null
-                : new EvidenceReference(EvidenceCaptureChunkId, EvidenceArtifactPath!);
             var provenance = new UserEditProvenance(
                 RangeEditedAt,
                 TitleEditedAt,
@@ -591,7 +697,26 @@ public sealed class SqliteTimelineRepository : ITimelineStore
                 ProductivityEditedAt,
                 TagsEditedAt);
 
-            return new TimelineEntry(
+            if (Origin == TimelineEntryOrigin.Manual)
+            {
+                return new TimelineEntry(
+                    Id,
+                    new TimeRange(Start, End),
+                    Title,
+                    Summary,
+                    Category,
+                    Productivity,
+                    apps,
+                    tags,
+                    Confidence,
+                    evidence: null,
+                    AnalysisVersion,
+                    provenance,
+                    Origin,
+                    Revision);
+            }
+
+            return TimelineEntry.CreateAnalyzed(
                 Id,
                 new TimeRange(Start, End),
                 Title,
@@ -600,11 +725,10 @@ public sealed class SqliteTimelineRepository : ITimelineStore
                 Productivity,
                 apps,
                 tags,
-                Confidence,
-                evidence,
-                AnalysisVersion,
+                Confidence!.Value,
+                evidenceReferences,
+                AnalysisVersion!,
                 provenance,
-                Origin,
                 Revision);
         }
     }

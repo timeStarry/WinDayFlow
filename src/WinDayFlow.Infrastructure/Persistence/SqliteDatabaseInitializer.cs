@@ -5,7 +5,7 @@ namespace WinDayFlow.Infrastructure.Persistence;
 
 public sealed class SqliteDatabaseInitializer
 {
-    private const int LatestSchemaVersion = 7;
+    private const int LatestSchemaVersion = 12;
 
     private const string CreateMigrationTableSql = """
         CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -518,6 +518,241 @@ public sealed class SqliteDatabaseInitializer
         );
         """;
 
+    private const string MigrationVersion8Sql = """
+        ALTER TABLE app_settings
+        ADD COLUMN capture_interval_seconds INTEGER NOT NULL DEFAULT 10 CHECK (
+            capture_interval_seconds IN (5, 10, 15, 30, 60)
+        );
+        """;
+
+    private const string MigrationVersion9Sql = """
+        CREATE TABLE timeline_entry_evidence (
+            timeline_entry_id TEXT NOT NULL,
+            ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+            capture_chunk_id TEXT NOT NULL,
+            artifact_path TEXT NOT NULL CHECK (length(trim(artifact_path)) > 0),
+            contribution_start_utc_ticks INTEGER NOT NULL,
+            contribution_start_offset_minutes INTEGER NOT NULL,
+            contribution_end_utc_ticks INTEGER NOT NULL,
+            contribution_end_offset_minutes INTEGER NOT NULL,
+            PRIMARY KEY (timeline_entry_id, ordinal),
+            UNIQUE (timeline_entry_id, capture_chunk_id),
+            FOREIGN KEY (timeline_entry_id)
+                REFERENCES timeline_entries(id) ON DELETE CASCADE,
+            CHECK (contribution_end_utc_ticks > contribution_start_utc_ticks)
+        );
+
+        CREATE INDEX ix_timeline_entry_evidence_chunk
+            ON timeline_entry_evidence(capture_chunk_id, timeline_entry_id);
+
+        INSERT INTO timeline_entry_evidence(
+            timeline_entry_id,
+            ordinal,
+            capture_chunk_id,
+            artifact_path,
+            contribution_start_utc_ticks,
+            contribution_start_offset_minutes,
+            contribution_end_utc_ticks,
+            contribution_end_offset_minutes)
+        SELECT
+            id,
+            0,
+            evidence_capture_chunk_id,
+            evidence_artifact_path,
+            start_utc_ticks,
+            start_offset_minutes,
+            end_utc_ticks,
+            end_offset_minutes
+        FROM timeline_entries
+        WHERE evidence_capture_chunk_id IS NOT NULL;
+
+        CREATE TABLE analysis_job_window_members (
+            analysis_job_id TEXT NOT NULL,
+            ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+            capture_chunk_id TEXT NOT NULL,
+            source_fingerprint TEXT NOT NULL CHECK (
+                length(source_fingerprint) = 64
+                AND source_fingerprint NOT GLOB '*[^0-9A-F]*'
+            ),
+            contribution_start_utc_ticks INTEGER NOT NULL,
+            contribution_start_offset_minutes INTEGER NOT NULL,
+            contribution_end_utc_ticks INTEGER NOT NULL,
+            contribution_end_offset_minutes INTEGER NOT NULL,
+            PRIMARY KEY (analysis_job_id, ordinal),
+            UNIQUE (analysis_job_id, capture_chunk_id),
+            FOREIGN KEY (analysis_job_id)
+                REFERENCES analysis_jobs(id) ON DELETE CASCADE,
+            FOREIGN KEY (capture_chunk_id)
+                REFERENCES capture_chunks(id) ON DELETE RESTRICT,
+            CHECK (contribution_end_utc_ticks > contribution_start_utc_ticks)
+        );
+
+        CREATE INDEX ix_analysis_job_window_members_chunk
+            ON analysis_job_window_members(capture_chunk_id, analysis_job_id);
+
+        INSERT INTO analysis_job_window_members(
+            analysis_job_id,
+            ordinal,
+            capture_chunk_id,
+            source_fingerprint,
+            contribution_start_utc_ticks,
+            contribution_start_offset_minutes,
+            contribution_end_utc_ticks,
+            contribution_end_offset_minutes)
+        SELECT
+            jobs.id,
+            0,
+            jobs.capture_chunk_id,
+            jobs.input_fingerprint,
+            chunks.start_utc_ticks,
+            chunks.start_offset_minutes,
+            chunks.end_utc_ticks,
+            chunks.end_offset_minutes
+        FROM analysis_jobs AS jobs
+        INNER JOIN capture_chunks AS chunks ON chunks.id = jobs.capture_chunk_id;
+        """;
+
+    private const string MigrationVersion10Sql = """
+        DELETE FROM timeline_entry_evidence;
+        DELETE FROM timeline_entry_apps;
+        DELETE FROM timeline_entry_tags;
+        DELETE FROM timeline_entries;
+        DELETE FROM analysis_job_window_members;
+        DELETE FROM analysis_jobs;
+        DELETE FROM capture_chunks;
+
+        DROP TABLE capture_chunks;
+
+        CREATE TABLE capture_chunks (
+            id TEXT NOT NULL PRIMARY KEY CHECK (
+                length(id) BETWEEN 1 AND 80
+                AND id = lower(id)
+                AND id NOT GLOB '*[^a-z0-9_-]*'
+            ),
+            manifest_relative_path TEXT NOT NULL UNIQUE COLLATE NOCASE CHECK (
+                manifest_relative_path = 'chunks/' || id || '/manifest.json'
+            ),
+            start_utc_ticks INTEGER NOT NULL CHECK (start_utc_ticks >= 0),
+            start_offset_minutes INTEGER NOT NULL CHECK (
+                start_offset_minutes BETWEEN -840 AND 840
+            ),
+            end_utc_ticks INTEGER NOT NULL CHECK (end_utc_ticks > start_utc_ticks),
+            end_offset_minutes INTEGER NOT NULL CHECK (
+                end_offset_minutes BETWEEN -840 AND 840
+            ),
+            captured_frame_count INTEGER NOT NULL CHECK (captured_frame_count > 0),
+            frame_count INTEGER NOT NULL CHECK (
+                frame_count BETWEEN 1 AND 720
+                AND frame_count <= captured_frame_count
+            ),
+            frame_width INTEGER NOT NULL CHECK (
+                frame_width >= 2 AND frame_width % 2 = 0
+            ),
+            frame_height INTEGER NOT NULL CHECK (
+                frame_height >= 2 AND frame_height % 2 = 0
+            ),
+            frame_byte_count INTEGER NOT NULL CHECK (
+                frame_byte_count BETWEEN 1 AND 67108864
+            ),
+            persistence_generation_hex TEXT NOT NULL CHECK (
+                length(persistence_generation_hex) = 16
+                AND persistence_generation_hex NOT GLOB '*[^0-9A-F]*'
+                AND persistence_generation_hex <> '0000000000000000'
+            ),
+            target_epoch_hex TEXT NOT NULL CHECK (
+                length(target_epoch_hex) = 16
+                AND target_epoch_hex NOT GLOB '*[^0-9A-F]*'
+                AND target_epoch_hex <> '0000000000000000'
+            ),
+            committed_at_utc_ticks INTEGER NOT NULL CHECK (committed_at_utc_ticks >= 0),
+            ingested_at_utc_ticks INTEGER NOT NULL CHECK (ingested_at_utc_ticks >= 0),
+            availability INTEGER NOT NULL CHECK (availability BETWEEN 0 AND 2)
+        );
+
+        CREATE INDEX ix_capture_chunks_range
+            ON capture_chunks(start_utc_ticks, end_utc_ticks, id);
+        """;
+
+    private const string MigrationVersion11Sql = """
+        ALTER TABLE capture_chunks
+        ADD COLUMN process_name TEXT NULL CHECK (
+            process_name IS NULL
+            OR (
+                length(process_name) BETWEEN 1 AND 260
+                AND process_name = trim(process_name)
+                AND instr(process_name, char(0)) = 0
+            )
+        );
+
+        ALTER TABLE capture_chunks
+        ADD COLUMN process_id INTEGER NULL CHECK (
+            process_id IS NULL OR process_id BETWEEN 1 AND 4294967295
+        );
+
+        ALTER TABLE capture_chunks
+        ADD COLUMN cpu_usage_basis_points INTEGER NULL CHECK (
+            cpu_usage_basis_points IS NULL
+            OR cpu_usage_basis_points BETWEEN 0 AND 10000
+        );
+
+        ALTER TABLE capture_chunks
+        ADD COLUMN working_set_bytes INTEGER NULL CHECK (
+            working_set_bytes IS NULL OR working_set_bytes >= 0
+        );
+
+        ALTER TABLE capture_chunks
+        ADD COLUMN private_memory_bytes INTEGER NULL CHECK (
+            private_memory_bytes IS NULL OR private_memory_bytes >= 0
+        );
+        """;
+
+    private const string MigrationVersion12Sql = """
+        INSERT INTO capture_exclusion_rules(
+            settings_id,
+            rule_id,
+            ordinal,
+            name,
+            enabled,
+            scope,
+            application_identity_kind,
+            identity_value,
+            window_title_match_kind,
+            pattern,
+            revision)
+        SELECT
+            1,
+            'df2c2131-bfe5-4a17-bf4c-4f3378a4b093',
+            COALESCE((
+                SELECT MAX(ordinal)
+                FROM capture_exclusion_rules
+                WHERE settings_id = 1
+            ), -1) + 1,
+            'WinDayFlow',
+            1,
+            0,
+            0,
+            'WinDayFlow.App.exe',
+            NULL,
+            NULL,
+            1
+        WHERE EXISTS (
+            SELECT 1 FROM app_settings WHERE id = 1
+        )
+        AND (
+            SELECT COUNT(*)
+            FROM capture_exclusion_rules
+            WHERE settings_id = 1
+        ) < 100
+        AND NOT EXISTS (
+            SELECT 1
+            FROM capture_exclusion_rules
+            WHERE settings_id = 1
+              AND scope = 0
+              AND application_identity_kind = 0
+              AND identity_value = 'WinDayFlow.App.exe' COLLATE NOCASE
+        );
+        """;
+
     private static readonly IReadOnlyList<Migration> Migrations =
     [
         new(1, MigrationVersion1Sql),
@@ -527,6 +762,11 @@ public sealed class SqliteDatabaseInitializer
         new(5, MigrationVersion5Sql),
         new(6, MigrationVersion6Sql),
         new(7, MigrationVersion7Sql),
+        new(8, MigrationVersion8Sql),
+        new(9, MigrationVersion9Sql),
+        new(10, MigrationVersion10Sql),
+        new(11, MigrationVersion11Sql),
+        new(12, MigrationVersion12Sql),
     ];
 
     private readonly SqliteConnectionFactory _connectionFactory;

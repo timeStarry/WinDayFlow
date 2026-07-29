@@ -3,120 +3,99 @@ namespace WinDayFlow.Domain;
 public sealed record CaptureChunk
 {
     public const int MaximumIdentifierLength = 80;
-    public const long MaximumVideoByteCount = 64L * 1024L * 1024L;
+    public const long MaximumFrameByteCount = 64L * 1024L * 1024L;
+    public const uint MaximumFramesPerChunk = 720;
 
     public CaptureChunk(
         string id,
-        EvidenceRelativePath videoPath,
         EvidenceRelativePath manifestPath,
         TimeRange range,
+        uint capturedFrameCount,
         uint frameCount,
-        uint videoWidth,
-        uint videoHeight,
-        uint frameRateNumerator,
-        uint frameRateDenominator,
-        long videoByteCount,
+        uint frameWidth,
+        uint frameHeight,
+        long frameByteCount,
         ulong persistenceGeneration,
         ulong targetEpoch,
         DateTimeOffset committedAtUtc,
         DateTimeOffset ingestedAtUtc,
-        CaptureChunkAvailability availability = CaptureChunkAvailability.Available)
+        CaptureChunkAvailability availability = CaptureChunkAvailability.Available,
+        CaptureProcessTelemetry? processTelemetry = null)
     {
         ValidateIdentifier(id);
-        ArgumentNullException.ThrowIfNull(videoPath);
         ArgumentNullException.ThrowIfNull(manifestPath);
         ArgumentNullException.ThrowIfNull(range);
 
-        var expectedDirectory = $"chunks/{id}";
         if (!string.Equals(
-                videoPath.Value,
-                $"{expectedDirectory}/capture.mp4",
-                StringComparison.Ordinal)
-            || !string.Equals(
                 manifestPath.Value,
-                $"{expectedDirectory}/manifest.json",
+                $"chunks/{id}/manifest.json",
                 StringComparison.Ordinal))
         {
             throw new ArgumentException(
-                "Capture evidence paths must use the canonical directory for their chunk identifier.",
-                nameof(videoPath));
+                "The capture manifest must use the canonical chunk directory.",
+                nameof(manifestPath));
         }
 
-        ArgumentOutOfRangeException.ThrowIfZero(frameCount);
+        if (capturedFrameCount == 0
+            || frameCount == 0
+            || frameCount > capturedFrameCount
+            || frameCount > MaximumFramesPerChunk)
+        {
+            throw new ArgumentOutOfRangeException(nameof(frameCount));
+        }
 
-        if (videoWidth < 2 || videoHeight < 2 || (videoWidth & 1U) != 0 || (videoHeight & 1U) != 0)
+        if (frameWidth < 2
+            || frameHeight < 2
+            || (frameWidth & 1U) != 0
+            || (frameHeight & 1U) != 0)
         {
             throw new ArgumentOutOfRangeException(
-                nameof(videoWidth),
+                nameof(frameWidth),
                 "Capture dimensions must be positive even values.");
         }
 
-        if (frameRateNumerator == 0 || frameRateDenominator == 0)
+        if (frameByteCount is <= 0 or > MaximumFrameByteCount)
         {
-            throw new ArgumentOutOfRangeException(
-                nameof(frameRateNumerator),
-                "Capture frame-rate components must be positive.");
-        }
-
-        if (videoByteCount is <= 0 or > MaximumVideoByteCount)
-        {
-            throw new ArgumentOutOfRangeException(nameof(videoByteCount));
+            throw new ArgumentOutOfRangeException(nameof(frameByteCount));
         }
 
         ArgumentOutOfRangeException.ThrowIfZero(persistenceGeneration);
         ArgumentOutOfRangeException.ThrowIfZero(targetEpoch);
-
         if (!Enum.IsDefined(availability))
         {
             throw new ArgumentOutOfRangeException(nameof(availability));
         }
 
         Id = id;
-        VideoPath = videoPath;
         ManifestPath = manifestPath;
         Range = range;
+        CapturedFrameCount = capturedFrameCount;
         FrameCount = frameCount;
-        VideoWidth = videoWidth;
-        VideoHeight = videoHeight;
-        FrameRateNumerator = frameRateNumerator;
-        FrameRateDenominator = frameRateDenominator;
-        VideoByteCount = videoByteCount;
+        FrameWidth = frameWidth;
+        FrameHeight = frameHeight;
+        FrameByteCount = frameByteCount;
         PersistenceGeneration = persistenceGeneration;
         TargetEpoch = targetEpoch;
         CommittedAtUtc = committedAtUtc.ToUniversalTime();
         IngestedAtUtc = ingestedAtUtc.ToUniversalTime();
         Availability = availability;
+        ProcessTelemetry = processTelemetry;
     }
 
     public string Id { get; }
-
-    public EvidenceRelativePath VideoPath { get; }
-
     public EvidenceRelativePath ManifestPath { get; }
-
     public TimeRange Range { get; }
-
+    public uint CapturedFrameCount { get; }
     public uint FrameCount { get; }
-
-    public uint VideoWidth { get; }
-
-    public uint VideoHeight { get; }
-
-    public uint FrameRateNumerator { get; }
-
-    public uint FrameRateDenominator { get; }
-
-    public long VideoByteCount { get; }
-
+    public uint FrameWidth { get; }
+    public uint FrameHeight { get; }
+    public long FrameByteCount { get; }
     public ulong PersistenceGeneration { get; }
-
     public ulong TargetEpoch { get; }
-
     public DateTimeOffset CommittedAtUtc { get; }
-
     public DateTimeOffset IngestedAtUtc { get; }
-
     public CaptureChunkAvailability Availability { get; }
+    public CaptureProcessTelemetry? ProcessTelemetry { get; }
 
     public static void ValidateIdentifier(string id)
     {

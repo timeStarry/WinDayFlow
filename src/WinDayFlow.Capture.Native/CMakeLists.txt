@@ -14,9 +14,7 @@ option(
   OFF)
 
 add_library(windayflow_capture_core STATIC
-  internal/analysis_evidence_extractor.cpp
   internal/atomic_chunk_store.cpp
-  internal/capture_chunk_fingerprint.cpp
   internal/capture_event_queue.cpp
   internal/capture_instance_controller.cpp
   internal/capture_policy.cpp
@@ -26,10 +24,12 @@ add_library(windayflow_capture_core STATIC
   internal/chunk_manifest.cpp
   internal/dxgi_desktop_frame_source.cpp
   internal/dxgi_output_resolver.cpp
-  internal/mf_h264_chunk_writer.cpp
+  internal/jpeg_frame_chunk_writer.cpp
   internal/pixel_buffer.cpp
   internal/privacy_guard.cpp
+  internal/process_telemetry.cpp
   internal/wic_bgra_scaler.cpp
+  internal/wic_jpeg_encoder.cpp
   internal/windows_capture_target_observer.cpp
   internal/windows_capture_worker_backend.cpp
   internal/windows_graphics_capture_frame_source.cpp)
@@ -40,7 +40,7 @@ target_include_directories(windayflow_capture_core
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/internal)
 target_link_libraries(windayflow_capture_core PUBLIC
-  bcrypt d3d11 dxgi mf mfplat mfreadwrite mfuuid ole32 oleaut32 user32
+  bcrypt d3d11 dxgi ole32 oleaut32 psapi user32
   windowsapp windowscodecs)
 
 add_library(windayflow_capture SHARED
@@ -59,10 +59,6 @@ target_link_libraries(windayflow_capture
     windayflow_capture_core
     d3d11
     dxgi
-    mf
-    mfplat
-    mfreadwrite
-    mfuuid
     ole32
     oleaut32
     psapi
@@ -115,16 +111,6 @@ if(BUILD_TESTING)
   add_windayflow_native_test(capture_policy_tests tests/capture_policy_tests.cpp)
   target_link_libraries(capture_policy_tests PRIVATE windayflow_capture_core)
 
-  add_windayflow_native_test(capture_chunk_fingerprint_tests
-    tests/capture_chunk_fingerprint_tests.cpp)
-  target_link_libraries(capture_chunk_fingerprint_tests PRIVATE
-    windayflow_capture_core)
-
-  add_windayflow_native_test(analysis_evidence_extractor_tests
-    tests/analysis_evidence_extractor_tests.cpp)
-  target_link_libraries(analysis_evidence_extractor_tests PRIVATE
-    windayflow_capture_core)
-
   add_windayflow_native_test(capture_event_queue_tests tests/capture_event_queue_tests.cpp)
   target_link_libraries(capture_event_queue_tests PRIVATE windayflow_capture_core)
 
@@ -167,9 +153,9 @@ if(BUILD_TESTING)
   target_link_libraries(wic_bgra_scaler_tests PRIVATE
     windayflow_capture_core)
 
-  add_windayflow_native_test(mf_h264_chunk_writer_tests
-    tests/mf_h264_chunk_writer_tests.cpp)
-  target_link_libraries(mf_h264_chunk_writer_tests PRIVATE
+  add_windayflow_native_test(jpeg_frame_chunk_writer_tests
+    tests/jpeg_frame_chunk_writer_tests.cpp)
+  target_link_libraries(jpeg_frame_chunk_writer_tests PRIVATE
     windayflow_capture_core)
 
   add_windayflow_native_test(capture_c_api_tests tests/capture_c_api_tests.cpp)

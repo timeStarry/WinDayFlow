@@ -1,7 +1,7 @@
 using Microsoft.Extensions.Hosting;
 using WinDayFlow.Application.Analysis;
 
-namespace WinDayFlow.App.Services;
+namespace WinDayFlow.Composition;
 
 internal sealed class AnalysisPipelineHostedService : IHostedService
 {

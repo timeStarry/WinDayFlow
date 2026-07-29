@@ -10,8 +10,8 @@ namespace WinDayFlow.Application.Analysis;
 
 public sealed record CaptureAnalysisIngestionOptions
 {
-    public const string DefaultAnalysisVersion = "timeline-v1";
-    public const string DefaultEvidencePolicyVersion = "evidence-v1";
+    public const string DefaultAnalysisVersion = "timeline-v5";
+    public const string DefaultEvidencePolicyVersion = "frames-v1";
 
     public CaptureAnalysisIngestionOptions(
         string analysisVersion,
@@ -144,6 +144,18 @@ public sealed class CaptureAnalysisIngestionService : IDisposable
 
             var createdJobCount = 0;
             var unstableChunkCount = 0;
+            var fingerprints = new Dictionary<string, CaptureChunkFingerprint>(
+                persistedChunks.Count,
+                StringComparer.Ordinal);
+            foreach (var chunk in persistedChunks)
+            {
+                fingerprints.Add(
+                    chunk.Id,
+                    await _fingerprintProvider
+                        .ComputeAsync(chunk, cancellationToken)
+                        .ConfigureAwait(false));
+            }
+
             foreach (var chunk in persistedChunks)
             {
                 if (!await ProfileStillRunnableAsync(profile, cancellationToken)
@@ -156,9 +168,13 @@ public sealed class CaptureAnalysisIngestionService : IDisposable
                         AnalysisReady: false);
                 }
 
-                var fingerprint = await _fingerprintProvider
-                    .ComputeAsync(chunk, cancellationToken)
-                    .ConfigureAwait(false);
+                var windowMembers = BuildWindowMembers(
+                    persistedChunks,
+                    fingerprints,
+                    chunk);
+                var fingerprint = _jobStore is IAnalysisWindowStore
+                    ? ComputeWindowFingerprint(windowMembers)
+                    : fingerprints[chunk.Id];
                 if (await _jobStore
                     .HasCompletedAnalysisAsync(
                         chunk.Id,
@@ -189,9 +205,13 @@ public sealed class CaptureAnalysisIngestionService : IDisposable
                 }
 
                 var pendingJob = CreatePendingJob(chunk, profile, fingerprint);
-                var result = await _jobStore
-                    .EnqueueAsync(pendingJob, cancellationToken)
-                    .ConfigureAwait(false);
+                var result = _jobStore is IAnalysisWindowStore windowStore
+                    ? await windowStore
+                        .EnqueueWindowAsync(pendingJob, windowMembers, cancellationToken)
+                        .ConfigureAwait(false)
+                    : await _jobStore
+                        .EnqueueAsync(pendingJob, cancellationToken)
+                        .ConfigureAwait(false);
                 if (result.Created)
                 {
                     createdJobCount++;
@@ -272,6 +292,105 @@ public sealed class CaptureAnalysisIngestionService : IDisposable
         return new Guid(bytes.AsSpan(0, 16), bigEndian: true);
     }
 
+    internal static IReadOnlyList<AnalysisWindowMember> BuildWindowMembers(
+        IReadOnlyList<CaptureChunk> chunks,
+        IReadOnlyDictionary<string, CaptureChunkFingerprint> fingerprints,
+        CaptureChunk anchor)
+    {
+        ArgumentNullException.ThrowIfNull(chunks);
+        ArgumentNullException.ThrowIfNull(fingerprints);
+        ArgumentNullException.ThrowIfNull(anchor);
+        var windowEnd = anchor.Range.End;
+        var cutoff = windowEnd - TimeSpan.FromMinutes(45);
+        var anchorLocalDate = DateOnly.FromDateTime(windowEnd.AddTicks(-1).DateTime);
+        var localDayStart = new DateTimeOffset(
+            anchorLocalDate.ToDateTime(TimeOnly.MinValue),
+            windowEnd.Offset);
+        var windowStart = cutoff > localDayStart ? cutoff : localDayStart;
+
+        var candidates = chunks
+            .Where(chunk => chunk.Range.Start < windowEnd && chunk.Range.End > windowStart)
+            .OrderBy(static value => value.Range.Start)
+            .ThenBy(static value => value.Id, StringComparer.Ordinal)
+            .ToArray();
+        var anchorIndex = Array.FindIndex(candidates, chunk => string.Equals(
+            chunk.Id,
+            anchor.Id,
+            StringComparison.Ordinal));
+        if (anchorIndex < 0)
+        {
+            throw new InvalidDataException(
+                "The analysis window does not contain its anchor capture chunk.");
+        }
+
+        var continuous = new List<CaptureChunk> { candidates[anchorIndex] };
+        var nextStart = candidates[anchorIndex].Range.Start;
+        for (var index = anchorIndex - 1; index >= 0; index--)
+        {
+            var candidate = candidates[index];
+            if (nextStart - candidate.Range.End > TimeSpan.FromSeconds(1))
+            {
+                break;
+            }
+
+            continuous.Add(candidate);
+            nextStart = candidate.Range.Start < nextStart
+                ? candidate.Range.Start
+                : nextStart;
+        }
+
+        continuous.Reverse();
+        var members = new List<AnalysisWindowMember>(continuous.Count);
+        foreach (var chunk in continuous)
+        {
+
+            if (!fingerprints.TryGetValue(chunk.Id, out var fingerprint))
+            {
+                throw new InvalidDataException(
+                    $"Capture chunk '{chunk.Id}' has no source fingerprint.");
+            }
+
+            var contributionStart = chunk.Range.Start > windowStart
+                ? chunk.Range.Start
+                : windowStart;
+            var contributionEnd = chunk.Range.End < windowEnd
+                ? chunk.Range.End
+                : windowEnd;
+            members.Add(new AnalysisWindowMember(
+                chunk,
+                fingerprint,
+                new TimeRange(contributionStart, contributionEnd)));
+        }
+
+        return members;
+    }
+
+    internal static CaptureChunkFingerprint ComputeWindowFingerprint(
+        IReadOnlyList<AnalysisWindowMember> members)
+    {
+        ArgumentNullException.ThrowIfNull(members);
+        if (members.Count == 0)
+        {
+            throw new ArgumentException(
+                "An aggregate input fingerprint requires window members.",
+                nameof(members));
+        }
+
+        var canonical = new StringBuilder("capture-analysis-window-v1\n");
+        foreach (var member in members)
+        {
+            canonical.Append(member.Chunk.Id).Append('\n')
+                .Append(member.SourceFingerprint.Value).Append('\n')
+                .Append(member.ContributionRange.Start.UtcDateTime.Ticks)
+                .Append('\n')
+                .Append(member.ContributionRange.End.UtcDateTime.Ticks)
+                .Append('\n');
+        }
+
+        return new CaptureChunkFingerprint(
+            Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonical.ToString()))));
+    }
+
     private async Task<bool> ProfileStillRunnableAsync(
         AiProviderProfileSnapshot expected,
         CancellationToken cancellationToken)
@@ -300,15 +419,13 @@ public sealed class CaptureAnalysisIngestionService : IDisposable
         CaptureChunk expected,
         CaptureChunk current) =>
         string.Equals(expected.Id, current.Id, StringComparison.Ordinal)
-        && expected.VideoPath == current.VideoPath
         && expected.ManifestPath == current.ManifestPath
         && expected.Range == current.Range
+        && expected.CapturedFrameCount == current.CapturedFrameCount
         && expected.FrameCount == current.FrameCount
-        && expected.VideoWidth == current.VideoWidth
-        && expected.VideoHeight == current.VideoHeight
-        && expected.FrameRateNumerator == current.FrameRateNumerator
-        && expected.FrameRateDenominator == current.FrameRateDenominator
-        && expected.VideoByteCount == current.VideoByteCount
+        && expected.FrameWidth == current.FrameWidth
+        && expected.FrameHeight == current.FrameHeight
+        && expected.FrameByteCount == current.FrameByteCount
         && expected.PersistenceGeneration == current.PersistenceGeneration
         && expected.TargetEpoch == current.TargetEpoch
         && current.Availability == CaptureChunkAvailability.Available;

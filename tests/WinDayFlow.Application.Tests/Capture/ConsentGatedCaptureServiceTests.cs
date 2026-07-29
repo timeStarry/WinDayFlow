@@ -67,25 +67,57 @@ public sealed class ConsentGatedCaptureServiceTests
     }
 
     [Fact]
-    public async Task RuntimeAuthorizationBlocksStartAndResumeBeforeTheyReachBackend()
+    public async Task RuntimeAuthorizationDefersStartButStillRejectsResume()
     {
         using var settings = await CreateConsentedSettingsAsync();
         var backend = new StubCaptureBackend(CaptureState.Stopped);
+        var authorization = new ControlledRuntimeAuthorization(
+            isCaptureAuthorized: false);
         using var service = new ConsentGatedCaptureService(
             backend,
             settings,
-            new TestRuntimeAuthorization(isCaptureAuthorized: false));
+            authorization);
 
         Assert.Equal(CaptureState.Stopped, service.CurrentStatus.State);
         Assert.Equal(CaptureReasonCode.None, service.CurrentStatus.Reason);
 
-        await Assert.ThrowsAsync<RecordingConsentRequiredException>(
-            () => service.StartAsync());
+        await service.StartAsync();
         await Assert.ThrowsAsync<RecordingConsentRequiredException>(
             () => service.ResumeAsync());
 
         Assert.Equal(0, backend.StartCount);
         Assert.Equal(0, backend.ResumeCount);
+
+        authorization.SetCaptureAuthorized(authorized: true);
+        await backend.StartCompleted.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(1, backend.StartCount);
+        Assert.Equal(CaptureState.Recording, service.CurrentStatus.State);
+    }
+
+    [Fact]
+    public async Task ExplicitEnableWhileRuntimeBlockedStartsAfterAuthorizationRecovers()
+    {
+        using var settings = await CreateSettingsWithCurrentConsentAsync();
+        var backend = new StubCaptureBackend(CaptureState.Stopped);
+        var authorization = new ControlledRuntimeAuthorization(
+            isCaptureAuthorized: false);
+        using var service = new ConsentGatedCaptureService(
+            backend,
+            settings,
+            authorization);
+
+        await settings.SetCaptureEnabledAsync(enabled: true);
+        await service.StartAsync();
+
+        Assert.True(settings.Current.CaptureEnabled);
+        Assert.Equal(0, backend.StartCount);
+
+        authorization.SetCaptureAuthorized(authorized: true);
+        await backend.StartCompleted.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(1, backend.StartCount);
+        Assert.Equal(CaptureState.Recording, service.CurrentStatus.State);
     }
 
     [Fact]

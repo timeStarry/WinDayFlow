@@ -5,20 +5,56 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:controls="using:WinDayFlow.App.Controls"
     xmlns:presentation="using:WinDayFlow.Presentation.Timeline">
+    <Page.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.ThemeDictionaries>
+                <ResourceDictionary x:Key="Default">
+                    <AcrylicBrush
+                        x:Key="DetailPaneBackgroundBrush"
+                        FallbackColor="#F3F3F3"
+                        TintColor="#FAFAFA"
+                        TintLuminosityOpacity="0.82"
+                        TintOpacity="0.68" />
+                </ResourceDictionary>
+                <ResourceDictionary x:Key="Dark">
+                    <AcrylicBrush
+                        x:Key="DetailPaneBackgroundBrush"
+                        FallbackColor="#2C2C2C"
+                        TintColor="#202020"
+                        TintLuminosityOpacity="0.72"
+                        TintOpacity="0.64" />
+                </ResourceDictionary>
+                <ResourceDictionary x:Key="HighContrast">
+                    <SolidColorBrush
+                        x:Key="DetailPaneBackgroundBrush"
+                        Color="{ThemeResource SystemColorWindowColor}" />
+                </ResourceDictionary>
+            </ResourceDictionary.ThemeDictionaries>
+        </ResourceDictionary>
+    </Page.Resources>
     <Grid>
         <SplitView
             x:Name="DetailSplitView"
             DisplayMode="Overlay"
             IsPaneOpen="False"
             OpenPaneLength="384"
+            PaneBackground="Transparent"
             PaneClosed="OnDetailPaneClosed"
             PanePlacement="Right">
         <SplitView.Pane>
-            <Grid
+            <Border
                 x:Name="DetailPaneRoot"
-                Padding="{StaticResource PanelPadding}"
+                Margin="8"
                 AutomationProperties.Name="活动详情面板"
-                Background="{ThemeResource LayerFillColorAltBrush}">
+                Background="{ThemeResource DetailPaneBackgroundBrush}"
+                BorderBrush="{ThemeResource SurfaceStrokeColorDefaultBrush}"
+                BorderThickness="1"
+                CornerRadius="8"
+                Translation="0,0,16">
+                <Border.Shadow>
+                    <ThemeShadow />
+                </Border.Shadow>
+            <Grid Padding="{StaticResource PanelPadding}">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="*" />
@@ -116,6 +152,35 @@
                             </StackPanel>
                         </Grid>
 
+                        <StackPanel
+                            x:Name="ProcessTelemetryPanel"
+                            Spacing="8"
+                            Visibility="Collapsed">
+                            <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}" Text="进程资源" />
+                            <TextBlock
+                                x:Name="ProcessIdentityText"
+                                TextWrapping="Wrap" />
+                            <Grid ColumnSpacing="16">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Spacing="2">
+                                    <TextBlock Style="{StaticResource MetadataTextStyle}" Text="CPU" />
+                                    <TextBlock x:Name="ProcessCpuText" />
+                                </StackPanel>
+                                <StackPanel Grid.Column="1" Spacing="2">
+                                    <TextBlock Style="{StaticResource MetadataTextStyle}" Text="工作集" />
+                                    <TextBlock x:Name="ProcessWorkingSetText" />
+                                </StackPanel>
+                                <StackPanel Grid.Column="2" Spacing="2">
+                                    <TextBlock Style="{StaticResource MetadataTextStyle}" Text="私有内存" />
+                                    <TextBlock x:Name="ProcessPrivateMemoryText" />
+                                </StackPanel>
+                            </Grid>
+                        </StackPanel>
+
                         <StackPanel Spacing="6">
                             <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}" Text="标签" />
                             <TextBlock Text="{Binding TagsText}" TextWrapping="Wrap" />
@@ -168,16 +233,67 @@
                             Message="此活动由你手工记录，没有关联屏幕截图或录像。"
                             Severity="Informational"
                             Title="没有屏幕证据" />
-                        <InfoBar
-                            x:Name="AnalyzedEvidenceInfoBar"
-                            IsClosable="False"
-                            IsOpen="True"
-                            Message="原生捕获内核接入后，可在此查看缩略图、录像和时间定位。"
-                            Severity="Informational"
-                            Title="Evidence 查看尚不可用" />
+                        <StackPanel
+                            x:Name="EvidenceViewerPanel"
+                            Spacing="10"
+                            Visibility="Collapsed">
+                            <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}" Text="屏幕截图" />
+                            <Border
+                                Background="{ThemeResource ControlFillColorSecondaryBrush}"
+                                CornerRadius="4">
+                                <Image
+                                    x:Name="EvidenceImage"
+                                    Height="180"
+                                    AutomationProperties.Name="当前屏幕截图"
+                                    Stretch="Uniform" />
+                            </Border>
+                            <Grid ColumnSpacing="8">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <Button
+                                    x:Name="PreviousEvidenceFrameButton"
+                                    Click="OnPreviousEvidenceFrame"
+                                    AutomationProperties.Name="上一张截图"
+                                    ToolTipService.ToolTip="上一张">
+                                    <SymbolIcon Symbol="Previous" />
+                                </Button>
+                                <Button
+                                    x:Name="NextEvidenceFrameButton"
+                                    Grid.Column="1"
+                                    Click="OnNextEvidenceFrame"
+                                    AutomationProperties.Name="下一张截图"
+                                    ToolTipService.ToolTip="下一张">
+                                    <SymbolIcon Symbol="Next" />
+                                </Button>
+                                <TextBlock
+                                    x:Name="EvidenceFramePositionText"
+                                    Grid.Column="2"
+                                    VerticalAlignment="Center"
+                                    Style="{StaticResource MetadataTextStyle}"
+                                    TextWrapping="Wrap" />
+                                <ProgressRing
+                                    x:Name="EvidenceProgressRing"
+                                    Grid.Column="3"
+                                    Width="20"
+                                    Height="20"
+                                    IsActive="False"
+                                    Visibility="Collapsed" />
+                            </Grid>
+                            <InfoBar
+                                x:Name="EvidenceInfoBar"
+                                IsClosable="False"
+                                IsOpen="False"
+                                Severity="Error"
+                                Title="无法读取屏幕证据" />
+                        </StackPanel>
                     </StackPanel>
                 </ScrollViewer>
             </Grid>
+            </Border>
         </SplitView.Pane>
 
         <Grid
@@ -275,6 +391,13 @@
                                 VerticalAlignment="Center"
                                 Text="{x:Bind ViewModel.AnalysisPipelineCompactStatusText, Mode=OneWay}" />
                         </StackPanel>
+                    </Button>
+                    <Button
+                        x:Name="ExportRangeTimelapseButton"
+                        Click="OnExportTimelapse"
+                        AutomationProperties.Name="按时间范围导出延时视频"
+                        ToolTipService.ToolTip="导出延时视频">
+                        <SymbolIcon Symbol="Save" />
                     </Button>
                     <Button
                         x:Name="CreateActivityButton"
@@ -378,7 +501,10 @@
                     BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}"
                     BorderThickness="0,0,0,1"
                     Visibility="Collapsed">
-                    <StackPanel Spacing="6">
+                    <Expander
+                        AutomationProperties.Name="录制处理状态"
+                        IsExpanded="False">
+                        <Expander.Header>
                         <StackPanel Orientation="Horizontal" Spacing="8">
                             <FontIcon
                                 FontSize="14"
@@ -388,6 +514,8 @@
                                 Style="{StaticResource BodyStrongTextBlockStyle}"
                                 Text="录制处理状态" />
                         </StackPanel>
+                        </Expander.Header>
+                    <StackPanel Margin="0,6,0,0" Spacing="6">
 
                         <Grid
                             x:Name="UnprocessedStatusError"
@@ -498,6 +626,7 @@
                             </ListView.ItemTemplate>
                         </ListView>
                     </StackPanel>
+                    </Expander>
                 </Border>
 
                 <Grid Grid.Row="1">

@@ -257,8 +257,21 @@ public sealed class OpenAiCompatibleProvider : IAiAnalysisProvider, IDisposable
                     + "Cover the entire request interval contiguously: the first start_offset_ms must be 0, "
                     + "each next start_offset_ms must equal the previous end_offset_ms, and the final "
                     + "end_offset_ms must equal range_duration_ms. "
+                    + "Group frames into cohesive work activities instead of narrating each frame. "
+                    + "Continue the same activity while the user's main goal remains stable. Fold unrelated "
+                    + "detours shorter than about five minutes into the surrounding activity as distractions, "
+                    + "and split only when a different focus is sustained for about ten minutes. Prefer useful "
+                    + "activity blocks of roughly 15 to 60 minutes when the evidence supports them. "
+                    + "Sparse evidence can mean consecutive near-identical frames were removed; treat the state "
+                    + "as continuing between retained frames unless another frame or context contradicts it. "
+                    + "Use existing timeline cards as revisable recent context. Merge or split unlocked cards "
+                    + "when the wider evidence clarifies the user's goal. Preserve the meaning and boundaries "
+                    + "of intervals marked locked. "
                     + "When evidence is insufficient for any interval, still emit an activity for it using "
-                    + "unknown labels so that no time is omitted."),
+                    + "the exact category and productivity label 'unknown' so that no time is omitted. "
+                    + "Category must be one of: unknown, focused_work, communication, meeting, planning, "
+                    + "research, administration, learning, break, personal. Productivity must be one of: "
+                    + "unknown, focused, neutral, distracting, break."),
                 new ChatMessage("user", userContent),
             ],
             Temperature: 0,
@@ -277,11 +290,23 @@ public sealed class OpenAiCompatibleProvider : IAiAnalysisProvider, IDisposable
             request.SchemaVersion,
             request.Locale,
             checked((long)request.Range.Duration.TotalMilliseconds),
+            request.EvidenceReferences.Select(reference => new AnalysisPromptEvidenceSource(
+                reference.CaptureChunkId,
+                checked((long)((reference.ContributionRange?.Start ?? request.Range.Start)
+                    - request.Range.Start).TotalMilliseconds),
+                checked((long)((reference.ContributionRange?.End ?? request.Range.End)
+                    - request.Range.Start).TotalMilliseconds))).ToArray(),
             request.Context.Select(slice => new AnalysisPromptContextSlice(
                 checked((long)(slice.Range.Start - request.Range.Start).TotalMilliseconds),
                 checked((long)(slice.Range.End - request.Range.Start).TotalMilliseconds),
                 slice.ApplicationId,
-                slice.ApplicationDisplayName)).ToArray());
+                slice.ApplicationDisplayName)).ToArray(),
+            request.ExistingEntries.Select(entry => new AnalysisPromptExistingEntry(
+                checked((long)(entry.Range.Start - request.Range.Start).TotalMilliseconds),
+                checked((long)(entry.Range.End - request.Range.Start).TotalMilliseconds),
+                entry.Title,
+                entry.Summary,
+                entry.IsLocked)).ToArray());
         return "Request context: " + JsonSerializer.Serialize(context, RequestJsonOptions);
     }
 
@@ -529,8 +554,23 @@ public sealed class OpenAiCompatibleProvider : IAiAnalysisProvider, IDisposable
                 ["end_offset_ms"] = IntegerSchema(),
                 ["title"] = StringSchema(),
                 ["summary"] = StringSchema(),
-                ["category"] = StringSchema(),
-                ["productivity"] = StringSchema(),
+                ["category"] = EnumStringSchema(
+                    "unknown",
+                    "focused_work",
+                    "communication",
+                    "meeting",
+                    "planning",
+                    "research",
+                    "administration",
+                    "learning",
+                    "break",
+                    "personal"),
+                ["productivity"] = EnumStringSchema(
+                    "unknown",
+                    "focused",
+                    "neutral",
+                    "distracting",
+                    "break"),
                 ["application_ids"] = StringArraySchema(),
                 ["tags"] = StringArraySchema(),
                 ["confidence"] = new Dictionary<string, object?>
@@ -555,6 +595,15 @@ public sealed class OpenAiCompatibleProvider : IAiAnalysisProvider, IDisposable
         return new Dictionary<string, object?>
         {
             ["type"] = "string",
+        };
+    }
+
+    private static Dictionary<string, object?> EnumStringSchema(params string[] values)
+    {
+        return new Dictionary<string, object?>
+        {
+            ["type"] = "string",
+            ["enum"] = values,
         };
     }
 
@@ -744,13 +793,27 @@ public sealed class OpenAiCompatibleProvider : IAiAnalysisProvider, IDisposable
         [property: JsonPropertyName("schema_version")] string SchemaVersion,
         [property: JsonPropertyName("locale")] string Locale,
         [property: JsonPropertyName("range_duration_ms")] long RangeDurationMilliseconds,
-        [property: JsonPropertyName("application_context")] IReadOnlyList<AnalysisPromptContextSlice> ApplicationContext);
+        [property: JsonPropertyName("evidence_sources")] IReadOnlyList<AnalysisPromptEvidenceSource> EvidenceSources,
+        [property: JsonPropertyName("application_context")] IReadOnlyList<AnalysisPromptContextSlice> ApplicationContext,
+        [property: JsonPropertyName("existing_timeline")] IReadOnlyList<AnalysisPromptExistingEntry> ExistingTimeline);
+
+    private sealed record AnalysisPromptEvidenceSource(
+        [property: JsonPropertyName("capture_chunk_id")] string CaptureChunkId,
+        [property: JsonPropertyName("start_offset_ms")] long StartOffsetMilliseconds,
+        [property: JsonPropertyName("end_offset_ms")] long EndOffsetMilliseconds);
 
     private sealed record AnalysisPromptContextSlice(
         [property: JsonPropertyName("start_offset_ms")] long StartOffsetMilliseconds,
         [property: JsonPropertyName("end_offset_ms")] long EndOffsetMilliseconds,
         [property: JsonPropertyName("application_id")] string ApplicationId,
         [property: JsonPropertyName("application_display_name")] string ApplicationDisplayName);
+
+    private sealed record AnalysisPromptExistingEntry(
+        [property: JsonPropertyName("start_offset_ms")] long StartOffsetMilliseconds,
+        [property: JsonPropertyName("end_offset_ms")] long EndOffsetMilliseconds,
+        [property: JsonPropertyName("title")] string Title,
+        [property: JsonPropertyName("summary")] string Summary,
+        [property: JsonPropertyName("locked")] bool Locked);
 
     private sealed class ChatCompletionResponse
     {

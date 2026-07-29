@@ -142,6 +142,25 @@ CaptureInstanceController::CaptureInstanceController(
 
 CaptureInstanceController::~CaptureInstanceController() { Shutdown(); }
 
+wdf_capture_result CaptureInstanceController::UpdateTiming(
+    uint32_t capture_interval_ms, uint32_t chunk_duration_ms) noexcept {
+  try {
+    std::lock_guard lock(mutex_);
+    if (activation_mode_ != CaptureActivationMode::kEnabled ||
+        worker_ == nullptr) {
+      return WDF_CAPTURE_RESULT_NOT_IMPLEMENTED;
+    }
+    if (shutting_down_ || state_ != WDF_CAPTURE_STATE_STOPPED) {
+      return WDF_CAPTURE_RESULT_INVALID_STATE;
+    }
+    return worker_->UpdateTiming(capture_interval_ms, chunk_duration_ms)
+               ? WDF_CAPTURE_RESULT_OK
+               : WDF_CAPTURE_RESULT_INVALID_ARGUMENT;
+  } catch (...) {
+    return WDF_CAPTURE_RESULT_INTERNAL_ERROR;
+  }
+}
+
 CaptureSafetyUpdateResult
 CaptureInstanceController::UpdateRuntimeAuthorization(
     const RuntimeAuthorization& authorization,
@@ -155,11 +174,16 @@ CaptureInstanceController::UpdateRuntimeAuthorization(
                 ? WDF_CAPTURE_REASON_NONE
                 : WDF_CAPTURE_REASON_POLICY_BLOCKED
           : decision.reason;
-  if (shutting_down_ || state_ == WDF_CAPTURE_STATE_STOPPING ||
-      !PauseForAuthorizationChangeUnderLock(pause_reason)) {
+  if (shutting_down_ || state_ == WDF_CAPTURE_STATE_STOPPING) {
     return CaptureSafetyUpdateResult::kRevokedDuringUpdate;
   }
-  const CaptureSafetyUpdateTicket ticket = safety_.BeginAuthorizationUpdate();
+  const CaptureSafetyUpdateTicket ticket =
+      active_run_ != nullptr && state_ != WDF_CAPTURE_STATE_PAUSED
+          ? safety_.BeginSealedAuthorizationUpdate()
+          : safety_.BeginAuthorizationUpdate();
+  if (!PauseForAuthorizationChangeUnderLock(pause_reason)) {
+    return CaptureSafetyUpdateResult::kRevokedDuringUpdate;
+  }
   runtime_.NotifyAuthorizationChanged();
   return safety_.CompleteRuntimeAuthorization(ticket, authorization,
                                                persistence_generation);
@@ -175,14 +199,19 @@ CaptureSafetyUpdateResult CaptureInstanceController::UpdatePrivacyContext(
                 ? WDF_CAPTURE_REASON_NONE
                 : WDF_CAPTURE_REASON_POLICY_BLOCKED
           : decision.reason;
-  if (shutting_down_ || state_ == WDF_CAPTURE_STATE_STOPPING ||
-      !PauseForAuthorizationChangeUnderLock(pause_reason)) {
+  if (shutting_down_ || state_ == WDF_CAPTURE_STATE_STOPPING) {
     return CaptureSafetyUpdateResult::kRevokedDuringUpdate;
   }
-  const CaptureSafetyUpdateTicket ticket = safety_.BeginAuthorizationUpdate();
+  const CaptureSafetyUpdateTicket ticket =
+      active_run_ != nullptr && state_ != WDF_CAPTURE_STATE_PAUSED
+          ? safety_.BeginSealedAuthorizationUpdate()
+          : safety_.BeginAuthorizationUpdate();
+  if (!PauseForAuthorizationChangeUnderLock(pause_reason)) {
+    return CaptureSafetyUpdateResult::kRevokedDuringUpdate;
+  }
   runtime_.NotifyAuthorizationChanged();
   return safety_.CompleteLegacyPrivacyContext(ticket, privacy,
-                                              persistence_generation);
+                                               persistence_generation);
 }
 
 wdf_capture_result CaptureInstanceController::InvalidateRuntimeAuthorization(
@@ -193,12 +222,14 @@ wdf_capture_result CaptureInstanceController::InvalidateRuntimeAuthorization(
     }
     *authorization_epoch = 0;
     std::lock_guard lock(mutex_);
-    if (shutting_down_ || state_ == WDF_CAPTURE_STATE_STOPPING ||
-        !PauseForAuthorizationChangeUnderLock(
-            WDF_CAPTURE_REASON_POLICY_BLOCKED)) {
+    if (shutting_down_ || state_ == WDF_CAPTURE_STATE_STOPPING) {
       return WDF_CAPTURE_RESULT_INVALID_STATE;
     }
     const uint64_t epoch = safety_.InvalidateAuthorizationAdmission();
+    if (!PauseForAuthorizationChangeUnderLock(
+            WDF_CAPTURE_REASON_POLICY_BLOCKED)) {
+      return WDF_CAPTURE_RESULT_INVALID_STATE;
+    }
     runtime_.NotifyAuthorizationChanged();
     if (epoch == 0) {
       return WDF_CAPTURE_RESULT_GENERATION_EXHAUSTED;
@@ -214,8 +245,13 @@ CaptureSafetyUpdateResult
 CaptureInstanceController::RevokeRuntimeAuthorization(
     uint64_t* persistence_generation) {
   std::unique_lock lock(mutex_);
-  if (shutting_down_ || state_ == WDF_CAPTURE_STATE_STOPPING ||
-      !PauseForAuthorizationChangeUnderLock(
+  if (shutting_down_ || state_ == WDF_CAPTURE_STATE_STOPPING) {
+    return CaptureSafetyUpdateResult::kRevokedDuringUpdate;
+  }
+  if (active_run_ != nullptr && state_ != WDF_CAPTURE_STATE_PAUSED) {
+    static_cast<void>(safety_.BeginSealedAuthorizationUpdate());
+  }
+  if (!PauseForAuthorizationChangeUnderLock(
           WDF_CAPTURE_REASON_POLICY_BLOCKED)) {
     return CaptureSafetyUpdateResult::kRevokedDuringUpdate;
   }

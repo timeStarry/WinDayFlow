@@ -187,17 +187,21 @@ class TestBackend final
     return CaptureWorkerBackendResult::kInternalFailure;
   }
   windayflow::capture::CaptureWorkerBackendResult BeginChunk(
-      const windayflow::capture::MfH264ChunkWriterConfig&) noexcept override {
+      std::string_view,
+      const windayflow::capture::JpegFrameChunkWriterConfig&) noexcept
+      override {
     state_->called.store(true);
     return CaptureWorkerBackendResult::kInternalFailure;
   }
   windayflow::capture::CaptureWorkerBackendResult EncodeFrame(
-      std::span<const uint8_t>, int64_t) noexcept override {
+      std::span<const uint8_t>, uint64_t) noexcept override {
     state_->called.store(true);
     return CaptureWorkerBackendResult::kInternalFailure;
   }
   windayflow::capture::CaptureWorkerBackendResult FinalizeChunk(
-      int64_t, std::vector<uint8_t>*) noexcept override {
+      windayflow::capture::ChunkManifest*,
+      std::unique_ptr<windayflow::capture::CaptureWorkerPublication>*)
+      noexcept override {
     state_->called.store(true);
     return CaptureWorkerBackendResult::kInternalFailure;
   }
@@ -205,14 +209,6 @@ class TestBackend final
   bool CreateArtifactId(std::string*) noexcept override {
     state_->called.store(true);
     return false;
-  }
-  windayflow::capture::CaptureWorkerBackendResult PreparePublication(
-      std::string_view, std::span<const uint8_t>,
-      const windayflow::capture::ChunkManifest&,
-      std::unique_ptr<windayflow::capture::CaptureWorkerPublication>*)
-      noexcept override {
-    state_->called.store(true);
-    return CaptureWorkerBackendResult::kInternalFailure;
   }
   int64_t SteadyNowMilliseconds() noexcept override {
     state_->called.store(true);
@@ -306,6 +302,37 @@ windayflow::capture::CaptureTargetIdentity Target() {
 
 bool Authorize(CaptureInstanceController& controller, uint64_t revision,
                uint64_t* generation);
+bool StartEnabled(CaptureInstanceController& controller, uint64_t generation);
+
+bool TestTimingUpdatesRequireStoppedEnabledCapture() {
+  auto backend_state = std::make_shared<BackendState>();
+  CaptureInstanceControllerConfiguration configuration;
+  configuration.activation_mode = CaptureActivationMode::kEnabled;
+  CaptureInstanceController controller(
+      configuration,
+      std::make_unique<TestBackend>(true, false, backend_state));
+  if (!Expect(controller.UpdateTiming(5'000, 900'000) ==
+                  WDF_CAPTURE_RESULT_OK,
+              "valid stopped timing update was rejected") ||
+      !Expect(controller.UpdateTiming(0, 900'000) ==
+                  WDF_CAPTURE_RESULT_INVALID_ARGUMENT,
+              "invalid capture interval was accepted")) {
+    return false;
+  }
+
+  uint64_t generation = 0;
+  if (!Expect(Authorize(controller, 1, &generation) &&
+                  StartEnabled(controller, generation),
+              "timing state fixture failed to start") ||
+      !Expect(controller.UpdateTiming(10'000, 900'000) ==
+                  WDF_CAPTURE_RESULT_INVALID_STATE,
+              "timing changed while capture was active")) {
+    return false;
+  }
+  return Expect(controller.RequestStop() == WDF_CAPTURE_RESULT_OK &&
+                    controller.WaitStopped(2'000) == WDF_CAPTURE_RESULT_OK,
+                "timing state fixture did not stop");
+}
 
 bool TestDisabledConsumesAdmissionWithoutStarting() {
   auto backend_state = std::make_shared<BackendState>();
@@ -1331,7 +1358,8 @@ bool TestTerminalExceptionRelinquishesWaitLeadership() {
 }  // namespace
 
 int main() {
-  if (!TestDisabledConsumesAdmissionWithoutStarting() ||
+  if (!TestTimingUpdatesRequireStoppedEnabledCapture() ||
+      !TestDisabledConsumesAdmissionWithoutStarting() ||
       !TestDisabledRevokeDoesNotCreateStopRun() ||
       !TestSyntheticStopRevokesWhenRequiredQueueIsFull() ||
       !TestEnabledStateSequenceAndStop() ||

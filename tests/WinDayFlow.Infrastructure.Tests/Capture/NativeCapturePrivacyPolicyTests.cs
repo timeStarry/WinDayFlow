@@ -40,7 +40,12 @@ public sealed class NativeCapturePrivacyPolicyTests
             NativeCaptureConditionState.Inactive,
             NativeCapturePolicyDecision.Allow,
             NativeCapturePolicyDecision.Allow,
-            NativeCapturePolicyDecision.Allow);
+            NativeCapturePolicyDecision.Allow,
+            new NativeCaptureIdentitySnapshot(
+                executableName: "notepad.exe",
+                packageFamilyName: null,
+                publisherCertificateSha256: null,
+                windowTitle: "Untitled - Notepad"));
 
         var context = NativeCapturePrivacyPolicy.Compose(
             settings,
@@ -159,6 +164,30 @@ public sealed class NativeCapturePrivacyPolicyTests
 
         var context = NativeCapturePrivacyPolicy.Compose(
             CreateEnabledSettings(privacy),
+            signals,
+            runtimePolicyRevision: 10);
+
+        Assert.Equal(
+            NativeCapturePolicyDecision.Block,
+            context.ApplicationAllowed);
+        Assert.Equal(
+            NativeCapturePolicyDecision.Allow,
+            context.WindowAllowed);
+    }
+
+    [Fact]
+    public void DefaultWinDayFlowRuleBlocksSelfCapture()
+    {
+        var signals = CopySignals(
+            CreateAllowedSignals(),
+            captureIdentity: new NativeCaptureIdentitySnapshot(
+                executableName: "WINDAYFLOW.APP.EXE",
+                packageFamilyName: null,
+                publisherCertificateSha256: null,
+                windowTitle: "WinDayFlow"));
+
+        var context = NativeCapturePrivacyPolicy.Compose(
+            CreateEnabledSettings(CapturePrivacySettings.Default),
             signals,
             runtimePolicyRevision: 10);
 
@@ -413,7 +442,12 @@ public sealed class NativeCapturePrivacyPolicyTests
             NativeCaptureConditionState.Inactive,
             NativeCapturePolicyDecision.Allow,
             NativeCapturePolicyDecision.Allow,
-            NativeCapturePolicyDecision.Allow);
+            NativeCapturePolicyDecision.Allow,
+            new NativeCaptureIdentitySnapshot(
+                executableName: "notepad.exe",
+                packageFamilyName: null,
+                publisherCertificateSha256: null,
+                windowTitle: "Untitled - Notepad"));
     }
 
     private static NativeCapturePrivacySignals CopySignals(

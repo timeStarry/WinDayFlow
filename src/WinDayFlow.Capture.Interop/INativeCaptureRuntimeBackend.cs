@@ -10,6 +10,13 @@ internal interface INativeCaptureRuntimeBackend
 
     CaptureStatus CurrentStatus { get; }
 
+    Task UpdateTimingAsync(
+        uint captureIntervalMilliseconds,
+        uint chunkDurationMilliseconds,
+        CancellationToken cancellationToken = default) =>
+        Task.FromException(new NotSupportedException(
+            "The native capture backend does not support timing updates."));
+
     event EventHandler<CaptureStatusChangedEventArgs>? StatusChanged;
 
     Task<NativeCaptureCommandAdmissionV1?> TryIssueCommandAdmissionAsync(

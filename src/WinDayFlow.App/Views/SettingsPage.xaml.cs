@@ -17,6 +17,7 @@ public sealed partial class SettingsPage : Page
     private ExclusionRuleItemViewModel? _editingExclusionRule;
     private bool _isSubscribed;
     private bool _isUpdatingCloudAnalysisToggle;
+    private bool _isUpdatingCaptureInterval;
     private bool _isUpdatingCaptureToggle;
     private bool _isUpdatingExclusionRuleControls;
     private bool _isUpdatingPrivacyControls;
@@ -34,6 +35,7 @@ public sealed partial class SettingsPage : Page
         SizeChanged += OnSizeChanged;
         SynchronizeThemePicker();
         SynchronizeCaptureToggle();
+        SynchronizeCaptureInterval();
         SynchronizePrivacyControls();
         UpdateConsentActions();
         UpdateCaptureInformation();
@@ -58,6 +60,7 @@ public sealed partial class SettingsPage : Page
         UpdateResponsiveLayout(ActualWidth);
         SynchronizeThemePicker();
         SynchronizeCaptureToggle();
+        SynchronizeCaptureInterval();
         SynchronizePrivacyControls();
         UpdateConsentActions();
         UpdateCaptureInformation();
@@ -192,6 +195,26 @@ public sealed partial class SettingsPage : Page
         if (!await ViewModel.SetCaptureEnabledAsync(CaptureToggle.IsOn))
         {
             SynchronizeCaptureToggle();
+        }
+
+        UpdateErrorInformation();
+    }
+
+    private async void OnCaptureIntervalChanged(
+        object sender,
+        SelectionChangedEventArgs e)
+    {
+        if (_isUpdatingCaptureInterval
+            || CaptureIntervalPicker.SelectedItem is not ComboBoxItem { Tag: string value }
+            || !int.TryParse(value, CultureInfo.InvariantCulture, out var seconds)
+            || seconds == ViewModel.CaptureIntervalSeconds)
+        {
+            return;
+        }
+
+        if (!await ViewModel.SetCaptureIntervalSecondsAsync(seconds))
+        {
+            SynchronizeCaptureInterval();
         }
 
         UpdateErrorInformation();
@@ -702,6 +725,11 @@ public sealed partial class SettingsPage : Page
             SynchronizeCaptureToggle();
         }
 
+        if (e.PropertyName == nameof(SettingsViewModel.CaptureIntervalSeconds))
+        {
+            SynchronizeCaptureInterval();
+        }
+
         if (e.PropertyName is nameof(SettingsViewModel.EvidenceRetentionDays)
             or nameof(SettingsViewModel.ExcludeSensitiveApplications)
             or nameof(SettingsViewModel.PauseInRemoteSessions)
@@ -1164,6 +1192,26 @@ public sealed partial class SettingsPage : Page
         _isUpdatingCaptureToggle = false;
     }
 
+    private void SynchronizeCaptureInterval()
+    {
+        _isUpdatingCaptureInterval = true;
+        try
+        {
+            var value = ViewModel.CaptureIntervalSeconds.ToString(
+                CultureInfo.InvariantCulture);
+            CaptureIntervalPicker.SelectedItem = CaptureIntervalPicker.Items
+                .OfType<ComboBoxItem>()
+                .First(item => string.Equals(
+                    item.Tag as string,
+                    value,
+                    StringComparison.Ordinal));
+        }
+        finally
+        {
+            _isUpdatingCaptureInterval = false;
+        }
+    }
+
     private void SynchronizePrivacyControls()
     {
         _isUpdatingPrivacyControls = true;
@@ -1317,6 +1365,10 @@ public sealed partial class SettingsPage : Page
         UpdateSettingLayout(ThemeSettingLayout, ThemePicker, useStackedLayout);
         UpdateSettingLayout(ConsentSettingLayout, ConsentActionPanel, useStackedLayout);
         UpdateSettingLayout(CaptureSettingLayout, CaptureToggle, useStackedLayout);
+        UpdateSettingLayout(
+            CaptureIntervalSettingLayout,
+            CaptureIntervalPicker,
+            useStackedLayout);
         UpdateSettingLayout(StorageSettingLayout, DataFolderTextBox, useStackedLayout);
         UpdateSettingLayout(RetentionSettingLayout, RetentionPicker, useStackedLayout);
         UpdateSettingLayout(

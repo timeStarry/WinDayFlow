@@ -20,12 +20,16 @@ windayflow::capture::ChunkManifest ValidManifest() {
       1'784'269'200'000,
       1'784'269'260'000,
       6,
-      1'920,
-      1'080,
-      1,
-      10,
+      1'600,
+      900,
+      8,
       7,
       11,
+      false,
+      {{0, 0, 4, std::string(64, 'A')},
+       {1, 50'000, 4, std::string(64, 'B')}},
+      windayflow::capture::ChunkApplicationManifest{
+          "Code.exe", 4242, 1'250, 536'870'912, 402'653'184},
   };
 }
 
@@ -36,18 +40,24 @@ bool TestBuildsStablePrivacySafeSchema() {
               "valid chunk manifest was rejected")) {
     return false;
   }
-  const std::array<std::string, 11> required{
-      "\"schemaVersion\": 1",
+  const std::array<std::string, 17> required{
+      "\"schemaVersion\": 3",
       "\"captureScope\": \"authorized-foreground-display\"",
       "\"chunkId\": \"chunk_20260717_120000_000001\"",
       "\"startTimeUnixMs\": 1784269200000",
       "\"endTimeUnixMs\": 1784269260000",
       "\"persistenceGeneration\": 7",
       "\"targetEpoch\": 11",
-      "\"codec\": \"h264\"",
-      "\"frameCount\": 6",
-      "\"width\": 1920",
-      "\"frameRateDenominator\": 10",
+      "\"processName\":\"Code.exe\"",
+      "\"processId\":4242",
+      "\"cpuUsageBasisPoints\":1250",
+      "\"workingSetBytes\":536870912",
+      "\"privateMemoryBytes\":402653184",
+      "\"format\": \"jpeg\"",
+      "\"quality\": 82",
+      "\"capturedFrameCount\": 6",
+      "\"retainedFrameCount\": 2",
+      "\"path\":\"frames/frame-000001.jpg\"",
   };
   for (const std::string& fragment : required) {
     if (!Expect(json.find(fragment) != std::string::npos,
@@ -56,32 +66,17 @@ bool TestBuildsStablePrivacySafeSchema() {
     }
   }
   const std::array<std::string, 8> forbidden{
-      "windowTitle",  "processName",      "processPath",   "processId",
-      "windowHandle", "displayDeviceKey", "monitorHandle", "appName",
+      "windowTitle", "processPath", "windowHandle", "displayDeviceKey",
+      "monitorHandle", "appName", "codec", "capture.mp4",
   };
   for (const std::string& field : forbidden) {
     if (!Expect(json.find(field) == std::string::npos,
-                "manifest exposed sensitive target metadata")) {
+                "manifest exposed forbidden metadata")) {
       return false;
     }
   }
   return Expect(json.ends_with("}\n"),
                 "manifest was not terminated predictably");
-}
-
-bool TestBuildsDisplayWideContinuousScope() {
-  auto manifest = ValidManifest();
-  manifest.display_wide_scope = true;
-  std::string json;
-  return Expect(windayflow::capture::BuildChunkManifestJson(manifest, &json),
-                "display-wide chunk manifest was rejected") &&
-         Expect(json.find(
-                    "\"captureScope\": \"authorized-display-continuous\"") !=
-                    std::string::npos,
-                "display-wide chunk manifest omitted its continuous scope") &&
-         Expect(json.find("authorized-foreground-display") ==
-                    std::string::npos,
-                "display-wide chunk manifest retained foreground scope");
 }
 
 bool TestRejectsInvalidFieldsAndClearsOutput() {
@@ -93,47 +88,51 @@ bool TestRejectsInvalidFieldsAndClearsOutput() {
 
   auto value = ValidManifest();
   value.chunk_id = "../escape";
-  if (!Expect(Reject(value), "unsafe manifest chunk ID was accepted")) {
+  if (!Expect(Reject(value), "unsafe chunk ID was accepted")) {
     return false;
   }
   value = ValidManifest();
-  value.end_time_unix_ms = value.start_time_unix_ms;
-  if (!Expect(Reject(value), "zero-duration manifest was accepted")) {
+  value.captured_frame_count = 1;
+  if (!Expect(Reject(value), "retained count above captured count was accepted")) {
     return false;
   }
   value = ValidManifest();
-  value.frame_count = 0;
-  if (!Expect(Reject(value), "empty manifest video was accepted")) {
+  value.frames[1].offset_milliseconds = 0;
+  if (!Expect(Reject(value), "non-increasing offsets were accepted")) {
     return false;
   }
   value = ValidManifest();
-  value.video_width = 1'919;
-  if (!Expect(Reject(value), "odd manifest width was accepted")) {
+  value.frame_byte_count = 7;
+  if (!Expect(Reject(value), "incorrect aggregate byte count was accepted")) {
     return false;
   }
   value = ValidManifest();
-  value.frame_rate_denominator = 0;
-  if (!Expect(Reject(value), "zero manifest frame rate was accepted")) {
+  value.frames[0].sha256 = "bad";
+  if (!Expect(Reject(value), "invalid frame digest was accepted")) {
     return false;
   }
   value = ValidManifest();
   value.persistence_generation = 0;
-  if (!Expect(Reject(value), "unbound manifest generation was accepted")) {
+  if (!Expect(Reject(value), "unbound generation was accepted")) {
     return false;
   }
   value = ValidManifest();
-  value.target_epoch = 0;
-  return Expect(Reject(value), "unbound manifest target was accepted") &&
+  value.application->cpu_usage_basis_points = 10'001;
+  if (!Expect(Reject(value), "invalid process CPU utilization was accepted")) {
+    return false;
+  }
+  value = ValidManifest();
+  value.display_wide_scope = true;
+  return Expect(Reject(value), "display-wide evidence exposed one process") &&
          Expect(!windayflow::capture::BuildChunkManifestJson(ValidManifest(),
                                                              nullptr),
-                "null manifest destination was accepted");
+                "null destination was accepted");
 }
 
 }  // namespace
 
 int main() {
   if (!TestBuildsStablePrivacySafeSchema() ||
-      !TestBuildsDisplayWideContinuousScope() ||
       !TestRejectsInvalidFieldsAndClearsOutput()) {
     return 1;
   }

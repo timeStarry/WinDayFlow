@@ -267,15 +267,13 @@ public sealed class AnalysisPipelineSupervisorTests
         var start = Now.AddMinutes(minuteOffset);
         return new CaptureChunk(
             id,
-            new EvidenceRelativePath($"chunks/{id}/capture.mp4"),
             new EvidenceRelativePath($"chunks/{id}/manifest.json"),
             new TimeRange(start, start.AddMinutes(1)),
+            capturedFrameCount: 10,
             frameCount: 6,
-            videoWidth: 1920,
-            videoHeight: 1080,
-            frameRateNumerator: 1,
-            frameRateDenominator: 10,
-            videoByteCount: 4_096,
+            frameWidth: 1600,
+            frameHeight: 900,
+            frameByteCount: 4_096,
             persistenceGeneration: 1,
             targetEpoch: 2,
             committedAtUtc: start.AddMinutes(1),
@@ -708,7 +706,7 @@ public sealed class AnalysisPipelineSupervisorTests
 
             cancellationToken.ThrowIfCancellationRequested();
             return Task.FromResult(new AnalysisEvidenceBatch(
-                chunk.VideoPath.Value,
+                chunk.ManifestPath.Value,
                 expectedSourceFingerprint,
                 [new AiEvidenceImage(
                     "frame-1",

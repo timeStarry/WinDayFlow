@@ -54,6 +54,21 @@ public sealed class SqliteTimelineRepositoryTests
         Assert.True(await reader.ReadAsync());
         Assert.Equal(7, reader.GetInt32(0));
         Assert.Equal(1, reader.GetInt32(1));
+        Assert.True(await reader.ReadAsync());
+        Assert.Equal(8, reader.GetInt32(0));
+        Assert.Equal(1, reader.GetInt32(1));
+        Assert.True(await reader.ReadAsync());
+        Assert.Equal(9, reader.GetInt32(0));
+        Assert.Equal(1, reader.GetInt32(1));
+        Assert.True(await reader.ReadAsync());
+        Assert.Equal(10, reader.GetInt32(0));
+        Assert.Equal(1, reader.GetInt32(1));
+        Assert.True(await reader.ReadAsync());
+        Assert.Equal(11, reader.GetInt32(0));
+        Assert.Equal(1, reader.GetInt32(1));
+        Assert.True(await reader.ReadAsync());
+        Assert.Equal(12, reader.GetInt32(0));
+        Assert.Equal(1, reader.GetInt32(1));
         Assert.False(await reader.ReadAsync());
     }
 
@@ -114,6 +129,93 @@ public sealed class SqliteTimelineRepositoryTests
         Assert.Equal(entry.UserEdits, restored.UserEdits);
         Assert.Equal(TimelineEntryOrigin.Analyzed, restored.Origin);
         Assert.NotNull(restored.Evidence);
+    }
+
+    [Fact]
+    public async Task DayQueryReturnsNewestEntryFirst()
+    {
+        using var database = new TemporaryDatabase();
+        var repository = await CreateRepositoryAsync(database.DatabasePath);
+        var older = CreateManualEntry(
+            Guid.Parse("31313131-3131-3131-3131-313131313131"));
+        var newer = CreateManualEntry(
+            Guid.Parse("32323232-3232-3232-3232-323232323232"),
+            startOffset: TimeSpan.FromHours(2));
+        await repository.AddAsync(older);
+        await repository.AddAsync(newer);
+
+        var entries = await repository.GetForDayAsync(
+            DateOnly.FromDateTime(older.Range.Start.DateTime));
+
+        Assert.Equal([newer.Id, older.Id], entries.Select(static entry => entry.Id));
+    }
+
+    [Fact]
+    public async Task MultiEvidenceRoundTripPreservesOrderAndContributionRanges()
+    {
+        using var database = new TemporaryDatabase();
+        var repository = await CreateRepositoryAsync(database.DatabasePath);
+        var start = new DateTimeOffset(2026, 7, 16, 13, 0, 0, TimeSpan.FromHours(8));
+        var entry = TimelineEntry.CreateAnalyzed(
+            Guid.Parse("23232323-2323-2323-2323-232323232323"),
+            new TimeRange(start, start.AddMinutes(30)),
+            "Cross-chunk work",
+            "One activity supported by two ordered recording chunks.",
+            ActivityCategory.FocusedWork,
+            ProductivityKind.Focused,
+            [new AppUsage("editor", "Editor", TimeSpan.FromMinutes(30))],
+            ["multi-evidence"],
+            confidence: 0.92,
+            [
+                new EvidenceReference(
+                    "chunk-multi-a",
+                    "chunks/chunk-multi-a/manifest.json",
+                    new TimeRange(start, start.AddMinutes(15))),
+                new EvidenceReference(
+                    "chunk-multi-b",
+                    "chunks/chunk-multi-b/manifest.json",
+                    new TimeRange(start.AddMinutes(15), start.AddMinutes(30))),
+            ],
+            "timeline-v4");
+
+        await repository.AddAsync(entry);
+        var restored = Assert.IsType<TimelineEntry>(
+            await repository.GetByIdAsync(entry.Id));
+
+        AssertEntryEquivalent(entry, restored);
+        Assert.Equal(
+            ["chunk-multi-a", "chunk-multi-b"],
+            restored.EvidenceReferences.Select(static evidence => evidence.CaptureChunkId));
+    }
+
+    [Fact]
+    public async Task VersionNineBackfillsLegacySingleEvidenceWithoutChangingItsMeaning()
+    {
+        using var database = new TemporaryDatabase();
+        var factory = new SqliteConnectionFactory(database.DatabasePath);
+        var initializer = new SqliteDatabaseInitializer(factory);
+        await initializer.InitializeAsync();
+        var repository = new SqliteTimelineRepository(factory);
+        var entry = CreateAnalyzedEntry();
+        await repository.AddAsync(entry);
+
+        await using (var connection = await factory.OpenConnectionAsync())
+        await using (var command = connection.CreateCommand())
+        {
+            command.CommandText = """
+                DROP TABLE analysis_job_window_members;
+                DROP TABLE timeline_entry_evidence;
+                DELETE FROM schema_migrations WHERE version = 9;
+                """;
+            await command.ExecuteNonQueryAsync();
+        }
+
+        await initializer.InitializeAsync();
+        var restored = Assert.IsType<TimelineEntry>(
+            await repository.GetByIdAsync(entry.Id));
+
+        AssertEntryEquivalent(entry, restored);
+        Assert.Null(Assert.Single(restored.EvidenceReferences).ContributionRange);
     }
 
     [Fact]
@@ -273,10 +375,12 @@ public sealed class SqliteTimelineRepositoryTests
 
     private static TimelineEntry CreateManualEntry(
         Guid? id = null,
-        IReadOnlyList<string>? tags = null)
+        IReadOnlyList<string>? tags = null,
+        TimeSpan? startOffset = null)
     {
         var start = new DateTimeOffset(2026, 7, 16, 9, 12, 13, TimeSpan.FromHours(8))
-            .AddTicks(4567);
+            .AddTicks(4567)
+            .Add(startOffset ?? TimeSpan.Zero);
         return TimelineEntry.CreateManual(
             id ?? Guid.Parse("11111111-1111-1111-1111-111111111111"),
             new TimeRange(start, start.AddMinutes(47).AddTicks(89)),
@@ -355,7 +459,7 @@ public sealed class SqliteTimelineRepositoryTests
         Assert.Equal(expected.Apps, actual.Apps);
         Assert.Equal(expected.Tags, actual.Tags);
         Assert.Equal(expected.Confidence, actual.Confidence);
-        Assert.Equal(expected.Evidence, actual.Evidence);
+        Assert.Equal(expected.EvidenceReferences, actual.EvidenceReferences);
         Assert.Equal(expected.AnalysisVersion, actual.AnalysisVersion);
         Assert.Equal(expected.UserEdits, actual.UserEdits);
         Assert.Equal(expected.Origin, actual.Origin);

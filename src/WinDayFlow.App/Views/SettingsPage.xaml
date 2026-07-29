@@ -156,6 +156,45 @@
                                 Toggled="OnCaptureToggled" />
                         </Grid>
                     </Border>
+
+                    <Border Style="{StaticResource SettingsGroupBorderStyle}">
+                        <Grid
+                            x:Name="CaptureIntervalSettingLayout"
+                            Padding="20"
+                            ColumnSpacing="24">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="3*" />
+                                <ColumnDefinition Width="2*" />
+                            </Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+                            <StackPanel VerticalAlignment="Center" Spacing="2">
+                                <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}" Text="截屏间隔" />
+                                <TextBlock
+                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                    Text="较长间隔占用更少本地空间，也会减少分析图片数量。"
+                                    TextWrapping="Wrap" />
+                            </StackPanel>
+                            <ComboBox
+                                x:Name="CaptureIntervalPicker"
+                                Grid.Column="1"
+                                MaxWidth="260"
+                                HorizontalAlignment="Stretch"
+                                VerticalAlignment="Center"
+                                AutomationProperties.AutomationId="CaptureIntervalPicker"
+                                AutomationProperties.Name="截屏间隔"
+                                IsEnabled="{x:Bind ViewModel.CanChangeCaptureInterval, Mode=OneWay}"
+                                SelectionChanged="OnCaptureIntervalChanged">
+                                <ComboBoxItem Content="5 秒" Tag="5" />
+                                <ComboBoxItem Content="10 秒" Tag="10" />
+                                <ComboBoxItem Content="15 秒" Tag="15" />
+                                <ComboBoxItem Content="30 秒" Tag="30" />
+                                <ComboBoxItem Content="60 秒" Tag="60" />
+                            </ComboBox>
+                        </Grid>
+                    </Border>
                 </StackPanel>
 
                 <StackPanel Spacing="12">

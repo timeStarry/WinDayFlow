@@ -93,7 +93,7 @@ public sealed record AnalysisJobProcessorOptions
 
 public sealed class AnalysisJobProcessor
 {
-    public const string TimelinePromptVersion = "timeline-v1";
+    public const string TimelinePromptVersion = "timeline-v5";
 
     private readonly IAnalysisJobStore _jobStore;
     private readonly ICaptureChunkStore _chunkStore;
@@ -105,6 +105,7 @@ public sealed class AnalysisJobProcessor
     private readonly AiAnalysisSendGate _sendGate;
     private readonly AnalysisJobProcessorOptions _options;
     private readonly TimeProvider _timeProvider;
+    private readonly IAnalysisWindowStore? _windowStore;
 
     public AnalysisJobProcessor(
         IAnalysisJobStore jobStore,
@@ -115,7 +116,8 @@ public sealed class AnalysisJobProcessor
         IAnalysisResultCommitter resultCommitter,
         AppSettingsService settings,
         AnalysisJobProcessorOptions options,
-        TimeProvider? timeProvider = null)
+        TimeProvider? timeProvider = null,
+        IAnalysisWindowStore? windowStore = null)
     {
         _jobStore = jobStore ?? throw new ArgumentNullException(nameof(jobStore));
         _chunkStore = chunkStore ?? throw new ArgumentNullException(nameof(chunkStore));
@@ -130,6 +132,7 @@ public sealed class AnalysisJobProcessor
         _sendGate = AiAnalysisSendGate.GetFor(settings);
         _options = options ?? throw new ArgumentNullException(nameof(options));
         _timeProvider = timeProvider ?? TimeProvider.System;
+        _windowStore = windowStore ?? jobStore as IAnalysisWindowStore;
     }
 
     public async Task<AnalysisJobProcessResult> ProcessNextAsync(
@@ -183,28 +186,62 @@ public sealed class AnalysisJobProcessor
                     .ConfigureAwait(false);
             }
 
+            var window = _windowStore is null
+                ? new AnalysisWindowSnapshot(
+                    chunk.Range,
+                    [new AnalysisWindowMember(
+                        chunk,
+                        new CaptureChunkFingerprint(current.InputFingerprint),
+                        chunk.Range)],
+                    [])
+                : await _windowStore
+                    .GetWindowAsync(current.Id, cancellationToken)
+                    .ConfigureAwait(false);
+            if (window is null
+                || !window.Members.Any(member => string.Equals(
+                    member.Chunk.Id,
+                    current.CaptureChunkId,
+                    StringComparison.Ordinal)))
+            {
+                return await FailAsync(
+                        current,
+                        AnalysisJobErrorCode.EvidenceInvalid,
+                        AnalysisFailureDisposition.Terminal,
+                        _options.RetryDelay,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+
             current = await TransitionAsync(
                     current,
                     AnalysisJobState.Claimed,
                     AnalysisJobState.Extracting,
                     cancellationToken)
                 .ConfigureAwait(false);
-            current = await EnsureLeaseCoversAsync(
-                    current,
-                    _options.ExtractionTimeout,
-                    cancellationToken)
-                .ConfigureAwait(false);
-            var expectedSourceFingerprint = new CaptureChunkFingerprint(
-                current.InputFingerprint);
-
-            AnalysisEvidenceBatch evidence;
+            var evidenceBatches = new List<AnalysisEvidenceBatch>(window.Members.Count);
             try
             {
-                evidence = await ExtractWithTimeoutAsync(
-                        chunk,
-                        expectedSourceFingerprint,
-                        cancellationToken)
-                    .ConfigureAwait(false);
+                foreach (var member in window.Members)
+                {
+                    current = await EnsureLeaseCoversAsync(
+                            current,
+                            _options.ExtractionTimeout,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                    var evidence = await ExtractWithTimeoutAsync(
+                            member.Chunk,
+                            member.SourceFingerprint,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                    if (evidence is null
+                        || evidence.SourceFingerprint != member.SourceFingerprint)
+                    {
+                        throw new InvalidDataException(
+                            "Extracted evidence did not match its persisted window member.");
+                    }
+
+                    evidenceBatches.Add(evidence);
+                }
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -220,6 +257,10 @@ public sealed class AnalysisJobProcessor
                         cancellationToken)
                     .ConfigureAwait(false);
             }
+            catch (AnalysisLeaseLostException)
+            {
+                throw;
+            }
             catch (Exception exception)
             {
                 var (code, disposition) = MapEvidenceFailure(exception);
@@ -232,33 +273,27 @@ public sealed class AnalysisJobProcessor
                     .ConfigureAwait(false);
             }
 
-            if (evidence is null
-                || evidence.SourceFingerprint != expectedSourceFingerprint)
-            {
-                return await FailAsync(
-                        current,
-                        AnalysisJobErrorCode.EvidenceInvalid,
-                        AnalysisFailureDisposition.Terminal,
-                        _options.RetryDelay,
-                        cancellationToken)
-                    .ConfigureAwait(false);
-            }
-
             AiAnalysisRequest request;
             try
             {
+                var aggregate = BuildAggregateEvidence(window, evidenceBatches);
                 request = new AiAnalysisRequest(
                     Guid.NewGuid(),
                     current.Id,
                     current.Attempt,
-                    current.CaptureChunkId,
-                    evidence.ArtifactPath,
-                    chunk.Range,
+                    aggregate.References,
+                    window.Range,
                     TimelinePromptVersion,
                     AiAnalysisContract.CurrentSchemaVersion,
                     _options.Locale,
-                    evidence.Images,
-                    evidence.Context);
+                    aggregate.Images,
+                    aggregate.Context,
+                    window.ExistingEntries.Select(entry => new AiPriorTimelineEntry(
+                        entry.Id,
+                        entry.Range,
+                        entry.Title,
+                        entry.Summary,
+                        entry.IsRewriteProtectedBy(window.Range))).ToArray());
             }
             catch (Exception exception) when (exception is ArgumentException or OverflowException)
             {
@@ -389,6 +424,10 @@ public sealed class AnalysisJobProcessor
             {
                 var activities = AiAnalysisResponseValidator.Validate(request, response!);
                 entries = activities
+                    .SelectMany(activity => SplitAroundLockedEntries(
+                        activity,
+                        window.Range,
+                        window.ExistingEntries))
                     .Select((activity, index) => TimelineEntry.FromActivity(
                         CreateTimelineEntryId(current.Id, index),
                         activity,
@@ -427,15 +466,26 @@ public sealed class AnalysisJobProcessor
             AnalysisResultCommitStatus commitStatus;
             try
             {
-                commitStatus = await _resultCommitter
-                    .TryCommitAsync(
+                commitStatus = _resultCommitter is IAnalysisWindowResultCommitter windowCommitter
+                    ? await windowCommitter
+                        .TryCommitWindowAsync(
+                            current.Lease!,
+                            current.ProviderProfileId,
+                            current.ProviderProfileRevision,
+                            window,
+                            entries,
+                            GetUtcNow(),
+                            cancellationToken)
+                        .ConfigureAwait(false)
+                    : await _resultCommitter
+                        .TryCommitAsync(
                         current.Lease!,
                         current.ProviderProfileId,
                         current.ProviderProfileRevision,
                         entries,
                         GetUtcNow(),
                         cancellationToken)
-                    .ConfigureAwait(false);
+                        .ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -481,6 +531,13 @@ public sealed class AnalysisJobProcessor
                         _options.RetryDelay,
                         cancellationToken)
                     .ConfigureAwait(false),
+                AnalysisResultCommitStatus.WindowChanged => await FailAsync(
+                        current,
+                        AnalysisJobErrorCode.PersistenceFailure,
+                        AnalysisFailureDisposition.Retryable,
+                        TimeSpan.Zero,
+                        cancellationToken)
+                    .ConfigureAwait(false),
                 _ => throw new InvalidOperationException(
                     "The analysis result committer returned an unsupported status."),
             };
@@ -507,6 +564,219 @@ public sealed class AnalysisJobProcessor
         }
     }
 
+    private static AggregateEvidence BuildAggregateEvidence(
+        AnalysisWindowSnapshot window,
+        List<AnalysisEvidenceBatch> batches)
+    {
+        if (batches.Count != window.Members.Count)
+        {
+            throw new ArgumentException(
+                "Every analysis window member requires one extracted evidence batch.",
+                nameof(batches));
+        }
+
+        var references = new List<EvidenceReference>(batches.Count);
+        var images = new List<AiEvidenceImage>();
+        var context = new List<AiAnalysisContextSlice>();
+        for (var memberIndex = 0; memberIndex < window.Members.Count; memberIndex++)
+        {
+            var member = window.Members[memberIndex];
+            var batch = batches[memberIndex];
+            references.Add(new EvidenceReference(
+                member.Chunk.Id,
+                batch.ArtifactPath,
+                member.ContributionRange));
+            foreach (var image in batch.Images)
+            {
+                if (member.ContributionRange.Contains(image.CapturedAt))
+                {
+                    images.Add(new AiEvidenceImage(
+                        window.Members.Count == 1
+                            ? image.FrameId
+                            : $"m{memberIndex:D3}-{image.FrameId}",
+                        image.CapturedAt,
+                        image.JpegBytes));
+                }
+            }
+
+            foreach (var slice in batch.Context)
+            {
+                var start = slice.Range.Start > member.ContributionRange.Start
+                    ? slice.Range.Start
+                    : member.ContributionRange.Start;
+                var end = slice.Range.End < member.ContributionRange.End
+                    ? slice.Range.End
+                    : member.ContributionRange.End;
+                if (end > start)
+                {
+                    context.Add(new AiAnalysisContextSlice(
+                        new TimeRange(start, end),
+                        slice.ApplicationId,
+                        slice.ApplicationDisplayName));
+                }
+            }
+        }
+
+        var selectedImages = SelectImagesWithinBudget(images);
+        var normalizedContext = NormalizeContext(context);
+        return new AggregateEvidence(references, selectedImages, normalizedContext);
+    }
+
+    private static List<AiEvidenceImage> SelectImagesWithinBudget(
+        List<AiEvidenceImage> images)
+    {
+        if (images.Count == 0)
+        {
+            throw new InvalidDataException("The aggregate analysis window contains no evidence images.");
+        }
+
+        var ordered = images
+            .OrderBy(static image => image.CapturedAt)
+            .ThenBy(static image => image.FrameId, StringComparer.Ordinal)
+            .ToArray();
+        var deduplicated = new List<AiEvidenceImage>(ordered.Length);
+        for (var index = 0; index < ordered.Length; index++)
+        {
+            var image = ordered[index];
+            var isFinal = index == ordered.Length - 1;
+            if (!isFinal
+                && deduplicated.Count != 0
+                && image.JpegBytes.Span.SequenceEqual(
+                    deduplicated[^1].JpegBytes.Span))
+            {
+                continue;
+            }
+
+            deduplicated.Add(image);
+        }
+
+        var targetCount = Math.Min(deduplicated.Count, AiAnalysisContract.MaximumImages);
+        var candidateIndices = new List<int>(targetCount);
+        for (var ordinal = 0; ordinal < targetCount; ordinal++)
+        {
+            candidateIndices.Add(targetCount == 1
+                ? 0
+                : checked((int)((long)ordinal * (deduplicated.Count - 1) / (targetCount - 1))));
+        }
+
+        var selected = new List<AiEvidenceImage>(targetCount);
+        var totalBytes = 0L;
+        foreach (var index in candidateIndices.Distinct().Order())
+        {
+            var image = deduplicated[index];
+            if (totalBytes + image.JpegBytes.Length
+                > AiAnalysisContract.MaximumRequestImageBytes)
+            {
+                continue;
+            }
+
+            selected.Add(image);
+            totalBytes += image.JpegBytes.Length;
+        }
+
+        if (selected.Count == 0)
+        {
+            selected.Add(deduplicated.MinBy(static image => image.JpegBytes.Length)!);
+        }
+
+        return selected;
+    }
+
+    private static AiAnalysisContextSlice[] NormalizeContext(
+        IReadOnlyList<AiAnalysisContextSlice> context)
+    {
+        var normalized = new List<AiAnalysisContextSlice>();
+        foreach (var group in context
+                     .GroupBy(static slice => slice.ApplicationId, StringComparer.Ordinal)
+                     .OrderBy(static group => group.Key, StringComparer.Ordinal))
+        {
+            DateTimeOffset? previousEnd = null;
+            foreach (var slice in group.OrderBy(static slice => slice.Range.Start))
+            {
+                var start = previousEnd > slice.Range.Start
+                    ? previousEnd.Value
+                    : slice.Range.Start;
+                if (slice.Range.End <= start)
+                {
+                    continue;
+                }
+
+                normalized.Add(new AiAnalysisContextSlice(
+                    new TimeRange(start, slice.Range.End),
+                    slice.ApplicationId,
+                    slice.ApplicationDisplayName));
+                previousEnd = slice.Range.End;
+            }
+        }
+
+        return normalized
+            .OrderBy(static slice => slice.Range.Start)
+            .ThenBy(static slice => slice.ApplicationId, StringComparer.Ordinal)
+            .Take(AiAnalysisContract.MaximumContextSlices)
+            .ToArray();
+    }
+
+    private static Activity[] SplitAroundLockedEntries(
+        Activity activity,
+        TimeRange window,
+        IReadOnlyList<AnalysisWindowExistingEntry> existingEntries)
+    {
+        var segments = new List<TimeRange> { activity.Range };
+        foreach (var locked in existingEntries
+                     .Where(entry => entry.IsRewriteProtectedBy(window))
+                     .OrderBy(static entry => entry.Range.Start))
+        {
+            var next = new List<TimeRange>();
+            foreach (var segment in segments)
+            {
+                if (locked.Range.End <= segment.Start || locked.Range.Start >= segment.End)
+                {
+                    next.Add(segment);
+                    continue;
+                }
+
+                if (locked.Range.Start > segment.Start)
+                {
+                    next.Add(new TimeRange(
+                        segment.Start,
+                        locked.Range.Start < segment.End ? locked.Range.Start : segment.End));
+                }
+
+                if (locked.Range.End < segment.End)
+                {
+                    next.Add(new TimeRange(
+                        locked.Range.End > segment.Start ? locked.Range.End : segment.Start,
+                        segment.End));
+                }
+            }
+
+            segments = next;
+        }
+
+        return segments.Select(segment =>
+        {
+            var evidence = activity.EvidenceReferences
+                .Where(reference => reference.ContributionRange is not { } contribution
+                    || contribution.Start < segment.End && contribution.End > segment.Start)
+                .ToArray();
+            if (evidence.Length == 0)
+            {
+                evidence = activity.EvidenceReferences.ToArray();
+            }
+
+            return new Activity(
+                segment,
+                activity.Title,
+                activity.Summary,
+                activity.Category,
+                activity.Productivity,
+                activity.Apps,
+                activity.Tags,
+                activity.Confidence,
+                evidence);
+        }).ToArray();
+    }
+
     internal static Guid CreateTimelineEntryId(Guid jobId, int activityIndex)
     {
         if (jobId == Guid.Empty)
@@ -526,6 +796,11 @@ public sealed class AnalysisJobProcessor
         hash[8] = (byte)((hash[8] & 0x3f) | 0x80);
         return new Guid(hash.AsSpan(0, 16), bigEndian: true);
     }
+
+    private sealed record AggregateEvidence(
+        IReadOnlyList<EvidenceReference> References,
+        IReadOnlyList<AiEvidenceImage> Images,
+        IReadOnlyList<AiAnalysisContextSlice> Context);
 
     private async Task<AiProviderProfileSnapshot?> GetRunnableProfileBeforeClaimAsync(
         CancellationToken cancellationToken)

@@ -7,27 +7,33 @@ using WinDayFlow.Infrastructure.Persistence;
 
 namespace WinDayFlow.Infrastructure.Analysis;
 
-public sealed class SqliteCaptureAnalysisStore : ICaptureChunkStore, IAnalysisJobStore
+public sealed class SqliteCaptureAnalysisStore :
+    ICaptureChunkStore,
+    IAnalysisJobStore,
+    IAnalysisWindowStore
 {
     private const string CaptureChunkColumns = """
         id,
-        video_relative_path,
         manifest_relative_path,
         start_utc_ticks,
         start_offset_minutes,
         end_utc_ticks,
         end_offset_minutes,
+        captured_frame_count,
         frame_count,
-        video_width,
-        video_height,
-        frame_rate_numerator,
-        frame_rate_denominator,
-        video_byte_count,
+        frame_width,
+        frame_height,
+        frame_byte_count,
         persistence_generation_hex,
         target_epoch_hex,
         committed_at_utc_ticks,
         ingested_at_utc_ticks,
-        availability
+        availability,
+        process_name,
+        process_id,
+        cpu_usage_basis_points,
+        working_set_bytes,
+        private_memory_bytes
         """;
 
     private const string AnalysisJobColumns = """
@@ -89,7 +95,6 @@ public sealed class SqliteCaptureAnalysisStore : ICaptureChunkStore, IAnalysisJo
         }
 
         cancellationToken.ThrowIfCancellationRequested();
-        EnsureContained(chunk.VideoPath);
         EnsureContained(chunk.ManifestPath);
 
         await using var connection = await _connectionFactory
@@ -120,42 +125,48 @@ public sealed class SqliteCaptureAnalysisStore : ICaptureChunkStore, IAnalysisJo
             command.CommandText = """
                 INSERT INTO capture_chunks(
                     id,
-                    video_relative_path,
                     manifest_relative_path,
                     start_utc_ticks,
                     start_offset_minutes,
                     end_utc_ticks,
                     end_offset_minutes,
+                    captured_frame_count,
                     frame_count,
-                    video_width,
-                    video_height,
-                    frame_rate_numerator,
-                    frame_rate_denominator,
-                    video_byte_count,
+                    frame_width,
+                    frame_height,
+                    frame_byte_count,
                     persistence_generation_hex,
                     target_epoch_hex,
                     committed_at_utc_ticks,
                     ingested_at_utc_ticks,
-                    availability)
+                    availability,
+                    process_name,
+                    process_id,
+                    cpu_usage_basis_points,
+                    working_set_bytes,
+                    private_memory_bytes)
                 VALUES (
                     $id,
-                    $video_relative_path,
                     $manifest_relative_path,
                     $start_utc_ticks,
                     $start_offset_minutes,
                     $end_utc_ticks,
                     $end_offset_minutes,
+                    $captured_frame_count,
                     $frame_count,
-                    $video_width,
-                    $video_height,
-                    $frame_rate_numerator,
-                    $frame_rate_denominator,
-                    $video_byte_count,
+                    $frame_width,
+                    $frame_height,
+                    $frame_byte_count,
                     $persistence_generation_hex,
                     $target_epoch_hex,
                     $committed_at_utc_ticks,
                     $ingested_at_utc_ticks,
-                    $availability);
+                    $availability,
+                    $process_name,
+                    $process_id,
+                    $cpu_usage_basis_points,
+                    $working_set_bytes,
+                    $private_memory_bytes);
                 """;
             AddCaptureChunkParameters(command.Parameters, chunk);
             try
@@ -201,9 +212,21 @@ public sealed class SqliteCaptureAnalysisStore : ICaptureChunkStore, IAnalysisJo
         return chunk;
     }
 
-    public async Task<AnalysisJobEnqueueResult> EnqueueAsync(
+    public Task<AnalysisJobEnqueueResult> EnqueueAsync(
         AnalysisJob pendingJob,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        EnqueueCoreAsync(pendingJob, members: null, cancellationToken);
+
+    public Task<AnalysisJobEnqueueResult> EnqueueWindowAsync(
+        AnalysisJob pendingJob,
+        IReadOnlyList<AnalysisWindowMember> members,
+        CancellationToken cancellationToken = default) =>
+        EnqueueCoreAsync(pendingJob, members, cancellationToken);
+
+    private async Task<AnalysisJobEnqueueResult> EnqueueCoreAsync(
+        AnalysisJob pendingJob,
+        IReadOnlyList<AnalysisWindowMember>? members,
+        CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(pendingJob);
         if (pendingJob.State != AnalysisJobState.Pending)
@@ -237,6 +260,22 @@ public sealed class SqliteCaptureAnalysisStore : ICaptureChunkStore, IAnalysisJo
                 $"Capture chunk '{pendingJob.CaptureChunkId}' is not available for analysis.");
         }
 
+        var effectiveMembers = members is null
+            ? new[]
+            {
+                new AnalysisWindowMember(
+                    sourceChunk,
+                    new CaptureChunkFingerprint(pendingJob.InputFingerprint),
+                    sourceChunk.Range),
+            }
+            : ValidateWindowMembers(pendingJob, members);
+        await ValidatePersistedWindowMembersAsync(
+                connection,
+                transaction,
+                effectiveMembers,
+                cancellationToken)
+            .ConfigureAwait(false);
+
         var existingById = await ReadAnalysisJobByIdAsync(
                 connection,
                 transaction,
@@ -246,6 +285,13 @@ public sealed class SqliteCaptureAnalysisStore : ICaptureChunkStore, IAnalysisJo
         if (existingById is not null)
         {
             EnsureSameEnqueueDefinition(existingById, pendingJob);
+            await EnsureSameWindowMembersAsync(
+                    connection,
+                    transaction,
+                    pendingJob.Id,
+                    effectiveMembers,
+                    cancellationToken)
+                .ConfigureAwait(false);
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
             return new AnalysisJobEnqueueResult(existingById, Created: false);
         }
@@ -259,6 +305,13 @@ public sealed class SqliteCaptureAnalysisStore : ICaptureChunkStore, IAnalysisJo
         if (existingByKey is not null)
         {
             EnsureSameEnqueueDefinition(existingByKey, pendingJob);
+            await EnsureSameWindowMembersAsync(
+                    connection,
+                    transaction,
+                    existingByKey.Id,
+                    effectiveMembers,
+                    cancellationToken)
+                .ConfigureAwait(false);
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
             return new AnalysisJobEnqueueResult(existingByKey, Created: false);
         }
@@ -316,6 +369,14 @@ public sealed class SqliteCaptureAnalysisStore : ICaptureChunkStore, IAnalysisJo
                 throw new AnalysisJobConflictException(pendingJob.Id);
             }
         }
+
+        await InsertWindowMembersAsync(
+                connection,
+                transaction,
+                pendingJob.Id,
+                effectiveMembers,
+                cancellationToken)
+            .ConfigureAwait(false);
 
         var persisted = await ReadAnalysisJobByIdAsync(
                 connection,
@@ -409,6 +470,323 @@ public sealed class SqliteCaptureAnalysisStore : ICaptureChunkStore, IAnalysisJo
         return hasExactFingerprint;
     }
 
+    public async Task<AnalysisWindowSnapshot?> GetWindowAsync(
+        Guid jobId,
+        CancellationToken cancellationToken = default)
+    {
+        if (jobId == Guid.Empty)
+        {
+            throw new ArgumentException("An analysis window requires a job identifier.", nameof(jobId));
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        await using var connection = await _connectionFactory
+            .OpenConnectionAsync(cancellationToken)
+            .ConfigureAwait(false);
+        await using var transaction = connection.BeginTransaction(deferred: true);
+        if (await ReadAnalysisJobByIdAsync(
+                connection,
+                transaction,
+                jobId,
+                cancellationToken)
+            .ConfigureAwait(false) is null)
+        {
+            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+            return null;
+        }
+
+        var members = await ReadWindowMembersAsync(
+                connection,
+                transaction,
+                jobId,
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (members.Count == 0)
+        {
+            throw new InvalidDataException("The analysis job has no persisted window members.");
+        }
+
+        var range = new TimeRange(
+            members.Min(static member => member.ContributionRange.Start),
+            members.Max(static member => member.ContributionRange.End));
+        var existingEntries = await ReadExistingWindowEntriesAsync(
+                connection,
+                transaction,
+                range,
+                cancellationToken)
+            .ConfigureAwait(false);
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        return new AnalysisWindowSnapshot(range, members, existingEntries);
+    }
+
+    private static AnalysisWindowMember[] ValidateWindowMembers(
+        AnalysisJob pendingJob,
+        IReadOnlyList<AnalysisWindowMember> members)
+    {
+        ArgumentNullException.ThrowIfNull(members);
+        if (members.Count == 0 || members.Any(static member => member is null))
+        {
+            throw new ArgumentException(
+                "An analysis job window requires at least one member.",
+                nameof(members));
+        }
+
+        var ordered = members
+            .OrderBy(static member => member.ContributionRange.Start)
+            .ThenBy(static member => member.Chunk.Id, StringComparer.Ordinal)
+            .ToArray();
+        if (ordered.Select(static member => member.Chunk.Id)
+                .Distinct(StringComparer.Ordinal)
+                .Count() != ordered.Length
+            || !ordered.Any(member => string.Equals(
+                member.Chunk.Id,
+                pendingJob.CaptureChunkId,
+                StringComparison.Ordinal))
+            || ordered[^1].ContributionRange.End
+                - ordered[0].ContributionRange.Start > TimeSpan.FromMinutes(45))
+        {
+            throw new ArgumentException(
+                "The analysis job window is duplicated, missing its anchor, or exceeds 45 minutes.",
+                nameof(members));
+        }
+
+        return ordered;
+    }
+
+    private static async Task ValidatePersistedWindowMembersAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        IReadOnlyList<AnalysisWindowMember> members,
+        CancellationToken cancellationToken)
+    {
+        foreach (var member in members)
+        {
+            var persisted = await ReadCaptureChunkByIdAsync(
+                    connection,
+                    transaction,
+                    member.Chunk.Id,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            if (persisted is null
+                || persisted.Availability != CaptureChunkAvailability.Available
+                || !HasSameCommittedEvidence(persisted, member.Chunk))
+            {
+                throw new CaptureChunkConflictException(member.Chunk.Id);
+            }
+        }
+    }
+
+    private static async Task InsertWindowMembersAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        Guid jobId,
+        AnalysisWindowMember[] members,
+        CancellationToken cancellationToken)
+    {
+        for (var index = 0; index < members.Length; index++)
+        {
+            var member = members[index];
+            await using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = """
+                INSERT INTO analysis_job_window_members(
+                    analysis_job_id,
+                    ordinal,
+                    capture_chunk_id,
+                    source_fingerprint,
+                    contribution_start_utc_ticks,
+                    contribution_start_offset_minutes,
+                    contribution_end_utc_ticks,
+                    contribution_end_offset_minutes)
+                VALUES (
+                    $analysis_job_id,
+                    $ordinal,
+                    $capture_chunk_id,
+                    $source_fingerprint,
+                    $contribution_start_utc_ticks,
+                    $contribution_start_offset_minutes,
+                    $contribution_end_utc_ticks,
+                    $contribution_end_offset_minutes);
+                """;
+            command.Parameters.AddWithValue("$analysis_job_id", FormatId(jobId));
+            command.Parameters.AddWithValue("$ordinal", index);
+            command.Parameters.AddWithValue("$capture_chunk_id", member.Chunk.Id);
+            command.Parameters.AddWithValue(
+                "$source_fingerprint",
+                member.SourceFingerprint.Value);
+            AddRangeParameters(command.Parameters, member.ContributionRange);
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private static async Task EnsureSameWindowMembersAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        Guid jobId,
+        AnalysisWindowMember[] expected,
+        CancellationToken cancellationToken)
+    {
+        var actual = await ReadWindowMembersAsync(
+                connection,
+                transaction,
+                jobId,
+                cancellationToken)
+            .ConfigureAwait(false);
+        var same = actual.Count == expected.Length;
+        for (var index = 0; same && index < expected.Length; index++)
+        {
+            same = string.Equals(
+                    actual[index].Chunk.Id,
+                    expected[index].Chunk.Id,
+                    StringComparison.Ordinal)
+                && actual[index].SourceFingerprint == expected[index].SourceFingerprint
+                && actual[index].ContributionRange == expected[index].ContributionRange;
+        }
+
+        if (!same)
+        {
+            throw new AnalysisJobConflictException(jobId);
+        }
+    }
+
+    private static async Task<IReadOnlyList<AnalysisWindowMember>> ReadWindowMembersAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        Guid jobId,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT
+                chunks.id,
+                chunks.manifest_relative_path,
+                chunks.start_utc_ticks,
+                chunks.start_offset_minutes,
+                chunks.end_utc_ticks,
+                chunks.end_offset_minutes,
+                chunks.captured_frame_count,
+                chunks.frame_count,
+                chunks.frame_width,
+                chunks.frame_height,
+                chunks.frame_byte_count,
+                chunks.persistence_generation_hex,
+                chunks.target_epoch_hex,
+                chunks.committed_at_utc_ticks,
+                chunks.ingested_at_utc_ticks,
+                chunks.availability,
+                chunks.process_name,
+                chunks.process_id,
+                chunks.cpu_usage_basis_points,
+                chunks.working_set_bytes,
+                chunks.private_memory_bytes,
+                members.source_fingerprint,
+                members.contribution_start_utc_ticks,
+                members.contribution_start_offset_minutes,
+                members.contribution_end_utc_ticks,
+                members.contribution_end_offset_minutes
+            FROM analysis_job_window_members AS members
+            INNER JOIN capture_chunks AS chunks ON chunks.id = members.capture_chunk_id
+            WHERE members.analysis_job_id = $analysis_job_id
+            ORDER BY members.ordinal;
+            """;
+        command.Parameters.AddWithValue("$analysis_job_id", FormatId(jobId));
+
+        var members = new List<AnalysisWindowMember>();
+        await using var reader = await command
+            .ExecuteReaderAsync(cancellationToken)
+            .ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            members.Add(new AnalysisWindowMember(
+                ReadCaptureChunk(reader),
+                new CaptureChunkFingerprint(reader.GetString(21)),
+                new TimeRange(
+                    ReadTimestamp(reader.GetInt64(22), reader.GetInt32(23)),
+                    ReadTimestamp(reader.GetInt64(24), reader.GetInt32(25)))));
+        }
+
+        return members;
+    }
+
+    private static async Task<IReadOnlyList<AnalysisWindowExistingEntry>>
+        ReadExistingWindowEntriesAsync(
+            SqliteConnection connection,
+            SqliteTransaction transaction,
+            TimeRange range,
+            CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT
+                id,
+                start_utc_ticks,
+                start_offset_minutes,
+                end_utc_ticks,
+                end_offset_minutes,
+                title,
+                summary,
+                origin,
+                revision,
+                CASE WHEN range_edited_at IS NOT NULL
+                    OR title_edited_at IS NOT NULL
+                    OR summary_edited_at IS NOT NULL
+                    OR category_edited_at IS NOT NULL
+                    OR productivity_edited_at IS NOT NULL
+                    OR tags_edited_at IS NOT NULL
+                THEN 1 ELSE 0 END
+            FROM timeline_entries
+            WHERE start_utc_ticks < $window_end_utc_ticks
+                AND end_utc_ticks > $window_start_utc_ticks
+            ORDER BY start_utc_ticks, end_utc_ticks, id;
+            """;
+        command.Parameters.AddWithValue(
+            "$window_start_utc_ticks",
+            range.Start.UtcDateTime.Ticks);
+        command.Parameters.AddWithValue(
+            "$window_end_utc_ticks",
+            range.End.UtcDateTime.Ticks);
+
+        var entries = new List<AnalysisWindowExistingEntry>();
+        await using var reader = await command
+            .ExecuteReaderAsync(cancellationToken)
+            .ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            entries.Add(new AnalysisWindowExistingEntry(
+                Guid.Parse(reader.GetString(0)),
+                new TimeRange(
+                    ReadTimestamp(reader.GetInt64(1), reader.GetInt32(2)),
+                    ReadTimestamp(reader.GetInt64(3), reader.GetInt32(4))),
+                reader.GetString(5),
+                reader.GetString(6),
+                (TimelineEntryOrigin)reader.GetInt32(7),
+                reader.GetInt64(8),
+                reader.GetInt32(9) != 0));
+        }
+
+        return entries;
+    }
+
+    private static void AddRangeParameters(
+        SqliteParameterCollection parameters,
+        TimeRange range)
+    {
+        parameters.AddWithValue(
+            "$contribution_start_utc_ticks",
+            range.Start.UtcDateTime.Ticks);
+        parameters.AddWithValue(
+            "$contribution_start_offset_minutes",
+            checked((int)range.Start.Offset.TotalMinutes));
+        parameters.AddWithValue(
+            "$contribution_end_utc_ticks",
+            range.End.UtcDateTime.Ticks);
+        parameters.AddWithValue(
+            "$contribution_end_offset_minutes",
+            checked((int)range.End.Offset.TotalMinutes));
+    }
+
     private void EnsureContained(EvidenceRelativePath relativePath)
     {
         var platformRelativePath = relativePath.Value.Replace(
@@ -426,17 +804,16 @@ public sealed class SqliteCaptureAnalysisStore : ICaptureChunkStore, IAnalysisJo
     private static bool HasSameCommittedEvidence(CaptureChunk left, CaptureChunk right)
     {
         return string.Equals(left.Id, right.Id, StringComparison.Ordinal)
-            && left.VideoPath == right.VideoPath
             && left.ManifestPath == right.ManifestPath
             && left.Range == right.Range
+            && left.CapturedFrameCount == right.CapturedFrameCount
             && left.FrameCount == right.FrameCount
-            && left.VideoWidth == right.VideoWidth
-            && left.VideoHeight == right.VideoHeight
-            && left.FrameRateNumerator == right.FrameRateNumerator
-            && left.FrameRateDenominator == right.FrameRateDenominator
-            && left.VideoByteCount == right.VideoByteCount
+            && left.FrameWidth == right.FrameWidth
+            && left.FrameHeight == right.FrameHeight
+            && left.FrameByteCount == right.FrameByteCount
             && left.PersistenceGeneration == right.PersistenceGeneration
-            && left.TargetEpoch == right.TargetEpoch;
+            && left.TargetEpoch == right.TargetEpoch
+            && left.ProcessTelemetry == right.ProcessTelemetry;
     }
 
     private static void EnsureSameEnqueueDefinition(
@@ -468,7 +845,6 @@ public sealed class SqliteCaptureAnalysisStore : ICaptureChunkStore, IAnalysisJo
         CaptureChunk chunk)
     {
         parameters.AddWithValue("$id", chunk.Id);
-        parameters.AddWithValue("$video_relative_path", chunk.VideoPath.Value);
         parameters.AddWithValue("$manifest_relative_path", chunk.ManifestPath.Value);
         parameters.AddWithValue("$start_utc_ticks", ToUtcTicks(chunk.Range.Start));
         parameters.AddWithValue(
@@ -478,16 +854,13 @@ public sealed class SqliteCaptureAnalysisStore : ICaptureChunkStore, IAnalysisJo
         parameters.AddWithValue(
             "$end_offset_minutes",
             checked((int)chunk.Range.End.Offset.TotalMinutes));
+        parameters.AddWithValue(
+            "$captured_frame_count",
+            checked((long)chunk.CapturedFrameCount));
         parameters.AddWithValue("$frame_count", checked((long)chunk.FrameCount));
-        parameters.AddWithValue("$video_width", checked((long)chunk.VideoWidth));
-        parameters.AddWithValue("$video_height", checked((long)chunk.VideoHeight));
-        parameters.AddWithValue(
-            "$frame_rate_numerator",
-            checked((long)chunk.FrameRateNumerator));
-        parameters.AddWithValue(
-            "$frame_rate_denominator",
-            checked((long)chunk.FrameRateDenominator));
-        parameters.AddWithValue("$video_byte_count", chunk.VideoByteCount);
+        parameters.AddWithValue("$frame_width", checked((long)chunk.FrameWidth));
+        parameters.AddWithValue("$frame_height", checked((long)chunk.FrameHeight));
+        parameters.AddWithValue("$frame_byte_count", chunk.FrameByteCount);
         parameters.AddWithValue(
             "$persistence_generation_hex",
             FormatUInt64(chunk.PersistenceGeneration));
@@ -495,6 +868,30 @@ public sealed class SqliteCaptureAnalysisStore : ICaptureChunkStore, IAnalysisJo
         parameters.AddWithValue("$committed_at_utc_ticks", ToUtcTicks(chunk.CommittedAtUtc));
         parameters.AddWithValue("$ingested_at_utc_ticks", ToUtcTicks(chunk.IngestedAtUtc));
         parameters.AddWithValue("$availability", (int)chunk.Availability);
+        AddNullableParameter(
+            parameters,
+            "$process_name",
+            chunk.ProcessTelemetry?.ProcessName);
+        AddNullableParameter(
+            parameters,
+            "$process_id",
+            chunk.ProcessTelemetry is { } telemetry
+                ? checked((long)telemetry.ProcessId)
+                : null);
+        AddNullableParameter(
+            parameters,
+            "$cpu_usage_basis_points",
+            chunk.ProcessTelemetry is { } cpuTelemetry
+                ? checked((long)cpuTelemetry.CpuUsageBasisPoints)
+                : null);
+        AddNullableParameter(
+            parameters,
+            "$working_set_bytes",
+            chunk.ProcessTelemetry?.WorkingSetBytes);
+        AddNullableParameter(
+            parameters,
+            "$private_memory_bytes",
+            chunk.ProcessTelemetry?.PrivateMemoryBytes);
     }
 
     private static void AddPendingJobParameters(
@@ -1192,24 +1589,46 @@ public sealed class SqliteCaptureAnalysisStore : ICaptureChunkStore, IAnalysisJo
 
     private static CaptureChunk ReadCaptureChunk(SqliteDataReader reader)
     {
-        var start = ReadTimestamp(reader.GetInt64(3), reader.GetInt32(4));
-        var end = ReadTimestamp(reader.GetInt64(5), reader.GetInt32(6));
+        var start = ReadTimestamp(reader.GetInt64(2), reader.GetInt32(3));
+        var end = ReadTimestamp(reader.GetInt64(4), reader.GetInt32(5));
+        CaptureProcessTelemetry? processTelemetry = null;
+        var telemetryNullCount = 0;
+        for (var index = 16; index <= 20; index++)
+        {
+            if (reader.IsDBNull(index))
+            {
+                telemetryNullCount++;
+            }
+        }
+        if (telemetryNullCount is not (0 or 5))
+        {
+            throw new InvalidDataException("Stored capture process telemetry is incomplete.");
+        }
+        if (telemetryNullCount == 0)
+        {
+            processTelemetry = new CaptureProcessTelemetry(
+                reader.GetString(16),
+                checked((uint)reader.GetInt64(17)),
+                checked((uint)reader.GetInt64(18)),
+                reader.GetInt64(19),
+                reader.GetInt64(20));
+        }
+
         return new CaptureChunk(
             reader.GetString(0),
             new EvidenceRelativePath(reader.GetString(1)),
-            new EvidenceRelativePath(reader.GetString(2)),
             new TimeRange(start, end),
+            checked((uint)reader.GetInt64(6)),
             checked((uint)reader.GetInt64(7)),
             checked((uint)reader.GetInt64(8)),
             checked((uint)reader.GetInt64(9)),
-            checked((uint)reader.GetInt64(10)),
-            checked((uint)reader.GetInt64(11)),
-            reader.GetInt64(12),
-            ParseUInt64(reader.GetString(13)),
-            ParseUInt64(reader.GetString(14)),
-            ReadUtcTimestamp(reader.GetInt64(15)),
-            ReadUtcTimestamp(reader.GetInt64(16)),
-            (CaptureChunkAvailability)reader.GetInt32(17));
+            reader.GetInt64(10),
+            ParseUInt64(reader.GetString(11)),
+            ParseUInt64(reader.GetString(12)),
+            ReadUtcTimestamp(reader.GetInt64(13)),
+            ReadUtcTimestamp(reader.GetInt64(14)),
+            (CaptureChunkAvailability)reader.GetInt32(15),
+            processTelemetry);
     }
 
     private static async Task<AnalysisJob?> ReadAnalysisJobByIdAsync(

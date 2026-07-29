@@ -86,7 +86,8 @@ public sealed class AppSettingsService : IDisposable
                 current.CaptureEnabled,
                 current.CloudAnalysisEnabled,
                 current.RecordingConsent,
-                current.CapturePrivacy),
+                current.CapturePrivacy,
+                current.CaptureIntervalSeconds),
             cancellationToken);
     }
 
@@ -100,7 +101,8 @@ public sealed class AppSettingsService : IDisposable
                 current.CaptureEnabled,
                 enabled,
                 current.RecordingConsent,
-                current.CapturePrivacy),
+                current.CapturePrivacy,
+                current.CaptureIntervalSeconds),
             cancellationToken);
     }
 
@@ -116,7 +118,8 @@ public sealed class AppSettingsService : IDisposable
                     CurrentRecordingConsentVersion,
                     _timeProvider.GetUtcNow().ToUniversalTime(),
                     current.CapturePrivacy.Revision),
-                current.CapturePrivacy),
+                current.CapturePrivacy,
+                current.CaptureIntervalSeconds),
             cancellationToken);
     }
 
@@ -129,7 +132,8 @@ public sealed class AppSettingsService : IDisposable
                 CaptureEnabled: false,
                 current.CloudAnalysisEnabled,
                 RecordingConsent: null,
-                current.CapturePrivacy),
+                current.CapturePrivacy,
+                current.CaptureIntervalSeconds),
             cancellationToken);
     }
 
@@ -150,8 +154,24 @@ public sealed class AppSettingsService : IDisposable
                     enabled,
                     current.CloudAnalysisEnabled,
                     current.RecordingConsent,
-                    current.CapturePrivacy);
+                    current.CapturePrivacy,
+                    current.CaptureIntervalSeconds);
             },
+            cancellationToken);
+    }
+
+    public Task SetCaptureIntervalSecondsAsync(
+        int captureIntervalSeconds,
+        CancellationToken cancellationToken = default)
+    {
+        return UpdateAsync(
+            current => new AppSettings(
+                current.Theme,
+                current.CaptureEnabled,
+                current.CloudAnalysisEnabled,
+                current.RecordingConsent,
+                current.CapturePrivacy,
+                captureIntervalSeconds),
             cancellationToken);
     }
 
@@ -180,7 +200,8 @@ public sealed class AppSettingsService : IDisposable
                     CaptureEnabled: false,
                     current.CloudAnalysisEnabled,
                     current.RecordingConsent,
-                    privacy);
+                    privacy,
+                    current.CaptureIntervalSeconds);
             },
             cancellationToken);
     }
@@ -204,7 +225,8 @@ public sealed class AppSettingsService : IDisposable
                     CaptureEnabled: false,
                     current.CloudAnalysisEnabled,
                     current.RecordingConsent,
-                    privacy);
+                    privacy,
+                    current.CaptureIntervalSeconds);
             },
             cancellationToken);
     }
@@ -518,7 +540,8 @@ public sealed class AppSettingsService : IDisposable
             CaptureEnabled: false,
             settings.CloudAnalysisEnabled,
             settings.RecordingConsent,
-            settings.CapturePrivacy);
+            settings.CapturePrivacy,
+            settings.CaptureIntervalSeconds);
     }
 
     private static bool IsValidRecordingConsent(AppSettings settings)
@@ -544,7 +567,8 @@ public sealed class AppSettingsService : IDisposable
                 && current.CaptureEnabled,
             current.CloudAnalysisEnabled,
             current.RecordingConsent,
-            privacy);
+            privacy,
+            current.CaptureIntervalSeconds);
     }
 
     private static (int Index, CaptureExclusionRule Rule) FindRule(

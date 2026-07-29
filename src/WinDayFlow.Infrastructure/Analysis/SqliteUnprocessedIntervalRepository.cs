@@ -62,12 +62,7 @@ public sealed class SqliteUnprocessedIntervalRepository : IUnprocessedIntervalRe
             WHERE chunks.availability = $available
                 AND chunks.start_utc_ticks < $range_end_utc_ticks
                 AND chunks.end_utc_ticks > $range_start_utc_ticks
-                AND NOT EXISTS (
-                    SELECT 1
-                    FROM analysis_jobs AS completed_jobs
-                    WHERE completed_jobs.capture_chunk_id = chunks.id
-                        AND completed_jobs.state = $completed_state
-                )
+                AND (jobs.id IS NULL OR jobs.state <> $completed_state)
             ORDER BY chunks.start_utc_ticks, chunks.id;
             """;
         command.Parameters.AddWithValue(

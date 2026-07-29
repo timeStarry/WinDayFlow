@@ -3,9 +3,13 @@ using System.ComponentModel;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Media.Imaging;
+using WinDayFlow.App.Services;
 using WinDayFlow.Application.Timeline;
 using WinDayFlow.Domain;
 using WinDayFlow.Presentation.Timeline;
+using Windows.Storage.Pickers;
+using Windows.Storage.Streams;
 
 namespace WinDayFlow.App.Views;
 
@@ -29,6 +33,10 @@ public sealed partial class TimelinePage : Page
     private bool _isEditorOpen;
     private bool _isSubscribed;
     private bool _useNarrowEntryLayout;
+    private readonly EvidenceMediaService _evidenceMediaService;
+    private IReadOnlyList<EvidenceFrameMedia> _evidenceFrames = [];
+    private CancellationTokenSource? _evidenceLoadCancellation;
+    private int _evidenceFrameIndex;
     private TimeRange? _editorOriginalRange;
     private TimeSpan _editorInitialStartTime;
     private TimeSpan _editorInitialEndTime;
@@ -37,6 +45,7 @@ public sealed partial class TimelinePage : Page
     public TimelinePage()
     {
         ViewModel = App.GetService<TimelineViewModel>();
+        _evidenceMediaService = App.GetService<EvidenceMediaService>();
         InitializeComponent();
         CategoryFilter.SelectedIndex = 0;
         ProductivityFilter.SelectedIndex = 0;
@@ -70,6 +79,9 @@ public sealed partial class TimelinePage : Page
 
     private void OnUnloaded(object sender, RoutedEventArgs e)
     {
+        _evidenceLoadCancellation?.Cancel();
+        _evidenceLoadCancellation?.Dispose();
+        _evidenceLoadCancellation = null;
         SizeChanged -= OnPageSizeChanged;
 
         if (_isSubscribed)
@@ -140,6 +152,161 @@ public sealed partial class TimelinePage : Page
         DetailSplitView.IsPaneOpen = false;
         TimelineList.SelectedItem = null;
         TimelineList.Focus(FocusState.Programmatic);
+    }
+
+    private async void OnPreviousEvidenceFrame(object sender, RoutedEventArgs e)
+    {
+        if (_evidenceFrameIndex <= 0)
+        {
+            return;
+        }
+
+        await DisplayEvidenceFrameAsync(_evidenceFrameIndex - 1);
+    }
+
+    private async void OnNextEvidenceFrame(object sender, RoutedEventArgs e)
+    {
+        if (_evidenceFrameIndex >= _evidenceFrames.Count - 1)
+        {
+            return;
+        }
+
+        await DisplayEvidenceFrameAsync(_evidenceFrameIndex + 1);
+    }
+
+    private async void OnExportTimelapse(object sender, RoutedEventArgs e)
+    {
+        var startPicker = new TimePicker
+        {
+            ClockIdentifier = "24HourClock",
+            Header = "开始时间",
+            Time = TimeSpan.Zero,
+        };
+        var endPicker = new TimePicker
+        {
+            ClockIdentifier = "24HourClock",
+            Header = "结束时间",
+            Time = new TimeSpan(23, 59, 0),
+        };
+        var frameRatePicker = new ComboBox
+        {
+            Header = "帧率",
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            SelectedIndex = 2,
+            Items =
+            {
+                new ComboBoxItem { Content = "10 FPS", Tag = "10" },
+                new ComboBoxItem { Content = "15 FPS", Tag = "15" },
+                new ComboBoxItem { Content = "30 FPS", Tag = "30" },
+                new ComboBoxItem { Content = "60 FPS", Tag = "60" },
+            },
+        };
+        var dialog = new ContentDialog
+        {
+            XamlRoot = XamlRoot,
+            Title = $"导出 {ViewModel.SelectedDate:yyyy-MM-dd}",
+            PrimaryButtonText = "选择文件",
+            CloseButtonText = "取消",
+            DefaultButton = ContentDialogButton.Primary,
+            Content = new StackPanel
+            {
+                Spacing = 12,
+                Children = { startPicker, endPicker, frameRatePicker },
+            },
+        };
+        if (await dialog.ShowAsync() != ContentDialogResult.Primary
+            || frameRatePicker.SelectedItem
+                is not ComboBoxItem { Tag: string frameRateValue }
+            || !uint.TryParse(frameRateValue, out var framesPerSecond)
+            || !TryCreateRangeDateTimeOffset(startPicker.Time, out var start)
+            || !TryCreateRangeDateTimeOffset(endPicker.Time, out var end)
+            || end <= start)
+        {
+            return;
+        }
+
+        IReadOnlyList<EvidenceFrameMedia> frames;
+        try
+        {
+            frames = await _evidenceMediaService.GetFramesAsync(start, end);
+        }
+        catch (Exception)
+        {
+            await ShowExportResultAsync(
+                "无法读取截图",
+                "所选范围内的截图未通过完整性检查。");
+            return;
+        }
+        if (frames.Count == 0)
+        {
+            await ShowExportResultAsync(
+                "没有可导出的截图",
+                "所选时间范围内没有已归档截图。");
+            return;
+        }
+
+        var picker = new FileSavePicker
+        {
+            SuggestedFileName = $"WinDayFlow-{ViewModel.SelectedDate:yyyy-MM-dd}-timelapse",
+        };
+        picker.FileTypeChoices.Add("MP4 视频", [".mp4"]);
+        WinRT.Interop.InitializeWithWindow.Initialize(
+            picker,
+            App.Current.MainWindowHandle);
+        var output = await picker.PickSaveFileAsync();
+        if (output is null)
+        {
+            return;
+        }
+
+        ExportRangeTimelapseButton.IsEnabled = false;
+        try
+        {
+            await _evidenceMediaService.ExportTimelapseAsync(
+                frames,
+                output,
+                framesPerSecond);
+            await ShowExportResultAsync(
+                "延时视频已导出",
+                $"已写入 {frames.Count} 帧，{framesPerSecond} FPS。");
+        }
+        catch (Exception)
+        {
+            await ShowExportResultAsync(
+                "无法导出延时视频",
+                "请确认截图仍然存在，并选择可写入的位置后重试。");
+        }
+        finally
+        {
+            ExportRangeTimelapseButton.IsEnabled = true;
+        }
+    }
+
+    private bool TryCreateRangeDateTimeOffset(TimeSpan time, out DateTimeOffset value)
+    {
+        var local = ViewModel.SelectedDate.ToDateTime(
+            TimeOnly.FromTimeSpan(time),
+            DateTimeKind.Unspecified);
+        if (TimeZoneInfo.Local.IsInvalidTime(local)
+            || TimeZoneInfo.Local.IsAmbiguousTime(local))
+        {
+            value = default;
+            return false;
+        }
+        value = new DateTimeOffset(local, TimeZoneInfo.Local.GetUtcOffset(local));
+        return true;
+    }
+
+    private async Task ShowExportResultAsync(string title, string message)
+    {
+        var dialog = new ContentDialog
+        {
+            XamlRoot = XamlRoot,
+            Title = title,
+            Content = message,
+            CloseButtonText = "确定",
+        };
+        await dialog.ShowAsync();
     }
 
     private async void OnCreateActivity(object sender, RoutedEventArgs e)
@@ -290,6 +457,7 @@ public sealed partial class TimelinePage : Page
         {
             DetailSplitView.IsPaneOpen = ViewModel.SelectedEntry is not null;
             UpdateDetailState();
+            StartEvidenceLoad();
         }
 
         if (e.PropertyName == nameof(TimelineViewModel.MutationErrorMessage))
@@ -832,12 +1000,182 @@ public sealed partial class TimelinePage : Page
         ManualEvidenceInfoBar.Visibility = entry is { HasEvidence: false }
             ? Visibility.Visible
             : Visibility.Collapsed;
-        AnalyzedEvidenceInfoBar.Visibility = entry is { HasEvidence: true }
+        EvidenceViewerPanel.Visibility = entry is { HasEvidence: true }
             ? Visibility.Visible
             : Visibility.Collapsed;
         AnalyzedEvidenceMetadataPanel.Visibility = entry is { HasEvidence: true }
             ? Visibility.Visible
             : Visibility.Collapsed;
+    }
+
+    private void StartEvidenceLoad()
+    {
+        _evidenceLoadCancellation?.Cancel();
+        _evidenceLoadCancellation?.Dispose();
+        _evidenceLoadCancellation = null;
+        _evidenceFrames = [];
+        _evidenceFrameIndex = 0;
+        EvidenceImage.Source = null;
+        EvidenceFramePositionText.Text = string.Empty;
+        EvidenceInfoBar.IsOpen = false;
+        ProcessTelemetryPanel.Visibility = Visibility.Collapsed;
+
+        if (ViewModel.SelectedEntry?.Entry.EvidenceReferences is not { Count: > 0 } evidence)
+        {
+            SetEvidenceNavigationState();
+            return;
+        }
+
+        var cancellation = new CancellationTokenSource();
+        _evidenceLoadCancellation = cancellation;
+        _ = LoadEvidenceAsync(
+            ViewModel.SelectedEntry.Id,
+            evidence,
+            cancellation.Token);
+    }
+
+    private async Task LoadEvidenceAsync(
+        Guid entryId,
+        IReadOnlyList<EvidenceReference> evidence,
+        CancellationToken cancellationToken)
+    {
+        SetEvidenceBusy(true);
+        try
+        {
+            var frames = await _evidenceMediaService
+                .GetFramesAsync(evidence, cancellationToken);
+            if (cancellationToken.IsCancellationRequested
+                || ViewModel.SelectedEntry?.Id != entryId)
+            {
+                return;
+            }
+
+            _evidenceFrames = frames;
+            await DisplayEvidenceFrameAsync(0, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+        catch (Exception)
+        {
+            if (ViewModel.SelectedEntry?.Id == entryId)
+            {
+                ShowEvidenceMessage(
+                    "截图可能已过保留期限、被移动或未通过完整性检查。",
+                    "无法读取屏幕证据",
+                    InfoBarSeverity.Error);
+            }
+        }
+        finally
+        {
+            if (ViewModel.SelectedEntry?.Id == entryId)
+            {
+                SetEvidenceBusy(false);
+                SetEvidenceNavigationState();
+            }
+        }
+    }
+
+    private async Task DisplayEvidenceFrameAsync(
+        int index,
+        CancellationToken cancellationToken = default)
+    {
+        if (index < 0 || index >= _evidenceFrames.Count)
+        {
+            return;
+        }
+
+        SetEvidenceBusy(true);
+        try
+        {
+            var frame = _evidenceFrames[index];
+            var bytes = await _evidenceMediaService
+                .ReadFrameBytesAsync(frame, cancellationToken);
+            using var stream = new InMemoryRandomAccessStream();
+            using (var writer = new DataWriter(stream))
+            {
+                writer.WriteBytes(bytes);
+                await writer.StoreAsync();
+                writer.DetachStream();
+            }
+            stream.Seek(0);
+            var bitmap = new BitmapImage();
+            await bitmap.SetSourceAsync(stream);
+            EvidenceImage.Source = bitmap;
+            _evidenceFrameIndex = index;
+            var offset = TimeSpan.FromMilliseconds(frame.OffsetMilliseconds);
+            EvidenceFramePositionText.Text =
+                $"{index + 1} / {_evidenceFrames.Count} · 证据 {frame.SourceOrdinal + 1} · +{offset:mm\\:ss}";
+            UpdateProcessTelemetry(frame.ProcessTelemetry);
+            EvidenceInfoBar.IsOpen = false;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+        catch (Exception)
+        {
+            ShowEvidenceMessage(
+                "当前截图未通过完整性检查或无法解码。",
+                "无法显示截图",
+                InfoBarSeverity.Error);
+        }
+        finally
+        {
+            SetEvidenceBusy(false);
+            SetEvidenceNavigationState();
+        }
+    }
+
+    private void SetEvidenceBusy(bool isBusy)
+    {
+        EvidenceProgressRing.IsActive = isBusy;
+        EvidenceProgressRing.Visibility = isBusy
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+        PreviousEvidenceFrameButton.IsEnabled = !isBusy && _evidenceFrameIndex > 0;
+        NextEvidenceFrameButton.IsEnabled =
+            !isBusy && _evidenceFrameIndex + 1 < _evidenceFrames.Count;
+    }
+
+    private void UpdateProcessTelemetry(CaptureProcessTelemetry? telemetry)
+    {
+        ProcessTelemetryPanel.Visibility = telemetry is null
+            ? Visibility.Collapsed
+            : Visibility.Visible;
+        if (telemetry is null)
+        {
+            return;
+        }
+
+        ProcessIdentityText.Text = $"{telemetry.ProcessName} · PID {telemetry.ProcessId}";
+        ProcessCpuText.Text = $"{telemetry.CpuUsagePercent:F1}%";
+        ProcessWorkingSetText.Text = FormatByteCount(telemetry.WorkingSetBytes);
+        ProcessPrivateMemoryText.Text = FormatByteCount(telemetry.PrivateMemoryBytes);
+    }
+
+    private static string FormatByteCount(long bytes)
+    {
+        const double mebibyte = 1024d * 1024d;
+        const double gibibyte = 1024d * mebibyte;
+        return bytes >= gibibyte
+            ? $"{bytes / gibibyte:F1} GB"
+            : $"{bytes / mebibyte:F0} MB";
+    }
+
+    private void SetEvidenceNavigationState()
+    {
+        SetEvidenceBusy(false);
+    }
+
+    private void ShowEvidenceMessage(
+        string message,
+        string title,
+        InfoBarSeverity severity)
+    {
+        EvidenceInfoBar.Message = message;
+        EvidenceInfoBar.Title = title;
+        EvidenceInfoBar.Severity = severity;
+        EvidenceInfoBar.IsOpen = true;
     }
 
     private static TEnum? ParseSelection<TEnum>(ComboBox comboBox)

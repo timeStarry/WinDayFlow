@@ -103,6 +103,13 @@ public sealed record AiAnalysisContextSlice
     public string ApplicationDisplayName { get; }
 }
 
+public sealed record AiPriorTimelineEntry(
+    Guid Id,
+    TimeRange Range,
+    string Title,
+    string Summary,
+    bool IsLocked);
+
 public sealed class AiAnalysisRequest
 {
     public AiAnalysisRequest(
@@ -117,6 +124,33 @@ public sealed class AiAnalysisRequest
         string locale,
         IReadOnlyList<AiEvidenceImage> images,
         IReadOnlyList<AiAnalysisContextSlice> context)
+        : this(
+            correlationId,
+            jobId,
+            attempt,
+            [new EvidenceReference(captureChunkId, artifactPath, range)],
+            range,
+            promptVersion,
+            schemaVersion,
+            locale,
+            images,
+            context,
+            [])
+    {
+    }
+
+    public AiAnalysisRequest(
+        Guid correlationId,
+        Guid jobId,
+        int attempt,
+        IReadOnlyList<EvidenceReference> evidenceReferences,
+        TimeRange range,
+        string promptVersion,
+        string schemaVersion,
+        string locale,
+        IReadOnlyList<AiEvidenceImage> images,
+        IReadOnlyList<AiAnalysisContextSlice> context,
+        IReadOnlyList<AiPriorTimelineEntry> existingEntries)
     {
         if (correlationId == Guid.Empty)
         {
@@ -140,9 +174,31 @@ public sealed class AiAnalysisRequest
                 "An AI analysis attempt must be positive.");
         }
 
-        AiEvidenceImage.ValidateIdentifier(captureChunkId, nameof(captureChunkId), 256);
-        ArgumentException.ThrowIfNullOrWhiteSpace(artifactPath);
         ArgumentNullException.ThrowIfNull(range);
+        ArgumentNullException.ThrowIfNull(evidenceReferences);
+        if (evidenceReferences.Count == 0
+            || evidenceReferences.Any(static evidence => evidence is null)
+            || evidenceReferences.Select(static evidence => evidence.CaptureChunkId)
+                .Distinct(StringComparer.Ordinal)
+                .Count() != evidenceReferences.Count
+            || evidenceReferences.Any(evidence =>
+                evidence.ContributionRange is { } contribution
+                && (contribution.Start < range.Start || contribution.End > range.End)))
+        {
+            throw new ArgumentException(
+                "AI analysis evidence references must be unique and contained by the request range.",
+                nameof(evidenceReferences));
+        }
+
+        foreach (var evidence in evidenceReferences)
+        {
+            AiEvidenceImage.ValidateIdentifier(
+                evidence.CaptureChunkId,
+                nameof(evidenceReferences),
+                256);
+            ArgumentException.ThrowIfNullOrWhiteSpace(evidence.ArtifactPath);
+        }
+
         AiEvidenceImage.ValidateIdentifier(promptVersion, nameof(promptVersion), 64);
         AiEvidenceImage.ValidateIdentifier(schemaVersion, nameof(schemaVersion), 32);
         if (!string.Equals(
@@ -158,6 +214,7 @@ public sealed class AiAnalysisRequest
         AiEvidenceImage.ValidateIdentifier(locale, nameof(locale), 35);
         ArgumentNullException.ThrowIfNull(images);
         ArgumentNullException.ThrowIfNull(context);
+        ArgumentNullException.ThrowIfNull(existingEntries);
 
         if (images.Count is 0 or > AiAnalysisContract.MaximumImages)
         {
@@ -254,17 +311,29 @@ public sealed class AiAnalysisRequest
             }
         }
 
+        var existingCopy = existingEntries.ToArray();
+        if (existingCopy.Any(static entry => entry is null)
+            || existingCopy.Select(static entry => entry.Id).Distinct().Count()
+                != existingCopy.Length
+            || existingCopy.Any(entry =>
+                entry.Range.Start >= range.End || entry.Range.End <= range.Start))
+        {
+            throw new ArgumentException(
+                "Prior timeline entries must uniquely overlap the analysis request.",
+                nameof(existingEntries));
+        }
+
         CorrelationId = correlationId;
         JobId = jobId;
         Attempt = attempt;
-        CaptureChunkId = captureChunkId;
-        ArtifactPath = artifactPath;
+        EvidenceReferences = Array.AsReadOnly(evidenceReferences.ToArray());
         Range = range;
         PromptVersion = promptVersion;
         SchemaVersion = schemaVersion;
         Locale = locale;
         Images = Array.AsReadOnly(imageCopy);
         Context = Array.AsReadOnly(contextCopy);
+        ExistingEntries = Array.AsReadOnly(existingCopy);
     }
 
     public Guid CorrelationId { get; }
@@ -273,9 +342,11 @@ public sealed class AiAnalysisRequest
 
     public int Attempt { get; }
 
-    public string CaptureChunkId { get; }
+    public ReadOnlyCollection<EvidenceReference> EvidenceReferences { get; }
 
-    public string ArtifactPath { get; }
+    public string CaptureChunkId => EvidenceReferences[0].CaptureChunkId;
+
+    public string ArtifactPath => EvidenceReferences[0].ArtifactPath;
 
     public TimeRange Range { get; }
 
@@ -288,6 +359,8 @@ public sealed class AiAnalysisRequest
     public ReadOnlyCollection<AiEvidenceImage> Images { get; }
 
     public ReadOnlyCollection<AiAnalysisContextSlice> Context { get; }
+
+    public ReadOnlyCollection<AiPriorTimelineEntry> ExistingEntries { get; }
 }
 
 public sealed record AiActivityCandidate(

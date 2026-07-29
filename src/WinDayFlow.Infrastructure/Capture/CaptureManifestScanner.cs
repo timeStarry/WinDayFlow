@@ -22,9 +22,6 @@ public sealed class CaptureManifestScanner : ICaptureManifestScanner
         "authorized-foreground-display";
     internal const string ContinuousDisplayCaptureScope =
         "authorized-display-continuous";
-    private const string ExpectedVideoPath = "capture.mp4";
-    private const string ExpectedVideoCodec = "h264";
-    private const string ExpectedVideoContainer = "mp4";
 
     private static readonly JsonDocumentOptions JsonOptions = new()
     {
@@ -38,6 +35,7 @@ public sealed class CaptureManifestScanner : ICaptureManifestScanner
     private readonly TimeProvider _timeProvider;
     private readonly TimeZoneInfo _captureTimeZone;
     private readonly Action<CaptureManifestScanCheckpoint, string>? _checkpoint;
+    private readonly CanonicalCaptureFrameArchive _frameArchive;
 
     public CaptureManifestScanner(
         string dataRootPath,
@@ -65,6 +63,7 @@ public sealed class CaptureManifestScanner : ICaptureManifestScanner
         _timeProvider = timeProvider;
         _captureTimeZone = captureTimeZone ?? TimeZoneInfo.Local;
         _checkpoint = checkpoint;
+        _frameArchive = new CanonicalCaptureFrameArchive(_dataRootPath);
     }
 
     public async Task<IReadOnlyList<CaptureChunk>> ScanCommittedAsync(
@@ -172,11 +171,32 @@ public sealed class CaptureManifestScanner : ICaptureManifestScanner
                 return null;
             }
 
-            var videoPath = Path.Combine(candidateDirectory, ExpectedVideoPath);
-            if (!TryReadStableVideo(videoPath, out var videoSnapshot))
+            var chunk = new CaptureChunk(
+                chunkId,
+                new EvidenceRelativePath($"chunks/{chunkId}/manifest.json"),
+                new TimeRange(manifest.StartTimeUtc, manifest.EndTimeUtc),
+                manifest.CapturedFrameCount,
+                manifest.FrameCount,
+                manifest.Width,
+                manifest.Height,
+                checked((long)manifest.TotalByteCount),
+                manifest.PersistenceGeneration,
+                manifest.TargetEpoch,
+                GetCommittedAtUtc(
+                    directoryBefore.LastWriteTimeFileTime,
+                    manifestRead.Value.Snapshot.LastWriteTimeFileTime),
+                ingestedAtUtc,
+                processTelemetry: manifest.ProcessTelemetry);
+            var frames = await _frameArchive.ListFramesAsync(chunk, cancellationToken)
+                .ConfigureAwait(false);
+            foreach (var frame in frames)
             {
-                return null;
+                _ = await _frameArchive.ReadFrameBytesAsync(frame, cancellationToken)
+                    .ConfigureAwait(false);
             }
+            _checkpoint?.Invoke(
+                CaptureManifestScanCheckpoint.FramesInspected,
+                candidateDirectory);
 
             if (!TryReadDirectorySnapshot(candidateDirectory, out var directoryAfter)
                 || !directoryBefore.IsSameEntryAndTimestamp(directoryAfter))
@@ -184,24 +204,7 @@ public sealed class CaptureManifestScanner : ICaptureManifestScanner
                 return null;
             }
 
-            var committedAtUtc = GetCommittedAtUtc(
-                directoryAfter.LastWriteTimeFileTime,
-                manifestRead.Value.Snapshot.LastWriteTimeFileTime);
-            return new CaptureChunk(
-                chunkId,
-                new EvidenceRelativePath($"chunks/{chunkId}/{ExpectedVideoPath}"),
-                new EvidenceRelativePath($"chunks/{chunkId}/manifest.json"),
-                new TimeRange(manifest.StartTimeUtc, manifest.EndTimeUtc),
-                manifest.FrameCount,
-                manifest.Width,
-                manifest.Height,
-                manifest.FrameRateNumerator,
-                manifest.FrameRateDenominator,
-                videoSnapshot.Length,
-                manifest.PersistenceGeneration,
-                manifest.TargetEpoch,
-                committedAtUtc,
-                ingestedAtUtc);
+            return chunk;
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -210,6 +213,7 @@ public sealed class CaptureManifestScanner : ICaptureManifestScanner
         catch (Exception exception) when (
             IsRecoverableFileSystemFailure(exception)
             || exception is JsonException
+            || exception is InvalidDataException
             || exception is ArgumentException
             || exception is OverflowException)
         {
@@ -273,35 +277,6 @@ public sealed class CaptureManifestScanner : ICaptureManifestScanner
         return new StableManifestRead(content, after);
     }
 
-    private bool TryReadStableVideo(
-        string videoPath,
-        out FileSnapshot stableSnapshot)
-    {
-        stableSnapshot = default;
-        using var handle = TryOpenPath(videoPath, isDirectory: false, readContent: false);
-        if (handle is null
-            || !TryReadSnapshot(handle, out var before)
-            || !before.IsRegularFile
-            || before.Length is <= 0 or > CaptureChunk.MaximumVideoByteCount)
-        {
-            return false;
-        }
-
-        _checkpoint?.Invoke(
-            CaptureManifestScanCheckpoint.VideoInspected,
-            videoPath);
-
-        if (!TryReadSnapshot(handle, out var after)
-            || !before.IsStable(after)
-            || !TryReopenAndMatch(videoPath, before, readContent: false))
-        {
-            return false;
-        }
-
-        stableSnapshot = after;
-        return true;
-    }
-
     private static bool TryParseManifest(
         byte[] utf8Json,
         string expectedChunkId,
@@ -318,18 +293,33 @@ public sealed class CaptureManifestScanner : ICaptureManifestScanner
         using var document = JsonDocument.Parse(utf8Json, JsonOptions);
         var root = document.RootElement;
         if (root.ValueKind != JsonValueKind.Object
+            || !TryReadCanonicalUInt32(root, "schemaVersion", out var schemaVersion)
+            || schemaVersion is not (2 or 3)
             || !HasExactProperties(
                 root,
-                "schemaVersion",
-                "captureScope",
-                "chunkId",
-                "startTimeUnixMs",
-                "endTimeUnixMs",
-                "authorization",
-                "video")
-            || !TryReadCanonicalUInt32(root, "schemaVersion", out var schemaVersion)
-            || schemaVersion != 1
-            || !TryReadSupportedCaptureScope(root)
+                schemaVersion == 2
+                    ? [
+                        "schemaVersion",
+                        "captureScope",
+                        "chunkId",
+                        "startTimeUnixMs",
+                        "endTimeUnixMs",
+                        "authorization",
+                        "frames",
+                    ]
+                    : [
+                        "schemaVersion",
+                        "captureScope",
+                        "chunkId",
+                        "startTimeUnixMs",
+                        "endTimeUnixMs",
+                        "authorization",
+                        "application",
+                        "frames",
+                    ])
+            || !TryReadString(root, "captureScope", out var captureScope)
+            || captureScope is not (ForegroundDisplayCaptureScope
+                or ContinuousDisplayCaptureScope)
             || !TryReadString(root, "chunkId", out var chunkId)
             || !string.Equals(chunkId, expectedChunkId, StringComparison.Ordinal)
             || !TryReadCanonicalInt64(root, "startTimeUnixMs", out var startUnixMs)
@@ -338,6 +328,56 @@ public sealed class CaptureManifestScanner : ICaptureManifestScanner
             || endUnixMs <= startUnixMs)
         {
             return false;
+        }
+
+        CaptureProcessTelemetry? processTelemetry = null;
+        if (schemaVersion == 3)
+        {
+            var application = root.GetProperty("application");
+            if (application.ValueKind == JsonValueKind.Object)
+            {
+                if (!HasExactProperties(
+                        application,
+                        "processName",
+                        "processId",
+                        "cpuUsageBasisPoints",
+                        "workingSetBytes",
+                        "privateMemoryBytes")
+                    || !TryReadString(application, "processName", out var processName)
+                    || !TryReadCanonicalUInt32(application, "processId", out var processId)
+                    || !TryReadCanonicalUInt32(
+                        application,
+                        "cpuUsageBasisPoints",
+                        out var cpuUsageBasisPoints)
+                    || !TryReadCanonicalUInt64(
+                        application,
+                        "workingSetBytes",
+                        out var workingSetBytes)
+                    || !TryReadCanonicalUInt64(
+                        application,
+                        "privateMemoryBytes",
+                        out var privateMemoryBytes)
+                    || workingSetBytes > long.MaxValue
+                    || privateMemoryBytes > long.MaxValue)
+                {
+                    return false;
+                }
+                processTelemetry = new CaptureProcessTelemetry(
+                    processName,
+                    processId,
+                    cpuUsageBasisPoints,
+                    checked((long)workingSetBytes),
+                    checked((long)privateMemoryBytes));
+            }
+            else if (application.ValueKind != JsonValueKind.Null)
+            {
+                return false;
+            }
+            if (processTelemetry is not null
+                && captureScope == ContinuousDisplayCaptureScope)
+            {
+                return false;
+            }
         }
 
         CaptureChunk.ValidateIdentifier(chunkId);
@@ -361,39 +401,47 @@ public sealed class CaptureManifestScanner : ICaptureManifestScanner
             return false;
         }
 
-        var video = root.GetProperty("video");
-        if (video.ValueKind != JsonValueKind.Object
+        var frames = root.GetProperty("frames");
+        if (frames.ValueKind != JsonValueKind.Object
             || !HasExactProperties(
-                video,
-                "path",
-                "codec",
-                "container",
-                "frameCount",
+                frames,
+                "format",
+                "quality",
+                "capturedFrameCount",
+                "retainedFrameCount",
                 "width",
                 "height",
-                "frameRateNumerator",
-                "frameRateDenominator")
-            || !TryReadExactString(video, "path", ExpectedVideoPath)
-            || !TryReadExactString(video, "codec", ExpectedVideoCodec)
-            || !TryReadExactString(video, "container", ExpectedVideoContainer)
-            || !TryReadCanonicalUInt32(video, "frameCount", out var frameCount)
+                "totalByteCount",
+                "items")
+            || !TryReadExactString(frames, "format", "jpeg")
+            || !TryReadCanonicalUInt32(frames, "quality", out var quality)
+            || quality != 82
+            || !TryReadCanonicalUInt32(
+                frames,
+                "capturedFrameCount",
+                out var capturedFrameCount)
+            || capturedFrameCount == 0
+            || !TryReadCanonicalUInt32(
+                frames,
+                "retainedFrameCount",
+                out var frameCount)
             || frameCount == 0
-            || !TryReadCanonicalUInt32(video, "width", out var width)
+            || frameCount > capturedFrameCount
+            || frameCount > CaptureChunk.MaximumFramesPerChunk
+            || !TryReadCanonicalUInt32(frames, "width", out var width)
             || width < 2
             || (width & 1U) != 0
-            || !TryReadCanonicalUInt32(video, "height", out var height)
+            || !TryReadCanonicalUInt32(frames, "height", out var height)
             || height < 2
             || (height & 1U) != 0
-            || !TryReadCanonicalUInt32(
-                video,
-                "frameRateNumerator",
-                out var frameRateNumerator)
-            || frameRateNumerator == 0
-            || !TryReadCanonicalUInt32(
-                video,
-                "frameRateDenominator",
-                out var frameRateDenominator)
-            || frameRateDenominator == 0)
+            || !TryReadCanonicalUInt64(
+                frames,
+                "totalByteCount",
+                out var totalByteCount)
+            || totalByteCount == 0
+            || totalByteCount > CaptureChunk.MaximumFrameByteCount
+            || frames.GetProperty("items").ValueKind != JsonValueKind.Array
+            || frames.GetProperty("items").GetArrayLength() != frameCount)
         {
             return false;
         }
@@ -403,13 +451,14 @@ public sealed class CaptureManifestScanner : ICaptureManifestScanner
         manifest = new ParsedManifest(
             TimeZoneInfo.ConvertTime(startUtc, captureTimeZone),
             TimeZoneInfo.ConvertTime(endUtc, captureTimeZone),
+            capturedFrameCount,
             frameCount,
             width,
             height,
-            frameRateNumerator,
-            frameRateDenominator,
+            totalByteCount,
             persistenceGeneration,
-            targetEpoch);
+            targetEpoch,
+            processTelemetry);
         return true;
     }
 
@@ -454,11 +503,6 @@ public sealed class CaptureManifestScanner : ICaptureManifestScanner
         string expected) =>
         TryReadString(parent, propertyName, out var actual)
         && string.Equals(actual, expected, StringComparison.Ordinal);
-
-    private static bool TryReadSupportedCaptureScope(JsonElement parent) =>
-        TryReadString(parent, "captureScope", out var scope)
-        && scope is ForegroundDisplayCaptureScope
-            or ContinuousDisplayCaptureScope;
 
     private static bool TryReadCanonicalInt64(
         JsonElement parent,
@@ -708,13 +752,14 @@ public sealed class CaptureManifestScanner : ICaptureManifestScanner
     private readonly record struct ParsedManifest(
         DateTimeOffset StartTimeUtc,
         DateTimeOffset EndTimeUtc,
+        uint CapturedFrameCount,
         uint FrameCount,
         uint Width,
         uint Height,
-        uint FrameRateNumerator,
-        uint FrameRateDenominator,
+        ulong TotalByteCount,
         ulong PersistenceGeneration,
-        ulong TargetEpoch);
+        ulong TargetEpoch,
+        CaptureProcessTelemetry? ProcessTelemetry);
 
     private readonly record struct FileSnapshot(
         uint VolumeSerialNumber,
@@ -750,5 +795,5 @@ internal enum CaptureManifestScanCheckpoint
     RootsInspected,
     CandidateInspected,
     ManifestRead,
-    VideoInspected,
+    FramesInspected,
 }

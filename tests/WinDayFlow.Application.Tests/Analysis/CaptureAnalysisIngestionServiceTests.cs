@@ -10,6 +10,45 @@ namespace WinDayFlow.Application.Tests.Analysis;
 public sealed class CaptureAnalysisIngestionServiceTests
 {
     [Fact]
+    public void WindowMembersUseTheContinuousSuffixAndAggregateFingerprint()
+    {
+        var chunks = new[]
+        {
+            CreateChunk("chunk-before-gap", minuteOffset: 0),
+            CreateChunk("chunk-contiguous-a", minuteOffset: 3),
+            CreateChunk("chunk-contiguous-b", minuteOffset: 4),
+        };
+        var fingerprints = chunks.ToDictionary(
+            static chunk => chunk.Id,
+            CreateFingerprint,
+            StringComparer.Ordinal);
+
+        var members = CaptureAnalysisIngestionService.BuildWindowMembers(
+            chunks,
+            fingerprints,
+            chunks[^1]);
+        var fingerprint = CaptureAnalysisIngestionService.ComputeWindowFingerprint(members);
+        var changedFingerprints = new Dictionary<string, CaptureChunkFingerprint>(
+            fingerprints,
+            StringComparer.Ordinal)
+        {
+            [chunks[1].Id] = new CaptureChunkFingerprint(new string('F', 64)),
+        };
+        var changedMembers = CaptureAnalysisIngestionService.BuildWindowMembers(
+            chunks,
+            changedFingerprints,
+            chunks[^1]);
+
+        Assert.Equal(["chunk-contiguous-a", "chunk-contiguous-b"],
+            members.Select(static member => member.Chunk.Id));
+        Assert.Equal(chunks[1].Range.Start, members[0].ContributionRange.Start);
+        Assert.Equal(chunks[2].Range.End, members[^1].ContributionRange.End);
+        Assert.NotEqual(
+            fingerprint,
+            CaptureAnalysisIngestionService.ComputeWindowFingerprint(changedMembers));
+    }
+
+    [Fact]
     public async Task CloudOffStillIngestsEveryCommittedChunkWithoutEnqueueing()
     {
         var later = CreateChunk("chunk-b", minuteOffset: 1);
@@ -142,7 +181,7 @@ public sealed class CaptureAnalysisIngestionServiceTests
         var store = new TestCaptureAnalysisStore();
         store.MarkCompletedAnalysis(
             chunk.Id,
-            CaptureAnalysisIngestionOptions.DefaultAnalysisVersion,
+            "timeline-v1",
             CreateFingerprint(chunk).Value);
         var fingerprints = new TestFingerprintProvider();
         using var settings = await CreateSettingsAsync(cloudEnabled: true);
@@ -244,15 +283,13 @@ public sealed class CaptureAnalysisIngestionServiceTests
         var start = new DateTimeOffset(2026, 7, 23, 8, minuteOffset, 0, TimeSpan.Zero);
         return new CaptureChunk(
             id,
-            new EvidenceRelativePath($"chunks/{id}/capture.mp4"),
             new EvidenceRelativePath($"chunks/{id}/manifest.json"),
             new TimeRange(start, start.AddMinutes(1)),
+            capturedFrameCount: 40,
             frameCount: 30,
-            videoWidth: 1280,
-            videoHeight: 720,
-            frameRateNumerator: 1,
-            frameRateDenominator: 1,
-            videoByteCount: 1_024,
+            frameWidth: 1280,
+            frameHeight: 720,
+            frameByteCount: 1_024,
             persistenceGeneration: 11,
             targetEpoch: 12,
             committedAtUtc: start.AddMinutes(1),

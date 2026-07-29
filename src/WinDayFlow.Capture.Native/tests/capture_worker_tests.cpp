@@ -44,7 +44,7 @@ using windayflow::capture::CaptureWorkerConfiguration;
 using windayflow::capture::CaptureWorkerExitReason;
 using windayflow::capture::CaptureWorkerPublication;
 using windayflow::capture::ChunkManifest;
-using windayflow::capture::MfH264ChunkWriterConfig;
+using windayflow::capture::JpegFrameChunkWriterConfig;
 using windayflow::capture::PersistenceToken;
 using windayflow::capture::PrivacyContext;
 using windayflow::capture::RuntimeAuthorization;
@@ -125,8 +125,9 @@ CaptureWorkerConfiguration TestConfiguration() {
   configuration.topology_retry_limit = 4;
   configuration.rollback_retry_limit = 3;
   configuration.rollback_retry_delay_ms = 0;
-  configuration.average_bitrate = 1'000;
-  configuration.maximum_encoded_chunk_bytes = 1'024;
+  configuration.jpeg_quality = 0.82F;
+  configuration.maximum_frame_bytes = 1'024;
+  configuration.maximum_chunk_bytes = 4'096;
   return configuration;
 }
 
@@ -280,7 +281,7 @@ class FakeBackend final : public CaptureWorkerBackend {
 
   CaptureWorkerBackendResult AcquireFrame(uint32_t,
                                           BgraFrame* frame) noexcept override {
-    acquire_calls.fetch_add(1);
+    const uint32_t call = acquire_calls.fetch_add(1) + 1U;
     if (frame == nullptr) {
       return CaptureWorkerBackendResult::kInternalFailure;
     }
@@ -291,7 +292,7 @@ class FakeBackend final : public CaptureWorkerBackend {
     }
     frame->width = 2;
     frame->height = 2;
-    frame->pixels.assign(16, 0x2A);
+    frame->pixels.assign(16, call <= black_frame_acquisitions ? 0x00 : 0x2A);
     AdvanceClocks(acquire_clock_advance_ms.load());
     InvalidateAt(FaultStage::kAcquire);
     signals_.Notify();
@@ -318,8 +319,12 @@ class FakeBackend final : public CaptureWorkerBackend {
   }
 
   CaptureWorkerBackendResult BeginChunk(
-      const MfH264ChunkWriterConfig& configuration) noexcept override {
+      std::string_view artifact_id,
+      const JpegFrameChunkWriterConfig& configuration) noexcept override {
     begin_calls.fetch_add(1);
+    if (artifact_id.empty()) {
+      return CaptureWorkerBackendResult::kInternalFailure;
+    }
     {
       std::lock_guard lock(records_mutex_);
       writer_configurations_.push_back(configuration);
@@ -331,8 +336,8 @@ class FakeBackend final : public CaptureWorkerBackend {
 
   CaptureWorkerBackendResult EncodeFrame(
       std::span<const uint8_t> top_down_bgra,
-      int64_t timestamp_ticks) noexcept override {
-    if (top_down_bgra.size() != 16U || timestamp_ticks < 0) {
+      uint64_t) noexcept override {
+    if (top_down_bgra.size() != 16U) {
       return CaptureWorkerBackendResult::kInvalidFrame;
     }
     const uint32_t call = encode_calls.fetch_add(1) + 1U;
@@ -348,15 +353,38 @@ class FakeBackend final : public CaptureWorkerBackend {
   }
 
   CaptureWorkerBackendResult FinalizeChunk(
-      int64_t end_timestamp_ticks,
-      std::vector<uint8_t>* encoded_mp4) noexcept override {
+      ChunkManifest* manifest,
+      std::unique_ptr<CaptureWorkerPublication>* publication) noexcept
+      override {
     finalize_calls.fetch_add(1);
-    if (encoded_mp4 == nullptr || end_timestamp_ticks <= 0) {
+    if (manifest == nullptr || publication == nullptr ||
+        *publication != nullptr || manifest->chunk_id.empty() ||
+        manifest->captured_frame_count == 0) {
       return CaptureWorkerBackendResult::kEncoderFailure;
     }
-    encoded_mp4->assign({0x00, 0x00, 0x00, 0x01});
     AdvanceClocks(finalize_clock_advance_ms.load());
     InvalidateAt(FaultStage::kFinalize);
+    prepare_calls.fetch_add(1);
+    manifest->frames = {{0, 0, 4, std::string(64, 'A')}};
+    manifest->frame_byte_count = 4;
+
+    auto state = std::make_shared<FakePublicationState>();
+    state->identifier =
+        "chunks/" + manifest->chunk_id + "/manifest.json";
+    state->safety = &safety_;
+    state->signals = &signals_;
+    state->invalidate_on_commit = fault_stage == FaultStage::kCommit &&
+                                  !invalidation_fired_.exchange(true);
+    state->rollback_failures_remaining.store(rollback_failures_before_success);
+    state->always_fail_rollback.store(always_fail_rollback);
+    *publication = std::make_unique<FakePublication>(state);
+
+    {
+      std::lock_guard lock(records_mutex_);
+      manifests_.push_back(*manifest);
+      publications_.push_back(std::move(state));
+    }
+    InvalidateAt(FaultStage::kPrepare);
     signals_.Notify();
     return CaptureWorkerBackendResult::kOk;
   }
@@ -374,36 +402,6 @@ class FakeBackend final : public CaptureWorkerBackend {
     *artifact_id = "chunk-" + std::to_string(id);
     signals_.Notify();
     return true;
-  }
-
-  CaptureWorkerBackendResult PreparePublication(
-      std::string_view artifact_id, std::span<const uint8_t> encoded_mp4,
-      const ChunkManifest& manifest,
-      std::unique_ptr<CaptureWorkerPublication>* publication) noexcept
-      override {
-    prepare_calls.fetch_add(1);
-    if (artifact_id.empty() || encoded_mp4.empty() || publication == nullptr) {
-      return CaptureWorkerBackendResult::kStorageFailure;
-    }
-
-    auto state = std::make_shared<FakePublicationState>();
-    state->identifier = "committed/" + std::string(artifact_id) + ".mp4";
-    state->safety = &safety_;
-    state->signals = &signals_;
-    state->invalidate_on_commit = fault_stage == FaultStage::kCommit &&
-                                  !invalidation_fired_.exchange(true);
-    state->rollback_failures_remaining.store(rollback_failures_before_success);
-    state->always_fail_rollback.store(always_fail_rollback);
-    *publication = std::make_unique<FakePublication>(state);
-
-    {
-      std::lock_guard lock(records_mutex_);
-      manifests_.push_back(manifest);
-      publications_.push_back(std::move(state));
-    }
-    InvalidateAt(FaultStage::kPrepare);
-    signals_.Notify();
-    return CaptureWorkerBackendResult::kOk;
   }
 
   int64_t SteadyNowMilliseconds() noexcept override {
@@ -502,6 +500,7 @@ class FakeBackend final : public CaptureWorkerBackend {
   uint32_t rollback_failures_before_success = 0;
   bool always_fail_rollback = false;
   bool block_first_encode = false;
+  uint32_t black_frame_acquisitions = 0;
   uint32_t blocked_steady_now_call = 0;
   std::atomic<CaptureWorkerBackendResult> acquire_result{
       CaptureWorkerBackendResult::kOk};
@@ -553,7 +552,7 @@ class FakeBackend final : public CaptureWorkerBackend {
   bool first_encode_released_ = false;
   bool steady_now_released_ = false;
   mutable std::mutex records_mutex_;
-  std::vector<MfH264ChunkWriterConfig> writer_configurations_;
+  std::vector<JpegFrameChunkWriterConfig> writer_configurations_;
   std::vector<ChunkManifest> manifests_;
   std::vector<std::shared_ptr<FakePublicationState>> publications_;
 };
@@ -796,11 +795,12 @@ bool TestBoundaryFrameStartsNextChunk() {
                     result.encoded_frames == 8 &&
                     result.committed_chunks == 2,
                 "chunk-boundary worker reported incorrect progress") &&
-         Expect(manifests.size() == 2 && manifests[0].frame_count == 6 &&
+         Expect(manifests.size() == 2 &&
+                    manifests[0].captured_frame_count == 6 &&
                     manifests[0].end_time_unix_ms -
                             manifests[0].start_time_unix_ms ==
                         kChunkDurationMs &&
-                    manifests[1].frame_count == 2 &&
+                    manifests[1].captured_frame_count == 2 &&
                     manifests[0].end_time_unix_ms <=
                         manifests[1].start_time_unix_ms &&
                     manifests[1].start_time_unix_ms -
@@ -1014,6 +1014,45 @@ bool TestFirstFrameFailureDoesNotPublishReady() {
                     fixture.backend.transform_calls.load() == 0 &&
                     fixture.backend.begin_calls.load() == 0,
                 "first-frame failure advanced or reported the wrong result");
+}
+
+bool TestBlackSurfaceFrameIsDiscardedBeforeEncoding() {
+  WorkerFixture fixture;
+  CheckpointLog checkpoints;
+  fixture.backend.black_frame_acquisitions = 1;
+  CaptureWorkerCheckpointSink sink = [&](const CaptureWorkerCheckpoint& value) {
+    return checkpoints.Push(value);
+  };
+  if (!Expect(fixture.Authorize(1) && fixture.Start(std::move(sink)),
+              "black-frame worker could not start") ||
+      !Expect(fixture.backend.WaitForAcquireCount(1),
+              "black-frame worker did not inspect its first surface")) {
+    return false;
+  }
+
+  const bool discarded_without_ready =
+      fixture.backend.begin_calls.load() == 0 &&
+      fixture.backend.encode_calls.load() == 0 && checkpoints.Values().empty();
+  fixture.backend.steady_now_ms.store(1'250);
+  fixture.backend.unix_now_ms.store(1'700'000'000'250);
+  fixture.runtime.NotifyAuthorizationChanged();
+  if (!Expect(fixture.backend.WaitForEncodeCount(1),
+              "black-frame worker did not encode the next useful frame")) {
+    return false;
+  }
+
+  const bool stopped =
+      fixture.runtime.RequestStop() ==
+          CaptureRuntimeStopResult::kStopRequested &&
+      fixture.runtime.WaitStopped(kTestTimeoutMs) ==
+          CaptureRuntimeWaitResult::kStopped;
+  const auto result = fixture.worker.last_result();
+  return Expect(discarded_without_ready,
+                "an empty black surface opened a chunk or published ready") &&
+         Expect(stopped && result.reason == CaptureWorkerExitReason::kStopped &&
+                    result.encoded_frames == 1 &&
+                    result.committed_chunks == 1,
+                "the useful frame after a black surface was not committed");
 }
 
 bool TestFirstFramePublishesReadyExactlyOnce() {
@@ -1264,9 +1303,9 @@ bool TestStopCommitsValidPartialChunk() {
          Expect(manifests.size() == 1 && publications.size() == 1,
                 "partial stop did not prepare exactly one artifact") &&
          Expect(manifests[0].chunk_id == "chunk-1" &&
-                    manifests[0].frame_count == 1 &&
-                    manifests[0].video_width == 2 &&
-                    manifests[0].video_height == 2 &&
+                    manifests[0].captured_frame_count == 1 &&
+                    manifests[0].frame_width == 2 &&
+                    manifests[0].frame_height == 2 &&
                     manifests[0].persistence_generation == fixture.generation &&
                     manifests[0].target_epoch == fixture.target.target_epoch &&
                     manifests[0].end_time_unix_ms >
@@ -1285,6 +1324,75 @@ bool TestStopCommitsValidPartialChunk() {
                  committed.event.target_epoch == fixture.target.target_epoch &&
                  committed.detail == publications[0]->identifier,
              "partial-stop commit event did not match the artifact");
+}
+
+bool TestAuthorizationPauseCommitsSealedPrefixAcrossGenerationChange() {
+  WorkerFixture fixture;
+  CheckpointLog checkpoints;
+  CaptureWorkerCheckpointSink sink = [&](const CaptureWorkerCheckpoint& value) {
+    return checkpoints.Push(value);
+  };
+  if (!Expect(fixture.Authorize(1) && fixture.Start(std::move(sink)),
+              "sealed-prefix worker could not start") ||
+      !Expect(fixture.backend.WaitForEncodeCount(1) &&
+                  checkpoints.WaitForSize(1),
+              "sealed-prefix worker did not encode its first frame")) {
+    return false;
+  }
+
+  const uint64_t sealed_generation = fixture.generation;
+  const auto update_ticket = fixture.safety.BeginSealedAuthorizationUpdate();
+  const bool pause_requested =
+      fixture.runtime.RequestPause() ==
+      CaptureRuntimePauseResult::kPauseRequested;
+  const bool blocked = fixture.safety.CompleteRuntimeAuthorization(
+                           update_ticket,
+                           RuntimeAuthorization{BlockedPrivacy(2), std::nullopt},
+                           &fixture.generation) ==
+                       CaptureSafetyUpdateResult::kOk;
+  fixture.runtime.NotifyAuthorizationChanged();
+  if (!Expect(pause_requested && blocked &&
+                  fixture.generation != sealed_generation,
+              "authorization pause did not advance the safety generation") ||
+      !Expect(checkpoints.WaitForSize(2) &&
+                  fixture.backend.WaitForAcknowledgeCount(1),
+              "authorization pause did not publish its sealed prefix") ||
+      !Expect(fixture.runtime.RequestStop() ==
+                      CaptureRuntimeStopResult::kStopRequested &&
+                  fixture.runtime.WaitStopped(kTestTimeoutMs) ==
+                      CaptureRuntimeWaitResult::kStopped,
+              "sealed-prefix worker did not stop")) {
+    return false;
+  }
+
+  const auto manifests = fixture.backend.Manifests();
+  const auto publications = fixture.backend.PublicationRecords();
+  const ReadEvent committed = ReadOne(fixture.events);
+  const auto result = fixture.worker.last_result();
+  const auto checkpoint_values = checkpoints.Values();
+  return Expect(result.reason == CaptureWorkerExitReason::kStopped &&
+                    result.committed_chunks == 1 &&
+                    result.encoded_frames == 1,
+                "sealed prefix changed worker progress") &&
+         Expect(manifests.size() == 1 &&
+                    manifests[0].captured_frame_count == 1 &&
+                    manifests[0].persistence_generation == sealed_generation,
+                "sealed prefix lost its original evidence generation") &&
+         Expect(publications.size() == 1 &&
+                    publications[0]->commit_calls.load() == 1 &&
+                    publications[0]->acknowledge_calls.load() == 1 &&
+                    publications[0]->rollback_calls.load() == 0 &&
+                    publications[0]->committed.load(),
+                "sealed-prefix publication lifecycle was incorrect") &&
+         Expect(committed.result == CaptureEventReadResult::kSuccess &&
+                    committed.event.state == WDF_CAPTURE_STATE_PAUSED &&
+                    committed.event.persistence_generation == sealed_generation,
+                "sealed-prefix event lost its original generation") &&
+         Expect(checkpoint_values.size() >= 2 &&
+                    checkpoint_values[1] == CaptureWorkerCheckpoint{
+                                                CaptureWorkerCheckpointKind::kPaused,
+                                                1},
+                "sealed-prefix worker did not remain resumable");
 }
 
 bool TestPauseResumeUsesFreshGeneration() {
@@ -1322,8 +1430,9 @@ bool TestPauseResumeUsesFreshGeneration() {
   return Expect(result.reason == CaptureWorkerExitReason::kStopped &&
                     result.committed_chunks == 2 && result.encoded_frames == 2,
                 "pause-resume progress was incorrect") &&
-         Expect(manifests.size() == 2 && manifests[0].frame_count == 1 &&
-                    manifests[1].frame_count == 1 &&
+         Expect(manifests.size() == 2 &&
+                    manifests[0].captured_frame_count == 1 &&
+                    manifests[1].captured_frame_count == 1 &&
                     manifests[0].persistence_generation == first_generation &&
                     manifests[1].persistence_generation == fixture.generation,
                 "pause-resume mixed persistence generations") &&
@@ -1371,8 +1480,9 @@ bool TestImmediateResumeStillFinalizesPauseExactlyOnce() {
                     result.encoded_frames == 2 && result.committed_chunks == 2,
                 "merged pause lost or duplicated chunk progress") &&
          Expect(fixture.backend.finalize_calls.load() == 2 &&
-                    manifests.size() == 2 && manifests[0].frame_count == 1 &&
-                    manifests[1].frame_count == 1 &&
+                    manifests.size() == 2 &&
+                    manifests[0].captured_frame_count == 1 &&
+                    manifests[1].captured_frame_count == 1 &&
                     manifests[0].persistence_generation == fixture.generation &&
                     manifests[1].persistence_generation == fixture.generation,
                 "merged pause did not finalize its partial exactly once") &&
@@ -1422,7 +1532,8 @@ bool TestMergedResumeDiscardsSupersededGeneration() {
                     result.encoded_frames == 2 && result.committed_chunks == 1,
                 "superseded generation changed worker progress") &&
          Expect(fixture.backend.finalize_calls.load() == 1 &&
-                    manifests.size() == 1 && manifests[0].frame_count == 1 &&
+                    manifests.size() == 1 &&
+                    manifests[0].captured_frame_count == 1 &&
                     manifests[0].persistence_generation == fixture.generation &&
                     manifests[0].persistence_generation != old_generation,
                 "superseded partial was persisted or mixed") &&
@@ -1487,7 +1598,8 @@ bool TestPauseResumePauseKeepsWorkerResumable() {
                     result.encoded_frames == 2 && result.committed_chunks == 1,
                 "triple-control worker lost resumable state") &&
          Expect(fixture.backend.finalize_calls.load() == 1 &&
-                    manifests.size() == 1 && manifests[0].frame_count == 1 &&
+                    manifests.size() == 1 &&
+                    manifests[0].captured_frame_count == 1 &&
                     manifests[0].persistence_generation == fixture.generation &&
                     manifests[0].persistence_generation != old_generation,
                 "triple-control worker persisted a superseded generation");
@@ -1540,8 +1652,9 @@ bool TestCallbackInvalidationAtEveryStage() {
       return false;
     }
 
-    const bool needs_rollback =
-        stage == FaultStage::kPrepare || stage == FaultStage::kCommit;
+    const bool needs_rollback = stage == FaultStage::kFinalize ||
+                                stage == FaultStage::kPrepare ||
+                                stage == FaultStage::kCommit;
     if (needs_rollback) {
       if (!Expect(publications.size() == 1 &&
                       publications[0]->rollback_calls.load() == 1 &&
@@ -1628,7 +1741,6 @@ bool TestReservationSaturationPreventsPersistence() {
                     result.committed_chunks == 0,
                 "reservation saturation returned the wrong failure") &&
          Expect(fixture.backend.prepare_calls.load() == 0 &&
-                    fixture.backend.create_artifact_calls.load() == 0 &&
                     fixture.backend.PublicationRecords().empty(),
                 "reservation saturation persisted an artifact") &&
          Expect(retained.result == CaptureEventReadResult::kSuccess &&
@@ -1859,11 +1971,13 @@ int main() {
       !TestTimeoutDoesNotPublishReady() ||
       !TestFirstSuccessfulFrameReanchorsAfterTimeouts() ||
       !TestFirstFrameFailureDoesNotPublishReady() ||
+      !TestBlackSurfaceFrameIsDiscardedBeforeEncoding() ||
       !TestFirstFramePublishesReadyExactlyOnce() ||
       !TestResumeWaitsForFreshFrameBeforeReady() ||
       !TestReadyCheckpointRunsAfterPermitRelease() ||
       !TestProvisionalPauseRecoversAuthorizationLossAtCriticalStages() ||
       !TestStopCommitsValidPartialChunk() ||
+      !TestAuthorizationPauseCommitsSealedPrefixAcrossGenerationChange() ||
       !TestPauseResumeUsesFreshGeneration() ||
       !TestImmediateResumeStillFinalizesPauseExactlyOnce() ||
       !TestMergedResumeDiscardsSupersededGeneration() ||

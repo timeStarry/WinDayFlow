@@ -127,6 +127,25 @@ class PersistencePermit {
   uint64_t authorization_epoch_ = 0;
 };
 
+class SealedPrefixPermit {
+ public:
+  SealedPrefixPermit() = default;
+  SealedPrefixPermit(const SealedPrefixPermit&) = delete;
+  SealedPrefixPermit& operator=(const SealedPrefixPermit&) = delete;
+  SealedPrefixPermit(SealedPrefixPermit&&) noexcept = default;
+  SealedPrefixPermit& operator=(SealedPrefixPermit&&) noexcept = default;
+
+  explicit operator bool() const { return issuer_ != nullptr; }
+
+ private:
+  friend class CaptureSafetyCore;
+  SealedPrefixPermit(const CaptureSafetyCore* issuer, PersistenceToken token)
+      : issuer_(issuer), token_(std::move(token)) {}
+
+  const CaptureSafetyCore* issuer_ = nullptr;
+  PersistenceToken token_;
+};
+
 class CaptureCommandAdmissionPermit {
  public:
   CaptureCommandAdmissionPermit() = default;
@@ -177,6 +196,7 @@ class CaptureSafetyCore {
   CaptureSafetyUpdateResult UpdateLegacyPrivacyContext(
       const PrivacyContext& context, uint64_t* persistence_generation);
   CaptureSafetyUpdateTicket BeginAuthorizationUpdate() noexcept;
+  CaptureSafetyUpdateTicket BeginSealedAuthorizationUpdate() noexcept;
   uint64_t InvalidateAuthorizationAdmission() noexcept;
   CaptureSafetyUpdateResult CompleteRuntimeAuthorization(
       const CaptureSafetyUpdateTicket& ticket,
@@ -206,6 +226,12 @@ class CaptureSafetyCore {
       const CaptureTargetIdentity& observed_target) const;
   bool IsPersistencePermitCurrent(
       const PersistencePermit& permit) const noexcept;
+  bool HasSealedPrefix(const PersistenceToken& token) const noexcept;
+  SealedPrefixPermit AcquireSealedPrefixPermit(
+      const PersistenceToken& token) const noexcept;
+  bool IsSealedPrefixPermitCurrent(
+      const SealedPrefixPermit& permit) const noexcept;
+  void ConsumeSealedPrefix(const PersistenceToken& token) noexcept;
 
   uint64_t instance_epoch() const;
   uint64_t persistence_generation() const;
@@ -222,6 +248,7 @@ class CaptureSafetyCore {
       bool require_contiguous_revision, const CaptureSafetyUpdateTicket& ticket,
       uint64_t* persistence_generation);
   CaptureSafetyUpdateTicket CloseAdmission() noexcept;
+  void PrepareSealedPrefix() noexcept;
   uint64_t AdvanceCallbackInvalidationEpoch() noexcept;
   void ConfirmCallbackInvalidationUnderLock(uint64_t invalidation_epoch);
   void PublishObservableUnderLock();
@@ -253,6 +280,9 @@ class CaptureSafetyCore {
   std::atomic<uint64_t> admission_stamp_;
   std::atomic<uint64_t> callback_invalidation_epoch_{0};
   std::atomic<bool> callback_invalidation_exhausted_{false};
+  std::atomic<uint64_t> observable_persistence_generation_{1};
+  std::atomic<uint64_t> observable_target_epoch_{0};
+  std::atomic<uint64_t> sealed_prefix_generation_{0};
   uint64_t confirmed_callback_invalidation_epoch_ = 0;
   // Command records are always locked before the shared safety gate.
   mutable std::mutex command_mutex_;

@@ -19,6 +19,39 @@ public sealed record TimelineEntry
         UserEditProvenance? userEdits = null,
         TimelineEntryOrigin origin = TimelineEntryOrigin.Analyzed,
         long revision = 0)
+        : this(
+            id,
+            range,
+            title,
+            summary,
+            category,
+            productivity,
+            apps,
+            tags,
+            confidence,
+            evidence is null ? [] : [evidence],
+            analysisVersion,
+            userEdits,
+            origin,
+            revision)
+    {
+    }
+
+    private TimelineEntry(
+        Guid id,
+        TimeRange range,
+        string title,
+        string summary,
+        ActivityCategory category,
+        ProductivityKind productivity,
+        IReadOnlyList<AppUsage> apps,
+        IReadOnlyList<string> tags,
+        double? confidence,
+        IReadOnlyList<EvidenceReference> evidenceReferences,
+        string? analysisVersion,
+        UserEditProvenance? userEdits = null,
+        TimelineEntryOrigin origin = TimelineEntryOrigin.Analyzed,
+        long revision = 0)
     {
         if (id == Guid.Empty)
         {
@@ -30,6 +63,13 @@ public sealed record TimelineEntry
         ArgumentNullException.ThrowIfNull(summary);
         ArgumentNullException.ThrowIfNull(apps);
         ArgumentNullException.ThrowIfNull(tags);
+        ArgumentNullException.ThrowIfNull(evidenceReferences);
+        if (evidenceReferences.Any(static evidence => evidence is null))
+        {
+            throw new ArgumentException(
+                "Timeline evidence references cannot contain null items.",
+                nameof(evidenceReferences));
+        }
 
         if (!Enum.IsDefined(category))
         {
@@ -74,7 +114,7 @@ public sealed record TimelineEntry
         }
 
         if (origin == TimelineEntryOrigin.Analyzed
-            && (!confidence.HasValue || evidence is null || analysisVersion is null))
+            && (!confidence.HasValue || evidenceReferences.Count == 0 || analysisVersion is null))
         {
             throw new ArgumentException(
                 "Analyzed timeline entries require confidence, evidence, and an analysis version.",
@@ -82,7 +122,7 @@ public sealed record TimelineEntry
         }
 
         if (origin == TimelineEntryOrigin.Manual
-            && (confidence.HasValue || evidence is not null || analysisVersion is not null))
+            && (confidence.HasValue || evidenceReferences.Count != 0 || analysisVersion is not null))
         {
             throw new ArgumentException(
                 "Manual timeline entries cannot contain generated analysis evidence.",
@@ -98,7 +138,7 @@ public sealed record TimelineEntry
         Apps = CopyApps(apps);
         Tags = CopyTags(tags);
         Confidence = confidence;
-        Evidence = evidence;
+        EvidenceReferences = Array.AsReadOnly(evidenceReferences.ToArray());
         AnalysisVersion = analysisVersion;
         UserEdits = userEdits ?? UserEditProvenance.Empty;
         Origin = origin;
@@ -123,7 +163,10 @@ public sealed record TimelineEntry
 
     public double? Confidence { get; private init; }
 
-    public EvidenceReference? Evidence { get; private init; }
+    public IReadOnlyList<EvidenceReference> EvidenceReferences { get; private init; }
+
+    public EvidenceReference? Evidence =>
+        EvidenceReferences.Count == 0 ? null : EvidenceReferences[0];
 
     public string? AnalysisVersion { get; private init; }
 
@@ -135,13 +178,45 @@ public sealed record TimelineEntry
 
     public bool HasUserEdits => UserEdits.HasEdits;
 
-    public bool HasEvidence => Evidence is not null;
+    public bool HasEvidence => EvidenceReferences.Count != 0;
+
+    public static TimelineEntry CreateAnalyzed(
+        Guid id,
+        TimeRange range,
+        string title,
+        string summary,
+        ActivityCategory category,
+        ProductivityKind productivity,
+        IReadOnlyList<AppUsage> apps,
+        IReadOnlyList<string> tags,
+        double confidence,
+        IReadOnlyList<EvidenceReference> evidenceReferences,
+        string analysisVersion,
+        UserEditProvenance? userEdits = null,
+        long revision = 0)
+    {
+        return new TimelineEntry(
+            id,
+            range,
+            title,
+            summary,
+            category,
+            productivity,
+            apps,
+            tags,
+            confidence,
+            evidenceReferences,
+            analysisVersion,
+            userEdits,
+            TimelineEntryOrigin.Analyzed,
+            revision);
+    }
 
     public static TimelineEntry FromActivity(Guid id, Activity activity, string analysisVersion)
     {
         ArgumentNullException.ThrowIfNull(activity);
 
-        return new TimelineEntry(
+        return CreateAnalyzed(
             id,
             activity.Range,
             activity.Title,
@@ -151,7 +226,7 @@ public sealed record TimelineEntry
             activity.Apps,
             activity.Tags,
             activity.Confidence,
-            activity.Evidence,
+            activity.EvidenceReferences,
             analysisVersion);
     }
 
@@ -221,7 +296,7 @@ public sealed record TimelineEntry
             throw new InvalidOperationException("Manual timeline entries cannot be reanalyzed.");
         }
 
-        return new TimelineEntry(
+        return CreateAnalyzed(
             Id,
             UserEdits.RangeEditedAt.HasValue ? Range : activity.Range,
             UserEdits.TitleEditedAt.HasValue ? Title : activity.Title,
@@ -231,10 +306,9 @@ public sealed record TimelineEntry
             activity.Apps,
             UserEdits.TagsEditedAt.HasValue ? Tags : activity.Tags,
             activity.Confidence,
-            activity.Evidence,
+            activity.EvidenceReferences,
             analysisVersion,
             UserEdits,
-            TimelineEntryOrigin.Analyzed,
             Revision);
     }
 

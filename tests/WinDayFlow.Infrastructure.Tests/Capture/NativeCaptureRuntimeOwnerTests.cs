@@ -740,6 +740,11 @@ public sealed class NativeCaptureRuntimeOwnerTests
             NativeCapturePolicyDecision.Allow,
             NativeCapturePolicyDecision.Allow,
             NativeCapturePolicyDecision.Allow,
+            new NativeCaptureIdentitySnapshot(
+                executableName: "notepad.exe",
+                packageFamilyName: null,
+                publisherCertificateSha256: null,
+                windowTitle: "Untitled - Notepad"),
             Target: NativeCaptureTargetIdentity.Present(
                 windowHandle: 0x1234 + targetEpoch,
                 processId: checked((uint)(40 + targetEpoch)),

@@ -13,6 +13,18 @@ public interface IAnalysisResultCommitter
         CancellationToken cancellationToken = default);
 }
 
+public interface IAnalysisWindowResultCommitter : IAnalysisResultCommitter
+{
+    Task<AnalysisResultCommitStatus> TryCommitWindowAsync(
+        AnalysisJobLease lease,
+        Guid providerProfileId,
+        long providerProfileRevision,
+        AnalysisWindowSnapshot window,
+        IReadOnlyList<TimelineEntry> entries,
+        DateTimeOffset committedAtUtc,
+        CancellationToken cancellationToken = default);
+}
+
 public enum AnalysisResultCommitStatus
 {
     Committed = 0,
@@ -20,4 +32,5 @@ public enum AnalysisResultCommitStatus
     CloudAnalysisDisabled = 2,
     ProviderRevisionChanged = 3,
     EntryConflict = 4,
+    WindowChanged = 5,
 }

@@ -51,7 +51,7 @@ public sealed class AnalysisJobProcessorTests
         Assert.NotEqual(Guid.Empty, entry.Id);
         Assert.Equal("Focused implementation", entry.Title);
         Assert.Equal(ChunkId, entry.Evidence?.CaptureChunkId);
-        Assert.Equal("timeline-v1", entry.AnalysisVersion);
+        Assert.Equal("timeline-v2", entry.AnalysisVersion);
     }
 
     [Fact]
@@ -357,7 +357,7 @@ public sealed class AnalysisJobProcessorTests
             chunk.Id,
             ProfileId,
             jobRevision,
-            "timeline-v1",
+            "timeline-v2",
             new string('A', 64),
             maxAttempts: 3,
             Now);
@@ -422,15 +422,13 @@ public sealed class AnalysisJobProcessorTests
         var range = new TimeRange(rangeStart, rangeStart.AddMinutes(1));
         return new CaptureChunk(
             ChunkId,
-            new EvidenceRelativePath($"chunks/{ChunkId}/capture.mp4"),
             new EvidenceRelativePath($"chunks/{ChunkId}/manifest.json"),
             range,
+            capturedFrameCount: 10,
             frameCount: 6,
-            videoWidth: 1920,
-            videoHeight: 1080,
-            frameRateNumerator: 1,
-            frameRateDenominator: 10,
-            videoByteCount: 4_096,
+            frameWidth: 1600,
+            frameHeight: 900,
+            frameByteCount: 4_096,
             persistenceGeneration: 1,
             targetEpoch: 2,
             committedAtUtc: Now.AddMinutes(1),
@@ -440,7 +438,7 @@ public sealed class AnalysisJobProcessorTests
     private static AnalysisEvidenceBatch CreateEvidence(
         CaptureChunk chunk,
         CaptureChunkFingerprint? sourceFingerprint = null) => new(
-        chunk.VideoPath.Value,
+        chunk.ManifestPath.Value,
         sourceFingerprint ?? new CaptureChunkFingerprint(new string('A', 64)),
         [new AiEvidenceImage(
             "frame-1",

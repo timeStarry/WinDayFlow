@@ -1251,7 +1251,7 @@ public sealed class WindowsCapturePrivacyMonitorTests
 
 #if WDF_DEV_LIVE_CAPTURE
     [Fact]
-    public async Task DevLiveForegroundSwitchFromSelfToExternalAllowsTarget()
+    public async Task DevLiveForegroundSwitchFromSelfToExternalKeepsTargetsAllowed()
     {
         var self = CreateObservation(
             targetEpoch: 88,
@@ -1275,10 +1275,10 @@ public sealed class WindowsCapturePrivacyMonitorTests
         await monitor.StartAsync();
         var selfUpdate = await sink.ReadUpdateAsync().WaitAsync(Timeout);
         Assert.Equal(
-            NativeCapturePolicyDecision.Block,
+            NativeCapturePolicyDecision.Allow,
             selfUpdate.Signals.ApplicationAllowed);
         Assert.Equal(
-            NativeCapturePolicyDecision.Block,
+            NativeCapturePolicyDecision.Allow,
             selfUpdate.Signals.WindowAllowed);
 
         source.EmitChange(
@@ -1302,7 +1302,7 @@ public sealed class WindowsCapturePrivacyMonitorTests
     }
 
     [Fact]
-    public async Task DevLiveSelfWithUnresolvedIdentityDoesNotRetry()
+    public async Task DevLiveSelfWithUnresolvedOptionalIdentityDoesNotRetry()
     {
         var self = CreateObservation(
             targetEpoch: 89,
@@ -1324,10 +1324,10 @@ public sealed class WindowsCapturePrivacyMonitorTests
         var update = await sink.ReadUpdateAsync().WaitAsync(Timeout);
 
         Assert.Equal(
-            NativeCapturePolicyDecision.Block,
+            NativeCapturePolicyDecision.Allow,
             update.Signals.ApplicationAllowed);
         Assert.Equal(
-            NativeCapturePolicyDecision.Block,
+            NativeCapturePolicyDecision.Allow,
             update.Signals.WindowAllowed);
         Assert.Equal(
             NativeCaptureTargetIdentityState.Present,

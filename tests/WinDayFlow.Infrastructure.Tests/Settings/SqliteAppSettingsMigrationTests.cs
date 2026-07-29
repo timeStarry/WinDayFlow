@@ -12,7 +12,7 @@ namespace WinDayFlow.Infrastructure.Tests.Settings;
 public sealed class SqliteAppSettingsMigrationTests
 {
     [Fact]
-    public async Task VersionOneDatabaseUpgradesWithoutChangingTimelineData()
+    public async Task VersionOneDatabaseUpgradeResetsLegacyTimelineData()
     {
         using var database = new TemporaryDatabase();
         var factory = new SqliteConnectionFactory(database.DatabasePath);
@@ -23,8 +23,8 @@ public sealed class SqliteAppSettingsMigrationTests
         var entry = TimelineEntry.CreateManual(
             Guid.Parse("83806c82-529d-40c3-bc15-49867368f07b"),
             new TimeRange(start, start.AddMinutes(45)),
-            "Migration sentinel",
-            "This entry must survive the settings migration.",
+            "Legacy migration sentinel",
+            "Schema v10 intentionally removes this development timeline entry.",
             ActivityCategory.Planning,
             ProductivityKind.Focused,
             ["migration"],
@@ -35,6 +35,8 @@ public sealed class SqliteAppSettingsMigrationTests
         await using (var command = connection.CreateCommand())
         {
             command.CommandText = """
+                DROP TABLE analysis_job_window_members;
+                DROP TABLE timeline_entry_evidence;
                 DROP INDEX ix_analysis_jobs_provider_revision_state;
                 DROP TABLE ai_provider_profiles;
                 DROP TABLE analysis_jobs;
@@ -49,12 +51,7 @@ public sealed class SqliteAppSettingsMigrationTests
         await initializer.InitializeAsync();
 
         var restored = await timelineRepository.GetByIdAsync(entry.Id);
-        Assert.NotNull(restored);
-        Assert.Equal(entry.Id, restored.Id);
-        Assert.Equal(entry.Range, restored.Range);
-        Assert.Equal(entry.Title, restored.Title);
-        Assert.Equal(entry.Summary, restored.Summary);
-        Assert.Equal(entry.Tags, restored.Tags);
+        Assert.Null(restored);
         Assert.Equal(
             CapturePrivacySettings.Default,
             (await new SqliteAppSettingsRepository(factory).GetAsync()).CapturePrivacy);
@@ -102,7 +99,47 @@ public sealed class SqliteAppSettingsMigrationTests
         Assert.True(await reader.ReadAsync());
         Assert.Equal(7, reader.GetInt32(0));
         Assert.Equal(1, reader.GetInt32(1));
+        Assert.True(await reader.ReadAsync());
+        Assert.Equal(8, reader.GetInt32(0));
+        Assert.Equal(1, reader.GetInt32(1));
+        Assert.True(await reader.ReadAsync());
+        Assert.Equal(9, reader.GetInt32(0));
+        Assert.Equal(1, reader.GetInt32(1));
+        Assert.True(await reader.ReadAsync());
+        Assert.Equal(10, reader.GetInt32(0));
+        Assert.Equal(1, reader.GetInt32(1));
+        Assert.True(await reader.ReadAsync());
+        Assert.Equal(11, reader.GetInt32(0));
+        Assert.Equal(1, reader.GetInt32(1));
+        Assert.True(await reader.ReadAsync());
+        Assert.Equal(12, reader.GetInt32(0));
+        Assert.Equal(1, reader.GetInt32(1));
         Assert.False(await reader.ReadAsync());
+    }
+
+    [Fact]
+    public async Task DeletedWinDayFlowDefaultRuleIsNotRecreated()
+    {
+        using var database = new TemporaryDatabase();
+        var factory = new SqliteConnectionFactory(database.DatabasePath);
+        var initializer = new SqliteDatabaseInitializer(factory);
+        await initializer.InitializeAsync();
+
+        await using (var connection = await factory.OpenConnectionAsync())
+        await using (var command = connection.CreateCommand())
+        {
+            command.CommandText = """
+                DELETE FROM capture_exclusion_rules
+                WHERE rule_id = 'df2c2131-bfe5-4a17-bf4c-4f3378a4b093';
+                """;
+            Assert.Equal(1, await command.ExecuteNonQueryAsync());
+        }
+
+        await initializer.InitializeAsync();
+        await new SqliteDatabaseInitializer(factory).InitializeAsync();
+
+        var settings = await new SqliteAppSettingsRepository(factory).GetAsync();
+        Assert.Empty(settings.CapturePrivacy.ExclusionRules.Rules);
     }
 
     [Fact]
@@ -168,6 +205,12 @@ public sealed class SqliteAppSettingsMigrationTests
         var factory = new SqliteConnectionFactory(database.DatabasePath);
         await new SqliteDatabaseInitializer(factory).InitializeAsync();
         await using var connection = await factory.OpenConnectionAsync();
+
+        await using (var deleteDefaults = connection.CreateCommand())
+        {
+            deleteDefaults.CommandText = "DELETE FROM capture_exclusion_rules;";
+            await deleteDefaults.ExecuteNonQueryAsync();
+        }
 
         await using (var insertPattern = connection.CreateCommand())
         {
@@ -240,7 +283,7 @@ public sealed class SqliteAppSettingsMigrationTests
     }
 
     [Fact]
-    public async Task VersionThreeDatabasePreservesDataAndForcesCloudAnalysisOff()
+    public async Task VersionThreeDatabaseResetsLegacyTimelineAndForcesCloudAnalysisOff()
     {
         using var database = new TemporaryDatabase();
         var factory = new SqliteConnectionFactory(database.DatabasePath);
@@ -252,7 +295,7 @@ public sealed class SqliteAppSettingsMigrationTests
             Guid.Parse("2f7bc346-9023-4e09-8671-e00ab43811d3"),
             new TimeRange(start, start.AddMinutes(30)),
             "Version three sentinel",
-            "Schema v4 must not alter existing timeline data.",
+            "Schema v10 intentionally removes this development timeline entry.",
             ActivityCategory.Communication,
             ProductivityKind.Neutral,
             ["schema-v3"],
@@ -264,6 +307,8 @@ public sealed class SqliteAppSettingsMigrationTests
         await using (var command = connection.CreateCommand())
         {
             command.CommandText = """
+                DROP TABLE analysis_job_window_members;
+                DROP TABLE timeline_entry_evidence;
                 DROP INDEX ix_analysis_jobs_provider_revision_state;
                 DROP TABLE ai_provider_profiles;
                 DROP TABLE analysis_jobs;
@@ -271,6 +316,8 @@ public sealed class SqliteAppSettingsMigrationTests
                 DROP TABLE capture_exclusion_rules;
                 ALTER TABLE app_settings
                 DROP COLUMN capture_application_privacy_mode;
+                ALTER TABLE app_settings
+                DROP COLUMN capture_interval_seconds;
                 DELETE FROM schema_migrations WHERE version >= 4;
                 UPDATE app_settings
                 SET theme = 2,
@@ -296,7 +343,8 @@ public sealed class SqliteAppSettingsMigrationTests
             ExcludeSensitiveApplications: false,
             PauseInRemoteSessions: false,
             PauseDuringScreenSharing: true,
-            Revision: 7);
+            Revision: 7,
+            CapturePrivacySettings.Default.ExclusionRules);
         var expected = new AppSettings(
             AppThemePreference.Dark,
             CaptureEnabled: true,
@@ -312,20 +360,16 @@ public sealed class SqliteAppSettingsMigrationTests
             expectedPrivacy);
         var settings = await new SqliteAppSettingsRepository(factory).GetAsync();
         Assert.Equal(expected, settings);
-        Assert.Empty(settings.CapturePrivacy.ExclusionRules.Rules);
+        var defaultRule = Assert.Single(settings.CapturePrivacy.ExclusionRules.Rules);
+        Assert.Equal(CapturePrivacySettings.WinDayFlowExclusionRuleId, defaultRule.Id);
 
         var restored = await timelineRepository.GetByIdAsync(entry.Id);
-        Assert.NotNull(restored);
-        Assert.Equal(entry.Id, restored.Id);
-        Assert.Equal(entry.Range, restored.Range);
-        Assert.Equal(entry.Title, restored.Title);
-        Assert.Equal(entry.Summary, restored.Summary);
-        Assert.Equal(entry.Tags, restored.Tags);
+        Assert.Null(restored);
 
         await using var migratedConnection = await factory.OpenConnectionAsync();
         await using var countRules = migratedConnection.CreateCommand();
         countRules.CommandText = "SELECT COUNT(*) FROM capture_exclusion_rules;";
-        Assert.Equal(0L, await countRules.ExecuteScalarAsync());
+        Assert.Equal(1L, await countRules.ExecuteScalarAsync());
     }
 
     [Fact]
@@ -375,6 +419,8 @@ public sealed class SqliteAppSettingsMigrationTests
                     capture_consent_granted_at_utc)
                 VALUES (1, 2, 1, 1, 1, '2026-07-16T03:04:05.0000000+00:00');
                 DROP TABLE app_settings_v3;
+                DROP TABLE analysis_job_window_members;
+                DROP TABLE timeline_entry_evidence;
                 DELETE FROM schema_migrations WHERE version >= 3;
                 """;
             await command.ExecuteNonQueryAsync();

@@ -23,7 +23,7 @@ namespace WinDayFlow.Infrastructure.Tests.Analysis;
 public sealed class AnalysisPipelineEndToEndTests
 {
     private const string ChunkId = "chunk-e2e-0001";
-    private const string EvidenceFrameId = "frame-0000";
+    private const string EvidenceFrameId = "frame-000000";
     private const string GeneratedTitle = "Implement the analysis pipeline";
     private const string EditedTitle = "Review the completed analysis pipeline";
     private const string ForegroundDisplayCaptureScope =
@@ -77,14 +77,12 @@ public sealed class AnalysisPipelineEndToEndTests
         var store = new SqliteCaptureAnalysisStore(
             connectionFactory,
             workspace.EvidenceRoot);
-        var nativeEvidence = new FakeNativeEvidenceApi(workspace.EvidenceRoot);
+        var nativeEvidence = CreateEvidenceServices(workspace.EvidenceRoot);
         using var ingestion = new CaptureAnalysisIngestionService(
             CreateScanner(workspace.EvidenceRoot, timeProvider),
             store,
             store,
-            new NativeCaptureChunkFingerprintProvider(
-                workspace.EvidenceRoot,
-                nativeEvidence),
+            nativeEvidence.FingerprintProvider,
             profileStore,
             settings,
             timeProvider: timeProvider);
@@ -92,9 +90,7 @@ public sealed class AnalysisPipelineEndToEndTests
             store,
             profileStore,
             providerFactory,
-            new NativeAnalysisEvidenceExtractor(
-                workspace.EvidenceRoot,
-                nativeEvidence),
+            nativeEvidence.EvidenceExtractor,
             settings,
             connectionFactory,
             timeProvider,
@@ -196,7 +192,6 @@ public sealed class AnalysisPipelineEndToEndTests
         var transport = new FakeOpenAiTransport();
         Guid completedJobId;
         Guid timelineEntryId;
-        string evidenceFingerprint;
 
         {
             using var settings = new AppSettingsService(
@@ -230,13 +225,9 @@ public sealed class AnalysisPipelineEndToEndTests
             var store = new SqliteCaptureAnalysisStore(
                 connectionFactory,
                 workspace.EvidenceRoot);
-            var nativeEvidence = new FakeNativeEvidenceApi(workspace.EvidenceRoot);
-            var fingerprintProvider = new NativeCaptureChunkFingerprintProvider(
-                workspace.EvidenceRoot,
-                nativeEvidence);
-            var evidenceExtractor = new NativeAnalysisEvidenceExtractor(
-                workspace.EvidenceRoot,
-                nativeEvidence);
+            var nativeEvidence = CreateEvidenceServices(workspace.EvidenceRoot);
+            var fingerprintProvider = nativeEvidence.FingerprintProvider;
+            var evidenceExtractor = nativeEvidence.EvidenceExtractor;
             using var ingestion = new CaptureAnalysisIngestionService(
                 CreateScanner(workspace.EvidenceRoot, timeProvider),
                 store,
@@ -252,9 +243,7 @@ public sealed class AnalysisPipelineEndToEndTests
                 new CaptureAnalysisIngestionResult(1, 1, 1, AnalysisReady: true),
                 ingestionResult);
             Assert.Equal(1, nativeEvidence.FingerprintCallCount);
-            evidenceFingerprint = nativeEvidence.SourceFingerprint
-                ?? throw new InvalidOperationException(
-                    "The native fingerprint fixture returned no digest.");
+            Assert.NotNull(nativeEvidence.SourceFingerprint);
 
             var processor = CreateProcessor(
                 store,
@@ -286,7 +275,7 @@ public sealed class AnalysisPipelineEndToEndTests
             Assert.Equal(TimelineEntryOrigin.Analyzed, generated.Origin);
             Assert.Equal(ChunkId, generated.Evidence?.CaptureChunkId);
             Assert.Equal(
-                $"evidence/evidence-v1/{ChunkId}/{evidenceFingerprint}/manifest.json",
+                $"chunks/{ChunkId}/manifest.json",
                 generated.Evidence?.ArtifactPath);
             Assert.Empty(generated.Apps);
             Assert.Equal(["coding", "integration"], generated.Tags);
@@ -350,13 +339,9 @@ public sealed class AnalysisPipelineEndToEndTests
             var store = new SqliteCaptureAnalysisStore(
                 connectionFactory,
                 workspace.EvidenceRoot);
-            var nativeEvidence = new FakeNativeEvidenceApi(workspace.EvidenceRoot);
-            var fingerprintProvider = new NativeCaptureChunkFingerprintProvider(
-                workspace.EvidenceRoot,
-                nativeEvidence);
-            var evidenceExtractor = new NativeAnalysisEvidenceExtractor(
-                workspace.EvidenceRoot,
-                nativeEvidence);
+            var nativeEvidence = CreateEvidenceServices(workspace.EvidenceRoot);
+            var fingerprintProvider = nativeEvidence.FingerprintProvider;
+            var evidenceExtractor = nativeEvidence.EvidenceExtractor;
             using var ingestion = new CaptureAnalysisIngestionService(
                 CreateScanner(workspace.EvidenceRoot, timeProvider),
                 store,
@@ -400,7 +385,7 @@ public sealed class AnalysisPipelineEndToEndTests
             Assert.Equal(1, persisted.Revision);
         }
 
-        workspace.ReplaceCommittedVideoBytes();
+        workspace.ReplaceCommittedFrameBytes();
         {
             using var settings = new AppSettingsService(
                 new SqliteAppSettingsRepository(connectionFactory),
@@ -410,14 +395,12 @@ public sealed class AnalysisPipelineEndToEndTests
             var store = new SqliteCaptureAnalysisStore(
                 connectionFactory,
                 workspace.EvidenceRoot);
-            var nativeEvidence = new FakeNativeEvidenceApi(workspace.EvidenceRoot);
+            var nativeEvidence = CreateEvidenceServices(workspace.EvidenceRoot);
             using var ingestion = new CaptureAnalysisIngestionService(
                 CreateScanner(workspace.EvidenceRoot, timeProvider),
                 store,
                 store,
-                new NativeCaptureChunkFingerprintProvider(
-                    workspace.EvidenceRoot,
-                    nativeEvidence),
+                nativeEvidence.FingerprintProvider,
                 profileStore,
                 settings,
                 timeProvider: timeProvider);
@@ -425,7 +408,7 @@ public sealed class AnalysisPipelineEndToEndTests
             await Assert.ThrowsAsync<CaptureChunkConflictException>(
                 () => ingestion.ReconcileAsync());
 
-            Assert.Equal(1, nativeEvidence.FingerprintCallCount);
+            Assert.Equal(0, nativeEvidence.FingerprintCallCount);
             Assert.Equal(0, nativeEvidence.ExtractionCallCount);
             Assert.Equal(0, nativeEvidence.FrameReadCallCount);
             Assert.Equal(3, transport.Requests.Count);
@@ -541,183 +524,59 @@ public sealed class AnalysisPipelineEndToEndTests
         }
     }
 
-    private sealed class FakeNativeEvidenceApi(string evidenceRoot)
-        : INativeCaptureChunkFingerprintApi, INativeAnalysisEvidenceApi
+    private static TestEvidenceServices CreateEvidenceServices(string evidenceRoot)
     {
-        private readonly string _evidenceRoot = Path.GetFullPath(evidenceRoot);
-        private static readonly byte[] Jpeg = [0xff, 0xd8, 0xff, 0xd9];
+        var archive = new CanonicalCaptureFrameArchive(evidenceRoot);
+        var rawFingerprint = new CanonicalCaptureChunkFingerprintProvider(archive);
+        var fingerprint = new CountingFingerprintProvider(rawFingerprint);
+        var extractor = new CountingEvidenceExtractor(
+            new CanonicalFrameAnalysisEvidenceExtractor(archive, rawFingerprint));
+        return new TestEvidenceServices(fingerprint, extractor);
+    }
 
-        public int FingerprintCallCount { get; private set; }
+    private sealed record TestEvidenceServices(
+        CountingFingerprintProvider FingerprintProvider,
+        CountingEvidenceExtractor EvidenceExtractor)
+    {
+        public int FingerprintCallCount => FingerprintProvider.CallCount;
+        public int ExtractionCallCount => EvidenceExtractor.CallCount;
+        public int FrameReadCallCount => EvidenceExtractor.CallCount;
+        public string? SourceFingerprint => FingerprintProvider.LastValue;
+    }
 
-        public int ExtractionCallCount { get; private set; }
+    private sealed class CountingFingerprintProvider(
+        ICaptureChunkFingerprintProvider inner) : ICaptureChunkFingerprintProvider
+    {
+        public int CallCount { get; private set; }
+        public string? LastValue { get; private set; }
 
-        public int FrameReadCallCount { get; private set; }
-
-        public string? SourceFingerprint { get; private set; }
-
-        public NativeCaptureResult ComputeChunkFingerprint(
-            byte[] dataRootUtf8,
-            uint dataRootUtf8Length,
-            byte[] canonicalChunkIdUtf8,
-            uint canonicalChunkIdUtf8Length,
-            ulong expectedVideoByteCount,
-            byte[] fingerprintUtf8,
-            uint fingerprintUtf8Capacity,
-            out uint fingerprintUtf8Required)
+        public async Task<CaptureChunkFingerprint> ComputeAsync(
+            CaptureChunk chunk,
+            CancellationToken cancellationToken = default)
         {
-            FingerprintCallCount++;
-            var dataRoot = Decode(dataRootUtf8, dataRootUtf8Length);
-            var chunkId = Decode(canonicalChunkIdUtf8, canonicalChunkIdUtf8Length);
-            Assert.Equal(_evidenceRoot, dataRoot);
-            if (!TryComputeFingerprint(
-                    chunkId,
-                    expectedVideoByteCount,
-                    out var fingerprint))
-            {
-                fingerprintUtf8Required = 0;
-                return NativeCaptureResult.EvidenceChanged;
-            }
-
-            SourceFingerprint = fingerprint;
-            var encoded = Encoding.ASCII.GetBytes(fingerprint);
-            fingerprintUtf8Required = checked((uint)encoded.Length + 1);
-            if (fingerprintUtf8Capacity < fingerprintUtf8Required)
-            {
-                return NativeCaptureResult.BufferTooSmall;
-            }
-
-            encoded.CopyTo(fingerprintUtf8, 0);
-            fingerprintUtf8[encoded.Length] = 0;
-            return NativeCaptureResult.Ok;
+            CallCount++;
+            var result = await inner.ComputeAsync(chunk, cancellationToken);
+            LastValue = result.Value;
+            return result;
         }
+    }
 
-        public NativeCaptureResult Extract(
-            byte[] dataRootUtf8,
-            uint dataRootUtf8Length,
-            byte[] canonicalChunkIdUtf8,
-            uint canonicalChunkIdUtf8Length,
-            ulong expectedVideoByteCount,
-            uint expectedFrameCount,
-            uint expectedVideoWidth,
-            uint expectedVideoHeight,
-            ulong expectedDurationMilliseconds,
-            byte[] expectedSourceFingerprintUtf8,
-            uint expectedSourceFingerprintUtf8Length,
-            byte[] manifestUtf8,
-            uint manifestUtf8Capacity,
-            out uint manifestUtf8Required)
+    private sealed class CountingEvidenceExtractor(
+        IAnalysisEvidenceExtractor inner) : IAnalysisEvidenceExtractor
+    {
+        public int CallCount { get; private set; }
+
+        public async Task<AnalysisEvidenceBatch> ExtractAsync(
+            CaptureChunk chunk,
+            CaptureChunkFingerprint expectedSourceFingerprint,
+            CancellationToken cancellationToken = default)
         {
-            ExtractionCallCount++;
-            var dataRoot = Decode(dataRootUtf8, dataRootUtf8Length);
-            var chunkId = Decode(canonicalChunkIdUtf8, canonicalChunkIdUtf8Length);
-            var expectedFingerprint = Decode(
-                expectedSourceFingerprintUtf8,
-                expectedSourceFingerprintUtf8Length);
-            Assert.Equal(_evidenceRoot, dataRoot);
-            Assert.Equal(6U, expectedFrameCount);
-            Assert.Equal(1_920U, expectedVideoWidth);
-            Assert.Equal(1_080U, expectedVideoHeight);
-            Assert.Equal(60_000UL, expectedDurationMilliseconds);
-            if (!TryComputeFingerprint(
-                    chunkId,
-                    expectedVideoByteCount,
-                    out var currentFingerprint)
-                || !string.Equals(
-                    currentFingerprint,
-                    expectedFingerprint,
-                    StringComparison.Ordinal))
-            {
-                manifestUtf8Required = 0;
-                return NativeCaptureResult.EvidenceChanged;
-            }
-
-            SourceFingerprint = currentFingerprint;
-            var artifactPath =
-                $"evidence/evidence-v1/{chunkId}/{currentFingerprint}/manifest.json";
-            var manifest = JsonSerializer.Serialize(new Dictionary<string, object?>
-            {
-                ["schemaVersion"] = 1,
-                ["policyVersion"] = "evidence-v1",
-                ["chunkId"] = chunkId,
-                ["sourceFingerprint"] = currentFingerprint,
-                ["artifactPath"] = artifactPath,
-                ["frames"] = new object[]
-                {
-                    new Dictionary<string, object?>
-                    {
-                        ["id"] = EvidenceFrameId,
-                        ["index"] = 0,
-                        ["offsetMilliseconds"] = 30_000,
-                        ["byteCount"] = Jpeg.Length,
-                        ["sha256"] = Convert.ToHexString(SHA256.HashData(Jpeg)),
-                    },
-                },
-            });
-            var encoded = Encoding.UTF8.GetBytes(manifest);
-            manifestUtf8Required = checked((uint)encoded.Length + 1);
-            if (manifestUtf8Capacity < manifestUtf8Required)
-            {
-                return NativeCaptureResult.BufferTooSmall;
-            }
-
-            encoded.CopyTo(manifestUtf8, 0);
-            manifestUtf8[encoded.Length] = 0;
-            return NativeCaptureResult.Ok;
+            CallCount++;
+            return await inner.ExtractAsync(
+                chunk,
+                expectedSourceFingerprint,
+                cancellationToken);
         }
-
-        public NativeCaptureResult ReadFrame(
-            byte[] dataRootUtf8,
-            uint dataRootUtf8Length,
-            byte[] canonicalChunkIdUtf8,
-            uint canonicalChunkIdUtf8Length,
-            byte[] canonicalSourceFingerprintUtf8,
-            uint canonicalSourceFingerprintUtf8Length,
-            uint frameIndex,
-            byte[] frameBytes,
-            uint frameBytesCapacity,
-            out uint frameBytesRequired)
-        {
-            FrameReadCallCount++;
-            Assert.Equal(_evidenceRoot, Decode(dataRootUtf8, dataRootUtf8Length));
-            Assert.Equal(ChunkId, Decode(
-                canonicalChunkIdUtf8,
-                canonicalChunkIdUtf8Length));
-            Assert.Equal(SourceFingerprint, Decode(
-                canonicalSourceFingerprintUtf8,
-                canonicalSourceFingerprintUtf8Length));
-            frameBytesRequired = checked((uint)Jpeg.Length);
-            if (frameIndex != 0 || frameBytesCapacity < frameBytesRequired)
-            {
-                return NativeCaptureResult.BufferTooSmall;
-            }
-
-            Jpeg.CopyTo(frameBytes, 0);
-            return NativeCaptureResult.Ok;
-        }
-
-        private bool TryComputeFingerprint(
-            string chunkId,
-            ulong expectedVideoByteCount,
-            out string fingerprint)
-        {
-            var chunkDirectory = Path.Combine(_evidenceRoot, "chunks", chunkId);
-            var manifest = File.ReadAllBytes(Path.Combine(chunkDirectory, "manifest.json"));
-            var video = File.ReadAllBytes(Path.Combine(chunkDirectory, "capture.mp4"));
-            if (checked((ulong)video.LongLength) != expectedVideoByteCount)
-            {
-                fingerprint = string.Empty;
-                return false;
-            }
-
-            using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
-            hash.AppendData(manifest);
-            hash.AppendData(video);
-            fingerprint = Convert.ToHexString(hash.GetHashAndReset());
-            return true;
-        }
-
-        private static string Decode(byte[] bytes, uint length) =>
-            Encoding.UTF8.GetString(bytes, 0, checked((int)length));
     }
 
     private sealed class FakeOpenAiTransport
@@ -848,14 +707,17 @@ public sealed class AnalysisPipelineEndToEndTests
         {
             var chunkDirectory = Path.Combine(EvidenceRoot, "chunks", chunkId);
             Directory.CreateDirectory(chunkDirectory);
-            var videoPath = Path.Combine(chunkDirectory, "capture.mp4");
+            var framesDirectory = Path.Combine(chunkDirectory, "frames");
+            Directory.CreateDirectory(framesDirectory);
+            var framePath = Path.Combine(framesDirectory, "frame-000000.jpg");
             var manifestPath = Path.Combine(chunkDirectory, "manifest.json");
-            File.WriteAllBytes(videoPath, [0, 0, 0, 4, 0x66, 0x74, 0x79, 0x70]);
+            byte[] frame = [0xff, 0xd8, 0xff, 0xd9];
+            File.WriteAllBytes(framePath, frame);
             File.WriteAllText(
                 manifestPath,
                 $$"""
                 {
-                  "schemaVersion": 1,
+                  "schemaVersion": 2,
                   "captureScope": "{{captureScope}}",
                   "chunkId": "{{chunkId}}",
                   "startTimeUnixMs": {{start.ToUnixTimeMilliseconds()}},
@@ -864,15 +726,22 @@ public sealed class AnalysisPipelineEndToEndTests
                     "persistenceGeneration": 7,
                     "targetEpoch": 11
                   },
-                  "video": {
-                    "path": "capture.mp4",
-                    "codec": "h264",
-                    "container": "mp4",
-                    "frameCount": 6,
-                    "width": 1920,
-                    "height": 1080,
-                    "frameRateNumerator": 1,
-                    "frameRateDenominator": 10
+                  "frames": {
+                    "format": "jpeg",
+                    "quality": 82,
+                    "capturedFrameCount": 6,
+                    "retainedFrameCount": 1,
+                    "width": 1600,
+                    "height": 900,
+                    "totalByteCount": 4,
+                    "items": [{
+                      "id": "frame-000000",
+                      "index": 0,
+                      "path": "frames/frame-000000.jpg",
+                      "offsetMilliseconds": 30000,
+                      "byteCount": 4,
+                      "sha256": "{{Convert.ToHexString(SHA256.HashData(frame))}}"
+                    }]
                   }
                 }
                 """);
@@ -882,16 +751,32 @@ public sealed class AnalysisPipelineEndToEndTests
             Directory.SetLastWriteTimeUtc(chunkDirectory, committedAt);
         }
 
-        public void ReplaceCommittedVideoBytes()
+        public void ReplaceCommittedFrameBytes()
         {
-            var videoPath = Path.Combine(
+            var framePath = Path.Combine(
                 EvidenceRoot,
                 "chunks",
                 ChunkId,
-                "capture.mp4");
-            var lastWriteTimeUtc = File.GetLastWriteTimeUtc(videoPath);
-            File.WriteAllBytes(videoPath, [0, 0, 0, 4, 0x66, 0x74, 0x79, 0x71]);
-            File.SetLastWriteTimeUtc(videoPath, lastWriteTimeUtc);
+                "frames",
+                "frame-000000.jpg");
+            byte[] replacement = [0xff, 0xd8, 0x00, 0xff, 0xd9];
+            File.WriteAllBytes(framePath, replacement);
+            var manifestPath = Path.Combine(
+                EvidenceRoot,
+                "chunks",
+                ChunkId,
+                "manifest.json");
+            var manifest = File.ReadAllText(manifestPath);
+            var oldHash = Convert.ToHexString(SHA256.HashData(
+                new byte[] { 0xff, 0xd8, 0xff, 0xd9 }));
+            File.WriteAllText(
+                manifestPath,
+                manifest.Replace(
+                    oldHash,
+                    Convert.ToHexString(SHA256.HashData(replacement)),
+                    StringComparison.Ordinal)
+                .Replace("\"totalByteCount\": 4", "\"totalByteCount\": 5", StringComparison.Ordinal)
+                .Replace("\"byteCount\": 4", "\"byteCount\": 5", StringComparison.Ordinal));
         }
 
         public void Dispose()

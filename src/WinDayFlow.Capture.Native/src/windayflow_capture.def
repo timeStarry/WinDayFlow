@@ -3,6 +3,7 @@ EXPORTS
   wdf_capture_get_abi_version
   wdf_capture_get_capabilities
   wdf_capture_create
+  wdf_capture_update_timing
   wdf_capture_update_privacy_context
   wdf_capture_update_runtime_authorization
   wdf_capture_invalidate_runtime_authorization
@@ -16,7 +17,4 @@ EXPORTS
   wdf_capture_request_stop
   wdf_capture_wait_stopped
   wdf_capture_poll_event
-  wdf_capture_compute_chunk_fingerprint
-  wdf_capture_extract_analysis_evidence
-  wdf_capture_read_analysis_evidence_frame
   wdf_capture_destroy

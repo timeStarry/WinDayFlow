@@ -1,6 +1,8 @@
 # ADR 0010: Transactional Native Capture Writer Components
 
-- Status: Accepted
+- Status: Superseded for artifact format by
+  [ADR 0014](0014-canonical-jpeg-capture-archive.md); safety and publication
+  decisions remain accepted
 - Date: 2026-07-17
 - Decision owners: WinDayFlow maintainers
 - Scope: `WinDayFlow.Capture.Native` writer components, native persistence

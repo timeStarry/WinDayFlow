@@ -10,6 +10,9 @@ public sealed record CapturePrivacySettings(
     CaptureApplicationPrivacyMode ApplicationPrivacyMode =
         CaptureApplicationPrivacyMode.ProtectByForegroundApplication)
 {
+    public static readonly Guid WinDayFlowExclusionRuleId =
+        Guid.Parse("df2c2131-bfe5-4a17-bf4c-4f3378a4b093");
+
     public const int MinimumRetentionDays = 1;
     public const int MaximumRetentionDays = 365;
     public const int DefaultRetentionDays = 30;
@@ -20,7 +23,16 @@ public sealed record CapturePrivacySettings(
         PauseInRemoteSessions: true,
         PauseDuringScreenSharing: true,
         Revision: 1,
-        ExclusionRules: CaptureExclusionRuleSet.Empty,
+        ExclusionRules: new CaptureExclusionRuleSet(
+        [
+            CaptureExclusionRule.Create(
+                WinDayFlowExclusionRuleId,
+                "WinDayFlow",
+                enabled: true,
+                CaptureExclusionRuleScope.Application,
+                ApplicationIdentityKind.ExecutableName,
+                "WinDayFlow.App.exe"),
+        ]),
         ApplicationPrivacyMode:
             CaptureApplicationPrivacyMode.ProtectByForegroundApplication);
 

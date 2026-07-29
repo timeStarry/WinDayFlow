@@ -52,6 +52,7 @@ internal sealed class NativeCaptureBackend
     private Task? _pumpStopTask;
     private Task? _requestStopTask;
     private NativePersistenceBoundary _persistenceBoundary = new(0, 0, null, 0);
+    private NativeSealedPersistenceBoundary? _pendingSealedBoundary;
     private long _callbackInvalidationGeneration;
     private ulong _lastNativeAuthorizationEpoch;
     private ulong _lastObservedNativeEventSequence;
@@ -372,6 +373,30 @@ internal sealed class NativeCaptureBackend
             start: true,
             cancellationToken);
 
+    public async Task UpdateTimingAsync(
+        uint captureIntervalMilliseconds,
+        uint chunkDurationMilliseconds,
+        CancellationToken cancellationToken = default)
+    {
+        EnsureScreenCaptureCapability();
+        await EnterLifecycleAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            ThrowIfDisposed();
+            ThrowIfShuttingDown();
+            ThrowForResult(
+                _nativeApi.UpdateTiming(
+                    _handle,
+                    captureIntervalMilliseconds,
+                    chunkDurationMilliseconds),
+                "update_timing");
+        }
+        finally
+        {
+            _lifecycleGate.Release();
+        }
+    }
+
     public Task PauseAsync(CancellationToken cancellationToken = default) =>
         InvokeLifecycleAsync(
             "pause",
@@ -453,7 +478,7 @@ internal sealed class NativeCaptureBackend
         {
             var generation = Interlocked.Increment(
                 ref _callbackInvalidationGeneration);
-            InvalidatePersistenceBoundary();
+            InvalidatePersistenceBoundary(generation);
 
             lock (_callbackNativeCallSync)
             {
@@ -1540,19 +1565,31 @@ internal sealed class NativeCaptureBackend
             lock (_persistenceBoundarySync)
             {
                 var persistenceBoundary = Volatile.Read(ref _persistenceBoundary);
-                if (captureEvent.PersistenceGeneration == 0
-                    || captureEvent.TargetEpoch == 0
-                    || captureEvent.PersistenceGeneration
-                        != persistenceBoundary.PersistenceGeneration
-                    || captureEvent.TargetEpoch
-                        != persistenceBoundary.TargetEpoch
-                    || persistenceBoundary.CallbackInvalidationGeneration
-                        != CallbackInvalidationGeneration)
+                var matchesCurrentBoundary =
+                    captureEvent.PersistenceGeneration != 0
+                    && captureEvent.TargetEpoch != 0
+                    && captureEvent.PersistenceGeneration
+                        == persistenceBoundary.PersistenceGeneration
+                    && captureEvent.TargetEpoch
+                        == persistenceBoundary.TargetEpoch
+                    && persistenceBoundary.CallbackInvalidationGeneration
+                        == CallbackInvalidationGeneration;
+                if (!matchesCurrentBoundary
+                    && !TryConsumeSealedPersistenceBoundary(captureEvent, state))
                 {
                     throw new InvalidDataException(
                         "The native committed chunk was not bound to the current persistence generation and capture target.");
                 }
             }
+        }
+        else if ((eventKind is NativeCaptureEventKind.StateChanged
+                     or NativeCaptureEventKind.Error)
+                 && state is CaptureState.Paused
+                     or CaptureState.Stopped
+                     or CaptureState.Faulted
+                     or CaptureState.Unavailable)
+        {
+            Interlocked.Exchange(ref _pendingSealedBoundary, null);
         }
 
         var detail = captureEvent.DetailUtf8Length == 0
@@ -1629,6 +1666,66 @@ internal sealed class NativeCaptureBackend
 
         UpdateStatus(status);
         return true;
+    }
+
+    private bool TryConsumeSealedPersistenceBoundary(
+        NativeCaptureEventV1 captureEvent,
+        CaptureState state)
+    {
+        if (state is not (CaptureState.Paused or CaptureState.Stopping))
+        {
+            return false;
+        }
+
+        while (true)
+        {
+            var callbackGeneration = CallbackInvalidationGeneration;
+            var pending = Volatile.Read(ref _pendingSealedBoundary);
+            if (pending is null
+                || captureEvent.PersistenceGeneration == 0
+                || captureEvent.TargetEpoch == 0
+                || captureEvent.PersistenceGeneration
+                    != pending.PersistenceGeneration
+                || captureEvent.TargetEpoch != pending.TargetEpoch)
+            {
+                return false;
+            }
+
+            if (pending.CallbackInvalidationGeneration < callbackGeneration)
+            {
+                var rebound = pending with
+                {
+                    CallbackInvalidationGeneration = callbackGeneration,
+                };
+                _ = Interlocked.CompareExchange(
+                    ref _pendingSealedBoundary,
+                    rebound,
+                    pending);
+                continue;
+            }
+
+            if (pending.CallbackInvalidationGeneration != callbackGeneration)
+            {
+                return false;
+            }
+
+            if (!ReferenceEquals(
+                    Interlocked.CompareExchange(
+                        ref _pendingSealedBoundary,
+                        null,
+                        pending),
+                    pending))
+            {
+                continue;
+            }
+
+            if (callbackGeneration == CallbackInvalidationGeneration)
+            {
+                return true;
+            }
+
+            RetainSealedPersistenceBoundary(pending);
+        }
     }
 
     private static NativeCaptureChunkCommitted CreateChunk(
@@ -1916,18 +2013,18 @@ internal sealed class NativeCaptureBackend
 
         var screenCapture = capabilities.HasFlag(
             NativeCaptureCapabilities.ScreenCapture);
-        var h264Chunks = capabilities.HasFlag(
-            NativeCaptureCapabilities.H264Chunks);
-        if (h264Chunks && !screenCapture)
+        var jpegChunks = capabilities.HasFlag(
+            NativeCaptureCapabilities.CanonicalJpegChunks);
+        if (jpegChunks && !screenCapture)
         {
-            return "The native H.264 chunk capability requires screen capture support.";
+            return "The canonical JPEG chunk capability requires screen capture support.";
         }
 
         if (screenCapture
             && (capabilities & NativeCaptureAbiContract.SafeScreenCaptureCapabilities)
                 != NativeCaptureAbiContract.SafeScreenCaptureCapabilities)
         {
-            return "The native screen capture capability requires the complete display-scoped runtime safety set and H.264 chunk support.";
+            return "The native screen capture capability requires the complete display-scoped runtime safety set and canonical JPEG chunk support.";
         }
 
         return null;
@@ -2019,11 +2116,17 @@ internal sealed class NativeCaptureBackend
         throw new NativeCaptureException(result, operation);
     }
 
-    private void InvalidatePersistenceBoundary()
+    private void InvalidatePersistenceBoundary(
+        long? sealedPrefixCallbackGeneration = null)
     {
         while (true)
         {
             var current = Volatile.Read(ref _persistenceBoundary);
+            if (sealedPrefixCallbackGeneration is { } callbackGeneration)
+            {
+                RetainSealedPersistenceBoundary(current, callbackGeneration);
+            }
+
             if (current.TargetEpoch == 0 && current.Authorization is null)
             {
                 return;
@@ -2040,6 +2143,85 @@ internal sealed class NativeCaptureBackend
                         invalidated,
                         current),
                     current))
+            {
+                return;
+            }
+        }
+    }
+
+    private void RetainSealedPersistenceBoundary(
+        NativePersistenceBoundary current,
+        long callbackGeneration)
+    {
+        if (callbackGeneration <= 0)
+        {
+            return;
+        }
+
+        while (true)
+        {
+            var pending = Volatile.Read(ref _pendingSealedBoundary);
+            if (pending is not null)
+            {
+                if (pending.CallbackInvalidationGeneration >= callbackGeneration)
+                {
+                    return;
+                }
+
+                var rebound = pending with
+                {
+                    CallbackInvalidationGeneration = callbackGeneration,
+                };
+                if (ReferenceEquals(
+                        Interlocked.CompareExchange(
+                            ref _pendingSealedBoundary,
+                            rebound,
+                            pending),
+                        pending))
+                {
+                    return;
+                }
+
+                continue;
+            }
+
+            if (current.PersistenceGeneration == 0 || current.TargetEpoch == 0)
+            {
+                return;
+            }
+
+            var retained = new NativeSealedPersistenceBoundary(
+                current.PersistenceGeneration,
+                current.TargetEpoch,
+                callbackGeneration);
+            if (Interlocked.CompareExchange(
+                    ref _pendingSealedBoundary,
+                    retained,
+                    null) is null)
+            {
+                return;
+            }
+        }
+    }
+
+    private void RetainSealedPersistenceBoundary(
+        NativeSealedPersistenceBoundary boundary)
+    {
+        while (true)
+        {
+            if (Volatile.Read(ref _pendingSealedBoundary) is not null)
+            {
+                return;
+            }
+
+            var rebound = boundary with
+            {
+                CallbackInvalidationGeneration = CallbackInvalidationGeneration,
+            };
+            if (Interlocked.CompareExchange(
+                    ref _pendingSealedBoundary,
+                    rebound,
+                    null) is null)
             {
                 return;
             }
@@ -2167,5 +2349,10 @@ internal sealed class NativeCaptureBackend
         ulong PersistenceGeneration,
         ulong TargetEpoch,
         NativeCaptureRuntimeAuthorization? Authorization,
+        long CallbackInvalidationGeneration);
+
+    private sealed record NativeSealedPersistenceBoundary(
+        ulong PersistenceGeneration,
+        ulong TargetEpoch,
         long CallbackInvalidationGeneration);
 }

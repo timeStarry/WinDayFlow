@@ -112,6 +112,7 @@ public sealed class SqliteAnalysisResultCommitterTests
             Guid.Parse("20000000-0000-0000-0000-000000000001"));
         var second = context.CreateEntry(
             Guid.Parse("20000000-0000-0000-0000-000000000002"),
+            new TimeRange(Now.AddSeconds(30), Now.AddMinutes(1)),
             tags: ["force-rollback"]);
 
         await Assert.ThrowsAsync<SqliteException>(() => context.Committer.TryCommitAsync(
@@ -192,6 +193,113 @@ public sealed class SqliteAnalysisResultCommitterTests
         AssertEntryEquivalent(entry, restored);
     }
 
+    [Fact]
+    public async Task WindowCommitAtomicallyReplacesUnlockedGeneratedEntries()
+    {
+        using var context = await TestContext.CreateAsync();
+        var previous = context.CreateEntry(
+            Guid.Parse("50000000-0000-0000-0000-000000000001"),
+            context.Chunk.Range);
+        await context.Timeline.AddAsync(previous);
+        var window = Assert.IsType<AnalysisWindowSnapshot>(
+            await context.Store.GetWindowAsync(context.JobId));
+        var replacement = context.CreateEntry(
+            Guid.Parse("50000000-0000-0000-0000-000000000002"),
+            context.Chunk.Range);
+
+        var status = await context.Committer.TryCommitWindowAsync(
+            context.Lease,
+            ProfileId,
+            providerProfileRevision: 1,
+            window,
+            [replacement],
+            context.CommitAt);
+
+        Assert.Equal(AnalysisResultCommitStatus.Committed, status);
+        Assert.Null(await context.Timeline.GetByIdAsync(previous.Id));
+        AssertEntryEquivalent(
+            replacement,
+            Assert.IsType<TimelineEntry>(await context.Timeline.GetByIdAsync(replacement.Id)));
+    }
+
+    [Fact]
+    public async Task WindowCommitPreservesManualEntryAndWritesOnlyItsUnlockedSides()
+    {
+        using var context = await TestContext.CreateAsync();
+        var manualRange = new TimeRange(Now.AddSeconds(20), Now.AddSeconds(30));
+        var manual = TimelineEntry.CreateManual(
+            Guid.Parse("60000000-0000-0000-0000-000000000001"),
+            manualRange,
+            "User note",
+            "This interval belongs to the user.",
+            ActivityCategory.Personal,
+            ProductivityKind.Neutral,
+            ["manual"],
+            Now.AddSeconds(1));
+        await context.Timeline.AddAsync(manual);
+        var window = Assert.IsType<AnalysisWindowSnapshot>(
+            await context.Store.GetWindowAsync(context.JobId));
+        var before = context.CreateEntry(
+            Guid.Parse("60000000-0000-0000-0000-000000000002"),
+            new TimeRange(Now, manualRange.Start));
+        var after = context.CreateEntry(
+            Guid.Parse("60000000-0000-0000-0000-000000000003"),
+            new TimeRange(manualRange.End, context.Chunk.Range.End));
+
+        var status = await context.Committer.TryCommitWindowAsync(
+            context.Lease,
+            ProfileId,
+            providerProfileRevision: 1,
+            window,
+            [before, after],
+            context.CommitAt);
+
+        Assert.Equal(AnalysisResultCommitStatus.Committed, status);
+        AssertEntryEquivalent(
+            manual,
+            Assert.IsType<TimelineEntry>(await context.Timeline.GetByIdAsync(manual.Id)));
+        Assert.NotNull(await context.Timeline.GetByIdAsync(before.Id));
+        Assert.NotNull(await context.Timeline.GetByIdAsync(after.Id));
+    }
+
+    [Fact]
+    public async Task WindowCommitRejectsAChangedTimelineBaseline()
+    {
+        using var context = await TestContext.CreateAsync();
+        var manual = TimelineEntry.CreateManual(
+            Guid.Parse("70000000-0000-0000-0000-000000000001"),
+            new TimeRange(Now.AddSeconds(20), Now.AddSeconds(30)),
+            "Initial note",
+            "The user will revise this after analysis starts.",
+            ActivityCategory.Personal,
+            ProductivityKind.Neutral,
+            ["manual"],
+            Now.AddSeconds(1));
+        await context.Timeline.AddAsync(manual);
+        var window = Assert.IsType<AnalysisWindowSnapshot>(
+            await context.Store.GetWindowAsync(context.JobId));
+        var edited = manual.ApplyUserEdit(new TimelineEntryEdit(
+            Now.AddSeconds(2),
+            title: "Revised note"));
+        Assert.True(await context.Timeline.UpdateAsync(edited));
+
+        var status = await context.Committer.TryCommitWindowAsync(
+            context.Lease,
+            ProfileId,
+            providerProfileRevision: 1,
+            window,
+            [],
+            context.CommitAt);
+
+        Assert.Equal(AnalysisResultCommitStatus.WindowChanged, status);
+        Assert.Equal(
+            "Revised note",
+            (await context.Timeline.GetByIdAsync(manual.Id))?.Title);
+        Assert.Equal(
+            AnalysisJobState.Committing,
+            (await ((IAnalysisJobStore)context.Store).GetAsync(context.JobId))?.State);
+    }
+
     private static void AssertEntryEquivalent(TimelineEntry expected, TimelineEntry actual)
     {
         Assert.Equal(expected.Id, actual.Id);
@@ -203,7 +311,7 @@ public sealed class SqliteAnalysisResultCommitterTests
         Assert.Equal(expected.Origin, actual.Origin);
         Assert.Equal(expected.Revision, actual.Revision);
         Assert.Equal(expected.Confidence, actual.Confidence);
-        Assert.Equal(expected.Evidence, actual.Evidence);
+        Assert.Equal(expected.EvidenceReferences, actual.EvidenceReferences);
         Assert.Equal(expected.AnalysisVersion, actual.AnalysisVersion);
         Assert.Equal(expected.Apps, actual.Apps);
         Assert.Equal(expected.Tags, actual.Tags);
@@ -312,10 +420,11 @@ public sealed class SqliteAnalysisResultCommitterTests
 
         public TimelineEntry CreateEntry(
             Guid id,
+            TimeRange? range = null,
             IReadOnlyList<string>? tags = null)
         {
             var activity = new Activity(
-                new TimeRange(Chunk.Range.Start, Chunk.Range.Start.AddSeconds(30)),
+                range ?? new TimeRange(Chunk.Range.Start, Chunk.Range.Start.AddSeconds(30)),
                 "Generated title",
                 "Generated summary",
                 ActivityCategory.FocusedWork,
@@ -323,7 +432,7 @@ public sealed class SqliteAnalysisResultCommitterTests
                 [new AppUsage("editor.exe", "Editor", TimeSpan.FromSeconds(30))],
                 tags ?? ["generated"],
                 confidence: 0.9,
-                new EvidenceReference(Chunk.Id, Chunk.VideoPath.Value));
+                new EvidenceReference(Chunk.Id, Chunk.ManifestPath.Value));
             return TimelineEntry.FromActivity(id, activity, "timeline-v1");
         }
 
@@ -449,15 +558,13 @@ public sealed class SqliteAnalysisResultCommitterTests
             const string id = "chunk-committer-0001";
             return new CaptureChunk(
                 id,
-                new EvidenceRelativePath($"chunks/{id}/capture.mp4"),
                 new EvidenceRelativePath($"chunks/{id}/manifest.json"),
                 new TimeRange(Now, Now.AddMinutes(1)),
+                capturedFrameCount: 10,
                 frameCount: 6,
-                videoWidth: 1920,
-                videoHeight: 1080,
-                frameRateNumerator: 1,
-                frameRateDenominator: 10,
-                videoByteCount: 4_096,
+                frameWidth: 1600,
+                frameHeight: 900,
+                frameByteCount: 4_096,
                 persistenceGeneration: 1,
                 targetEpoch: 2,
                 committedAtUtc: Now.AddMinutes(1),

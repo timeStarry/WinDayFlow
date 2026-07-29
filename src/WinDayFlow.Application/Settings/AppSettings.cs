@@ -5,7 +5,8 @@ public sealed record AppSettings(
     bool CaptureEnabled,
     bool CloudAnalysisEnabled,
     RecordingConsent? RecordingConsent,
-    CapturePrivacySettings CapturePrivacy)
+    CapturePrivacySettings CapturePrivacy,
+    int CaptureIntervalSeconds = 10)
 {
     public AppSettings(
         AppThemePreference Theme,
@@ -41,6 +42,9 @@ public sealed record AppSettings(
     public CapturePrivacySettings CapturePrivacy { get; } = CapturePrivacy
         ?? throw new ArgumentNullException(nameof(CapturePrivacy));
 
+    public int CaptureIntervalSeconds { get; } =
+        ValidateCaptureIntervalSeconds(CaptureIntervalSeconds);
+
     private static AppThemePreference ValidateTheme(AppThemePreference theme)
     {
         if (!Enum.IsDefined(theme))
@@ -66,5 +70,18 @@ public sealed record AppSettings(
         }
 
         return captureEnabled;
+    }
+
+    private static int ValidateCaptureIntervalSeconds(int value)
+    {
+        if (value is not (5 or 10 or 15 or 30 or 60))
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(value),
+                value,
+                "The capture interval must be 5, 10, 15, 30, or 60 seconds.");
+        }
+
+        return value;
     }
 }

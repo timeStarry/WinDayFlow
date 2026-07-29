@@ -48,25 +48,25 @@ public sealed class TimelineUnprocessedIntervalTests
             requestedRange.End);
         Assert.Equal(
             [
-                UnprocessedIntervalState.LocalOnly,
-                UnprocessedIntervalState.Queued,
-                UnprocessedIntervalState.Processing,
-                UnprocessedIntervalState.RetryScheduled,
-                UnprocessedIntervalState.Failed,
                 UnprocessedIntervalState.Cancelled,
+                UnprocessedIntervalState.Failed,
+                UnprocessedIntervalState.RetryScheduled,
+                UnprocessedIntervalState.Processing,
+                UnprocessedIntervalState.Queued,
+                UnprocessedIntervalState.LocalOnly,
             ],
             viewModel.UnprocessedIntervals.Select(static interval => interval.State));
         Assert.Equal(
             [
-                "仅保存在本机",
-                "等待分析",
-                "正在分析",
-                "等待重试",
-                "分析未完成",
                 "分析已取消",
+                "分析未完成",
+                "等待重试",
+                "正在分析",
+                "等待分析",
+                "仅保存在本机",
             ],
             viewModel.UnprocessedIntervals.Select(static interval => interval.StateText));
-        var retry = viewModel.UnprocessedIntervals[3];
+        var retry = viewModel.UnprocessedIntervals[2];
         Assert.Equal("chunk-4", retry.CaptureChunkId);
         Assert.Equal(CreateGuid(4), retry.LatestJobId);
         Assert.True(retry.CanRetry);
@@ -75,7 +75,7 @@ public sealed class TimelineUnprocessedIntervalTests
         Assert.Equal(
             "暂时无法连接分析提供方。系统稍后会自动执行第 2 次尝试。",
             retry.StateDescription);
-        var failed = viewModel.UnprocessedIntervals[4];
+        var failed = viewModel.UnprocessedIntervals[1];
         Assert.Equal("chunk-5", failed.CaptureChunkId);
         Assert.Equal(CreateGuid(5), failed.LatestJobId);
         Assert.True(failed.CanRetry);

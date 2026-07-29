@@ -44,6 +44,39 @@ public sealed class SqliteCaptureAnalysisStoreTests
     }
 
     [Fact]
+    public async Task VersionNineBackfillsLegacyJobsWithTheirAnchorWindowMember()
+    {
+        using var database = new TemporaryDatabase();
+        var (factory, store) = await CreateStoreAsync(database);
+        var chunk = CreateChunk("chunk-v9-backfill");
+        await store.IngestCommittedAsync(chunk);
+        var job = CreatePendingJob(
+            Guid.Parse("09000000-0000-0000-0000-000000000001"),
+            chunk.Id);
+        await store.EnqueueAsync(job);
+
+        await using (var connection = await factory.OpenConnectionAsync())
+        await using (var command = connection.CreateCommand())
+        {
+            command.CommandText = """
+                DROP TABLE analysis_job_window_members;
+                DROP TABLE timeline_entry_evidence;
+                DELETE FROM schema_migrations WHERE version = 9;
+                """;
+            await command.ExecuteNonQueryAsync();
+        }
+
+        await new SqliteDatabaseInitializer(factory).InitializeAsync();
+        var window = Assert.IsType<AnalysisWindowSnapshot>(
+            await store.GetWindowAsync(job.Id));
+        var member = Assert.Single(window.Members);
+
+        Assert.Equal(chunk.Id, member.Chunk.Id);
+        Assert.Equal(job.InputFingerprint, member.SourceFingerprint.Value);
+        Assert.Equal(chunk.Range, member.ContributionRange);
+    }
+
+    [Fact]
     public async Task IngestIsIdempotentAndPersistsUnsignedAuthorityAsUppercaseHex()
     {
         using var database = new TemporaryDatabase();
@@ -85,19 +118,39 @@ public sealed class SqliteCaptureAnalysisStoreTests
     }
 
     [Fact]
+    public async Task IngestRoundTripsForegroundProcessTelemetry()
+    {
+        using var database = new TemporaryDatabase();
+        var (_, store) = await CreateStoreAsync(database);
+        var telemetry = new CaptureProcessTelemetry(
+            "Code.exe",
+            4242,
+            1250,
+            536_870_912,
+            402_653_184);
+        var chunk = CreateChunk("chunk-process-telemetry", processTelemetry: telemetry);
+
+        await store.IngestCommittedAsync(chunk);
+        var restored = Assert.IsType<CaptureChunk>(
+            await ((ICaptureChunkStore)store).GetAsync(chunk.Id));
+
+        Assert.Equal(telemetry, restored.ProcessTelemetry);
+    }
+
+    [Fact]
     public async Task IngestRejectsConflictingMetadataWithoutChangingStoredChunk()
     {
         using var database = new TemporaryDatabase();
         var (_, store) = await CreateStoreAsync(database);
         var chunk = CreateChunk("chunk-00000000000000000000000000000002");
         await store.IngestCommittedAsync(chunk);
-        var conflict = CreateChunk(chunk.Id, videoByteCount: chunk.VideoByteCount + 1);
+        var conflict = CreateChunk(chunk.Id, frameByteCount: chunk.FrameByteCount + 1);
 
         await Assert.ThrowsAsync<CaptureChunkConflictException>(
             () => store.IngestCommittedAsync(conflict));
 
         var restored = await ((ICaptureChunkStore)store).GetAsync(chunk.Id);
-        Assert.Equal(chunk.VideoByteCount, restored?.VideoByteCount);
+        Assert.Equal(chunk.FrameByteCount, restored?.FrameByteCount);
     }
 
     [Theory]
@@ -970,27 +1023,27 @@ public sealed class SqliteCaptureAnalysisStoreTests
         string id,
         ulong persistenceGeneration = 1,
         ulong targetEpoch = 2,
-        long videoByteCount = 4096,
+        long frameByteCount = 4096,
         DateTimeOffset? ingestedAt = null,
-        CaptureChunkAvailability availability = CaptureChunkAvailability.Available)
+        CaptureChunkAvailability availability = CaptureChunkAvailability.Available,
+        CaptureProcessTelemetry? processTelemetry = null)
     {
         var start = Now.ToOffset(TimeSpan.FromHours(8));
         return new CaptureChunk(
             id,
-            new EvidenceRelativePath($"chunks/{id}/capture.mp4"),
             new EvidenceRelativePath($"chunks/{id}/manifest.json"),
             new TimeRange(start, start.AddMinutes(1)),
+            capturedFrameCount: 10,
             frameCount: 6,
-            videoWidth: 1920,
-            videoHeight: 1080,
-            frameRateNumerator: 1,
-            frameRateDenominator: 10,
-            videoByteCount,
+            frameWidth: 1600,
+            frameHeight: 900,
+            frameByteCount,
             persistenceGeneration,
             targetEpoch,
             committedAtUtc: Now.AddMinutes(1),
             ingestedAtUtc: ingestedAt ?? Now.AddMinutes(2),
-            availability);
+            availability: availability,
+            processTelemetry: processTelemetry);
     }
 
     private static async Task SetChunkAvailabilityAsync(

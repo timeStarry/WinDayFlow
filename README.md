@@ -43,13 +43,18 @@ available for controlled manual verification. The repository contains:
 
 - a working WinUI 3 Fluent shell with a custom system-integrated title bar,
   responsive navigation, and a retained hamburger menu;
-- schema-v7 SQLite migrations plus local timeline, settings, capture-chunk,
+- schema-v12 SQLite migrations plus local timeline, ordered multi-evidence,
+  analysis-window membership, settings, capture-chunk,
   durable analysis-job, and AI-provider-profile persistence, initialized before
-  the main window opens;
-- a timeline review surface with date navigation, search, filters, and durable
-  manual activity creation, editing, and deletion;
+  the main window opens; schema v12 seeds WinDayFlow itself as a removable,
+  ordinary executable exclusion rule;
+- a timeline review surface with date navigation, search, filters, durable
+  manual activity creation/editing/deletion, verified screenshot browsing, and
+  on-demand MP4 timelapse export at 10, 15, 30, or 60 FPS, with one retained
+  screenshot mapped to exactly one video frame;
 - a settings surface with persistent system/light/dark theme selection,
-  capture-off and cloud-off defaults, consent policy v2, evidence-retention and
+  a persisted 5/10/15/30/60-second screenshot interval, capture-off and cloud-off
+  defaults, consent policy v2, evidence-retention and
   conservative exclusion/session choices, plus ordered EXE, package-family,
   publisher-certificate, and application-anchored window exclusion rules; its
   application privacy mode defaults to `ProtectByForegroundApplication`, while
@@ -68,14 +73,16 @@ available for controlled manual verification. The repository contains:
   default;
 - an application-hosted analysis pipeline that composes committed-manifest
   scanning with an exact two-value capture-scope allowlist, SQLite chunk/job
-  persistence, source fingerprinting, native evidence extraction, durable
-  ingestion and supervision, provider analysis, atomic timeline commit, and
+  persistence, canonical-frame fingerprinting, direct JPEG evidence loading, durable
+  ingestion and supervision, provider analysis, a continuous 45-minute
+  cross-chunk sliding window, user-edit-aware atomic timeline rewriting, and
   startup plus chunk-event wakeups;
-- a root-bound native Media Foundation/WIC evidence extractor that accepts a
-  canonical chunk ID, verifies the source before and after extraction, publishes
-  a strict versioned manifest atomically, and limits output to 32 JPEG frames,
-  2 MiB per frame, and 12 MiB total; the managed adapter revalidates every frame
-  hash before constructing a provider request;
+- a root-bound canonical frame archive that validates current schema 3
+  manifests and read-only schema 2 archives,
+  rejects path escapes and reparse points, verifies JPEG size/magic/SHA-256,
+  selects at most 32 images under a 12 MiB request budget, and lets analysis,
+  screenshot review, and export consume the same retained files without a
+  derived evidence directory;
 - an x64 C++20 native-capture foundation with a versioned C ABI, stable status
   codes, a bounded polled event queue, fail-closed privacy inputs, and an
   original scope-aware safety core; its additive 224-byte runtime
@@ -97,10 +104,13 @@ available for controlled manual verification. The repository contains:
   pre/post-fingerprinted, DXGI-first display source and an 8K/126.6 MiB BGRA
   ceiling; only an explicit Desktop Duplication `E_ACCESSDENIED` selects the
   Windows Graphics Capture monitor fallback, while other DXGI failures remain
-  fail closed; bounded
-  even-dimension WIC scaler, 64 MiB fail-closed in-memory Media Foundation H.264
-  writer, typed privacy-safe manifest, handle-identity-bound whole-directory
-  chunk store with observable retryable rollback, queue-bound required-event
+  fail closed; bounded even-dimension WIC scaler, pre-encode all-black surface
+  rejection, bounded WIC JPEG encoder, perceptual consecutive-frame
+  deduplication with chunk endpoints retained, a 2 MiB frame/64 MiB chunk
+  ceiling, and a typed privacy-safe schema 3 manifest with identity-checked
+  foreground process name, PID, interval CPU, working set, and private memory
+  telemetry; a handle-identity-bound whole-
+  directory chunk store with observable retryable rollback, queue-bound required-event
   reservation, and a Pause/Resume control mailbox that transfers persistence
   tokens by value; the fake-backed worker now guards every stage with fresh
   target observation and persistence authority, preserves merged Pause events,
@@ -170,6 +180,9 @@ available for controlled manual verification. The repository contains:
   hosted-application attribution remain open;
 - domain, application, infrastructure, presentation, and capture-interoperability
   project boundaries with automated persistence and mutation tests; and
+- a Windows notification-area icon using the WinDayFlow identity, with background
+  recording/analysis after the main window is hidden, click-to-open behavior,
+  and capture-aware explicit Exit; and
 - an unpackaged, self-contained development bundle for manual UI verification.
 
 Manual activities, consent, privacy settings, user-authored exclusion rules,
@@ -178,19 +191,18 @@ entries are stored at `%LOCALAPPDATA%\WinDayFlow\Data\windayflow.db` and survive
 application restarts. App startup initializes the database, settings, and
 provider configuration before starting the hosted analysis runner. The runner
 rescans committed manifests on startup and on chunk-completed wake hints,
-idempotently persists chunks/jobs, extracts bounded evidence through the native
-adapter, and atomically commits validated results to the editable Timeline.
+idempotently persists chunks/jobs, reads bounded canonical JPEG evidence, and
+atomically commits validated results to the editable Timeline.
 Integration coverage exercises that path with a fake OpenAI-compatible HTTP
 endpoint, including restart idempotency and protection of user edits.
 
-The default native build advertises none of `ScreenCapture`, `H264Chunks`, or
-`EvidenceExtraction`; its controller remains disabled, and the default App uses
-`UnavailableCaptureBackend`. Native evidence extraction is exposed as a
-separate strict C ABI operation and is used by the composed analysis pipeline,
-without publishing the `EvidenceExtraction` capability bit. Both native builds
-advertise display-wide authorization capability bit 12 as a foundation
-contract, but that bit cannot activate a writer. A dev-live build adds only
-`ScreenCapture | H264Chunks` and enables the controller. It can be selected by
+The default native build advertises neither `ScreenCapture` nor
+`CanonicalJpegChunks`; its controller remains disabled, and the default App uses
+`UnavailableCaptureBackend`. Analysis is managed code over the canonical JPEG
+archive and has no native decoder/extractor C ABI. Both native builds advertise
+display-wide authorization capability bit 12 as a foundation contract, but that
+bit cannot activate a writer. A dev-live build adds only
+`ScreenCapture | CanonicalJpegChunks` and enables the controller. It can be selected by
 the App only when all three independent gates agree:
 
 1. native and managed projects are compiled with
@@ -204,10 +216,11 @@ intentionally unsuitable for production: it initially admits a display only
 when the Windows verifier has resolved its foreground target, display,
 executable, title, and package-family state. In the default
 `ProtectByForegroundApplication` mode, explicit application/window exclusions
-still block and WinDayFlow's own window is protected. `AllowAllApplications` is
-an explicit wider-scope choice: it temporarily suspends those application and
-window exclusions, including the special protection for the WinDayFlow window,
-and keeps recording the display selected at Start across ordinary application
+still block. New and migrated profiles include a normal WinDayFlow executable
+exclusion rule that the user may remove. `AllowAllApplications` is an explicit
+wider-scope choice: it temporarily suspends those application and window rules,
+including the WinDayFlow rule when retained, and keeps recording the display
+selected at Start across ordinary application
 and cross-display focus switches. It does not record every display, and changing
 the target display requires waiting for recording to stop completely, moving the
 WinDayFlow window to that display, and starting again there.
@@ -225,7 +238,8 @@ persisted recording intent is implemented and covered by targeted recovery and
 user-intent regression tests, but remains an acceptance gate until clean-profile
 dev-live smoke proves the startup behavior.
 Generated Daily and Weekly views, journal editing, timeline-grounded chat,
-export, and additional providers remain deferred.
+general journal export, and additional providers remain deferred. Screenshot
+review and MP4 timelapse export are implemented in Timeline.
 
 ### Immediate Development Priority
 
@@ -233,31 +247,37 @@ Development is now frozen around one P0 vertical slice:
 
 ```text
 consent-gated recording
-  -> committed MP4 + manifest
+  -> committed schema 3 manifest + canonical JPEG frames
   -> idempotent discovery and durable job
-  -> bounded JPEG evidence extraction
+  -> bounded direct JPEG evidence loading
   -> configured and explicitly enabled LLM API
   -> validated response and atomic timeline commit
 ```
 
-The MP4 artifact remains the P0 compatibility path so the existing native
-writer, recovery, extractor, and analysis pipeline can be validated without a
-second storage rewrite. The production storage direction is periodic JPEG
-frames plus a typed manifest as canonical evidence, with MP4 generated only on
-demand for playback or provider compatibility. That migration is a separate,
-reviewed change after this vertical slice passes; derived video must be
-rebuildable and must never become the sole source of evidence.
+Recording never creates MP4. Each committed chunk contains only its typed
+manifest and retained JPEG frames. Consecutive near-duplicates are discarded
+before persistence while the first and final chunk frames are retained. MP4 is
+a rebuildable export derivative generated only for a user-selected time range;
+it never becomes evidence or an analysis input.
+
+An all-black compositor startup surface (every RGB channel at or below 8) is
+discarded before a chunk is opened or a JPEG is encoded, so it cannot reach the
+archive or LLM. Foreground-scoped chunks also record the authorized process
+name, PID, normalized interval CPU usage, working set, and private memory when
+the process identity remains valid; full executable paths are never persisted.
 
 A provider result is commit-eligible only when it contains at least one activity
 and continuously covers `0` through `range_duration_ms`; uncertain spans use
 `unknown` rather than being omitted. Empty or partial coverage is terminal
 `ProviderResponseInvalid`, and no generated Timeline entries are committed.
 
-The code path now includes dev-live recording composition, strict ingestion and
+The code path now includes dev-live recording composition with a persisted
+5/10/15/30/60-second cadence and 15-minute chunks, strict ingestion and
 restart recovery for both `authorized-foreground-display` and
-`authorized-display-continuous` manifests, root-bound native evidence extraction,
+`authorized-display-continuous` manifests, root-bound canonical-frame validation,
 background analysis supervision, atomic Timeline commit, and visible
-unprocessed/job failure states. Timeline's command area also exposes a compact
+unprocessed/job failure states. Timeline can browse retained frames and export
+a selected `[start,end)` range at 10/15/30/60 FPS. Its command area also exposes a compact
 background-analysis indicator whose details distinguish checking, running,
 waiting-for-configuration, recently completed, partially incomplete, and
 pipeline-wide fault states without exposing exception text or request data.
@@ -269,7 +289,7 @@ Idle/Running status flash, and their results are accumulated across the drain
 cycle so a final no-work confirmation cannot hide earlier failures.
 The remaining implementation priority is to exercise startup intent, the real
 dev-live path, and privacy transitions on Windows, then fix any failures found
-by that smoke. New Daily, Weekly, Journal, Chat, export,
+by that smoke. New Daily, Weekly, Journal, Chat, general journal export,
 additional-provider, and visual-polish work remains deferred unless required to
 complete or verify this chain.
 
@@ -312,9 +332,8 @@ records the hidden-window system notification source, session and power holds,
 native callback gate, supersede outcomes, and Block-before-Allow recovery
 contract.
 The [transactional native capture writer-components ADR](docs/adr/0010-transactional-native-capture-writer-components.md)
-records strict native target/DXGI observation, bounded WIC and in-memory H.264,
-privacy-safe manifests, whole-directory publication, event reservation, runtime
-token handoff, and the remaining C ABI activation boundary.
+records the earlier H.264 implementation and is superseded for artifact format
+by [ADR 0014](docs/adr/0014-canonical-jpeg-capture-archive.md).
 The [authority-checked native worker ADR](docs/adr/0011-authority-checked-native-capture-worker-orchestration.md)
 records per-stage target/permit guards, Pause epochs, graceful Stop ordering,
 validated event linearization, compensation retention, the real Windows
@@ -327,6 +346,12 @@ live capability boundary. The
 records the explicit user choice, schema-v7 consent transition, compatible ABI
 target flag, active-recording display pinning, retained fail-closed lifecycle
 events, and privacy trade-off.
+The [DayFlow aggregation study](docs/DAYFLOW_AGGREGATION.md) records the fixed
+upstream revision, batching and sliding-window behavior adapted here, and the
+multi-evidence provenance and concurrency rules used by cross-chunk rewriting.
+The [canonical JPEG capture archive ADR](docs/adr/0014-canonical-jpeg-capture-archive.md)
+records the final recording, deduplication, migration, direct-analysis, and
+export-only MP4 contracts.
 
 ## Platform Support
 
@@ -366,7 +391,7 @@ pwsh -File .\scripts\Build-Native.ps1 -Configuration Debug
 
 `Build-Native.ps1` selects an installed Visual Studio generator supported by
 CMake, ignores ambient `CMAKE_GENERATOR*` overrides, preserves x64
-multi-configuration output, builds the C++20 DLL, and runs all eighteen native C
+multi-configuration output, builds the C++20 DLL, and runs all sixteen native C
 and C++ tests with per-test timeouts. Use `-Fresh` to recreate CMake state, or
 `-Generator` to select a specific installed Visual Studio generator.
 
@@ -417,13 +442,16 @@ the exact activation argument:
 Run this smoke only from an unlocked local interactive desktop. First exercise
 the default `ProtectByForegroundApplication` mode. An unresolved foreground
 target or an explicitly excluded application/window must remain fail closed;
-WinDayFlow's own window is protected in this mode. Keep one ordinary external
-window stable for at least 60 seconds to cross the default 10-second frame
-interval and 60-second chunk boundary. A complete first chunk contains six
-frames and spans about 60 seconds; the next transformed frame starts the next
-chunk instead of extending the first chunk to 70 seconds. The dev-live encoder
-uses a 500 kbps average bitrate so this QA path does not retain the earlier
-2.5 Mbps storage cost.
+the seeded WinDayFlow executable rule blocks the app itself unless the user has
+removed that rule. The default screenshot
+interval is 10 seconds and can be changed in Settings. Graceful Stop publishes
+a valid partial chunk for a short smoke; a full rollover smoke keeps one
+ordinary external window stable through the 15-minute chunk boundary. The frame
+that reaches the boundary starts the next chunk instead of extending the first.
+At the default cadence a complete chunk captures about 90 source frames before
+consecutive-frame deduplication. Verify the committed directory contains only
+`manifest.json` and `frames/*.jpg`, remains within the configured bounds, and
+contains no recording-time video artifact.
 
 Then select `AllowAllApplications`. This is an effective privacy-policy change:
 the app must advance the privacy revision, disable capture, and make the prior

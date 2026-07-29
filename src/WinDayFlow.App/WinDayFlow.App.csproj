@@ -40,12 +40,22 @@
   <ItemGroup>
     <ProjectReference Include="..\WinDayFlow.Application\WinDayFlow.Application.csproj" />
     <ProjectReference Include="..\WinDayFlow.Capture.Interop\WinDayFlow.Capture.Interop.csproj" />
+    <ProjectReference Include="..\WinDayFlow.Composition\WinDayFlow.Composition.csproj" />
     <ProjectReference Include="..\WinDayFlow.Domain\WinDayFlow.Domain.csproj" />
     <ProjectReference Include="..\WinDayFlow.Infrastructure\WinDayFlow.Infrastructure.csproj" />
     <ProjectReference Include="..\WinDayFlow.Presentation\WinDayFlow.Presentation.csproj" />
   </ItemGroup>
 
   <ItemGroup>
+    <None Include="Assets\WinDayFlow.ico"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest" />
+    <None Include="Assets\WinDayFlow.png"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest" />
+    <None Include="Assets\WinDayFlow.svg"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest" />
     <None Include="..\..\LICENSE"
           Link="LICENSE"
           CopyToOutputDirectory="PreserveNewest"

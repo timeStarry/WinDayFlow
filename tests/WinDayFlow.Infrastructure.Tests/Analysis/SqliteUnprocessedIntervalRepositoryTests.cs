@@ -101,7 +101,7 @@ public sealed class SqliteUnprocessedIntervalRepositoryTests
     }
 
     [Fact]
-    public async Task AnyCompletedJobHidesChunkIncludingAfterAnOlderFailure()
+    public async Task OnlyLatestCompletedJobHidesChunk()
     {
         using var context = await TestContext.CreateAsync();
         var completed = await context.AddChunkAsync("chunk-completed-empty", minute: 0);
@@ -126,10 +126,34 @@ public sealed class SqliteUnprocessedIntervalRepositoryTests
             newerJob.Id,
             Now.AddMinutes(1)));
 
+        var regressed = await context.AddChunkAsync("chunk-completed-then-failed", minute: 2);
+        var olderCompletedJob = await context.EnqueueAsync(regressed, "completed-v1");
+        await context.CompleteAsync(await context.ClaimExpectedAsync(olderCompletedJob.Id));
+        var newerFailedJob = await context.EnqueueAsync(
+            regressed,
+            "failed-v2",
+            providerRevision: 2,
+            createdAt: Now.AddMinutes(1));
+        var newerFailedClaim = await context.ClaimExpectedAsync(
+            newerFailedJob.Id,
+            Now.AddMinutes(1));
+        _ = await context.Store.TryFailAsync(
+            newerFailedClaim.Lease!,
+            new AnalysisJobFailure(AnalysisJobErrorCode.ProviderResponseInvalid),
+            AnalysisFailureDisposition.Terminal,
+            Now.AddMinutes(1).AddSeconds(2),
+            TimeSpan.Zero);
+
         var intervals = await context.Repository.GetForUtcRangeAsync(
             new TimeRange(Now.AddMinutes(-1), Now.AddMinutes(10)));
 
-        Assert.Empty(intervals);
+        var interval = Assert.Single(intervals);
+        AssertInterval(
+            interval,
+            UnprocessedIntervalState.Failed,
+            newerFailedJob.Id,
+            attempt: 1,
+            AnalysisJobErrorCode.ProviderResponseInvalid);
     }
 
     [Fact]
@@ -268,15 +292,13 @@ public sealed class SqliteUnprocessedIntervalRepositoryTests
         {
             var chunk = new CaptureChunk(
                 id,
-                new EvidenceRelativePath($"chunks/{id}/capture.mp4"),
                 new EvidenceRelativePath($"chunks/{id}/manifest.json"),
                 new TimeRange(start, start.AddMinutes(1)),
+                capturedFrameCount: 10,
                 frameCount: 6,
-                videoWidth: 1920,
-                videoHeight: 1080,
-                frameRateNumerator: 1,
-                frameRateDenominator: 10,
-                videoByteCount: 4_096,
+                frameWidth: 1600,
+                frameHeight: 900,
+                frameByteCount: 4_096,
                 persistenceGeneration: 1,
                 targetEpoch: 2,
                 committedAtUtc: start.AddMinutes(1),

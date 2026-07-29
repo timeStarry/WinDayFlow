@@ -65,6 +65,11 @@ public sealed partial class MainWindow : Window
             workArea.Y + ((workArea.Height - height) / 2)));
     }
 
+    public void OpenHome()
+    {
+        ShellContent.OpenHome();
+    }
+
     private void OnSetInitialSizeLoaded(object sender, RoutedEventArgs e)
     {
         WindowRoot.Loaded -= OnSetInitialSizeLoaded;

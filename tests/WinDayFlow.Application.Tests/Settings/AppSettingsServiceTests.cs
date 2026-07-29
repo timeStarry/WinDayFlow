@@ -22,6 +22,7 @@ public sealed class AppSettingsServiceTests
         Assert.False(settings.CloudAnalysisEnabled);
         Assert.Null(settings.RecordingConsent);
         Assert.Equal(CapturePrivacySettings.Default, settings.CapturePrivacy);
+        Assert.Equal(10, settings.CaptureIntervalSeconds);
         Assert.Equal(
             CaptureApplicationPrivacyMode.ProtectByForegroundApplication,
             settings.CapturePrivacy.ApplicationPrivacyMode);
@@ -72,6 +73,29 @@ public sealed class AppSettingsServiceTests
                 PauseDuringScreenSharing: true,
                 Revision: 1,
                 ApplicationPrivacyMode: (CaptureApplicationPrivacyMode)99));
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => new AppSettings(
+                AppThemePreference.System,
+                CaptureEnabled: false,
+                CloudAnalysisEnabled: false,
+                RecordingConsent: null,
+                CapturePrivacySettings.Default,
+                CaptureIntervalSeconds: 7));
+    }
+
+    [Fact]
+    public async Task CaptureIntervalPersistsWithoutChangingOtherSettings()
+    {
+        var repository = new TestSettingsRepository();
+        using var service = new AppSettingsService(repository);
+        await service.InitializeAsync();
+
+        await service.SetCaptureIntervalSecondsAsync(30);
+
+        Assert.Equal(30, service.Current.CaptureIntervalSeconds);
+        Assert.Equal(AppThemePreference.System, service.Current.Theme);
+        Assert.False(service.Current.CaptureEnabled);
+        Assert.Equal(service.Current, Assert.Single(repository.SavedSettings));
     }
 
     [Fact]

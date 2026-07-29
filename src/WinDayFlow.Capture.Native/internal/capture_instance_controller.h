@@ -49,6 +49,9 @@ class CaptureInstanceController final {
   CaptureSafetyUpdateResult RevokeRuntimeAuthorization(
       uint64_t* persistence_generation);
 
+  wdf_capture_result UpdateTiming(uint32_t capture_interval_ms,
+                                  uint32_t chunk_duration_ms) noexcept;
+
   wdf_capture_result IssueAdmission(
       CaptureCommand command, uint64_t expected_persistence_generation,
       uint64_t expected_target_epoch, CaptureCommandAdmission* admission);

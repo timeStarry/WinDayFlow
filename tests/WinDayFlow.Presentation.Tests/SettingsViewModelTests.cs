@@ -57,6 +57,8 @@ public sealed class SettingsViewModelTests
         Assert.Contains("停止录制并要求重新同意", viewModel.ApplicationPrivacyModeDetailText);
         Assert.Equal(1, viewModel.CapturePrivacyRevision);
         Assert.True(viewModel.CanChangePrivacy);
+        Assert.True(viewModel.CanChangeCaptureInterval);
+        Assert.Equal(10, viewModel.CaptureIntervalSeconds);
         Assert.Equal(expectedBackendAvailable, viewModel.IsCaptureBackendAvailable);
         Assert.False(viewModel.CanChangeCapture);
         Assert.True(viewModel.CanGrantConsent);
@@ -64,6 +66,29 @@ public sealed class SettingsViewModelTests
         Assert.Equal("尚未同意屏幕活动录制", viewModel.ConsentStatusText);
         Assert.Equal("录制保持关闭；你仍可使用手工时间线。", viewModel.ConsentDetailText);
         Assert.Equal(expectedAvailabilityText, viewModel.CaptureAvailabilityText);
+    }
+
+    [Fact]
+    public async Task ChangingCaptureIntervalRestartsActiveCapture()
+    {
+        var repository = new TestSettingsRepository();
+        using var settings = new AppSettingsService(
+            repository,
+            new FixedTimeProvider(ConsentTime));
+        await settings.InitializeAsync();
+        await settings.GrantRecordingConsentAsync();
+        await settings.SetCaptureEnabledAsync(enabled: true);
+        var capture = new TestCaptureService(CaptureState.Recording);
+        using var viewModel = new SettingsViewModel(settings, capture);
+
+        Assert.True(await viewModel.SetCaptureIntervalSecondsAsync(30));
+
+        Assert.Equal(30, settings.Current.CaptureIntervalSeconds);
+        Assert.Equal(30, viewModel.CaptureIntervalSeconds);
+        Assert.True(settings.Current.CaptureEnabled);
+        Assert.Equal(1, capture.StopCount);
+        Assert.Equal(1, capture.StartCount);
+        Assert.Equal(CaptureState.Recording, capture.CurrentStatus.State);
     }
 
     [Fact]
@@ -340,7 +365,8 @@ public sealed class SettingsViewModelTests
     [Fact]
     public async Task ExclusionRuleCrudRefreshesOrderedProjectionAndNotices()
     {
-        var repository = new TestSettingsRepository();
+        var repository = new TestSettingsRepository(
+            CreateSettingsWithoutExclusionRules());
         using var settings = new AppSettingsService(repository);
         await settings.InitializeAsync();
         var capture = new TestCaptureService(CaptureState.Stopped);
@@ -416,7 +442,8 @@ public sealed class SettingsViewModelTests
                 AppThemePreference.System,
                 CaptureEnabled: true,
                 CloudAnalysisEnabled: false,
-                CreateConsent()));
+                CreateConsent(),
+                CreatePrivacyWithoutExclusionRules()));
         using var settings = new AppSettingsService(repository);
         await settings.InitializeAsync();
         var capture = new TestCaptureService(CaptureState.Recording)
@@ -454,7 +481,8 @@ public sealed class SettingsViewModelTests
                 AppThemePreference.System,
                 CaptureEnabled: true,
                 CloudAnalysisEnabled: false,
-                CreateConsent()));
+                CreateConsent(),
+                CreatePrivacyWithoutExclusionRules()));
         using var settings = new AppSettingsService(repository);
         await settings.InitializeAsync();
         var capture = new TestCaptureService(CaptureState.Recording);
@@ -479,7 +507,8 @@ public sealed class SettingsViewModelTests
     [Fact]
     public async Task ExclusionRuleSaveFailureLeavesProjectionUnchanged()
     {
-        var repository = new TestSettingsRepository
+        var repository = new TestSettingsRepository(
+            CreateSettingsWithoutExclusionRules())
         {
             SaveException = new InvalidOperationException("Sensitive storage detail."),
         };
@@ -992,7 +1021,8 @@ public sealed class SettingsViewModelTests
     [Fact]
     public async Task DisposeCancelsInFlightExclusionRuleWithoutPublishingProjectionOrNotice()
     {
-        var repository = new TestSettingsRepository
+        var repository = new TestSettingsRepository(
+            CreateSettingsWithoutExclusionRules())
         {
             WaitForFirstSaveCancellation = true,
         };
@@ -1026,7 +1056,8 @@ public sealed class SettingsViewModelTests
     [Fact]
     public async Task DisposedExclusionRuleMutationPreservesProjectionAndExistingNotice()
     {
-        var repository = new TestSettingsRepository();
+        var repository = new TestSettingsRepository(
+            CreateSettingsWithoutExclusionRules());
         using var settings = new AppSettingsService(repository);
         await settings.InitializeAsync();
         var capture = new TestCaptureService(CaptureState.Stopped);
@@ -1095,6 +1126,27 @@ public sealed class SettingsViewModelTests
             AppSettingsService.CurrentRecordingConsentVersion,
             ConsentTime,
             CapturePrivacySettings.Default.Revision);
+    }
+
+    private static AppSettings CreateSettingsWithoutExclusionRules()
+    {
+        return new AppSettings(
+            AppThemePreference.System,
+            CaptureEnabled: false,
+            CloudAnalysisEnabled: false,
+            RecordingConsent: null,
+            CreatePrivacyWithoutExclusionRules());
+    }
+
+    private static CapturePrivacySettings CreatePrivacyWithoutExclusionRules()
+    {
+        return new CapturePrivacySettings(
+            CapturePrivacySettings.DefaultRetentionDays,
+            ExcludeSensitiveApplications: true,
+            PauseInRemoteSessions: true,
+            PauseDuringScreenSharing: true,
+            CapturePrivacySettings.Default.Revision,
+            CaptureExclusionRuleSet.Empty);
     }
 
     private static HashSet<string> ObserveChanges(INotifyPropertyChanged source)

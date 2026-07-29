@@ -204,7 +204,7 @@ bool TestRequiredReservationProtectsCommitSlot() {
   const uint64_t committed = queue.PushReserved(
       &reservation, WDF_CAPTURE_EVENT_CHUNK_COMMITTED,
       WDF_CAPTURE_STATE_RECORDING, WDF_CAPTURE_REASON_NONE,
-      WDF_CAPTURE_ERROR_NONE, "chunks/committed/capture.mp4", 3, 7, 11);
+      WDF_CAPTURE_ERROR_NONE, "chunks/committed/manifest.json", 3, 7, 11);
   const ReadValue first = ReadOne(&queue);
   const ReadValue second = ReadOne(&queue);
 
@@ -261,7 +261,7 @@ bool TestReservedPushRejectsNonRequiredEventWithoutConsumption() {
   const uint64_t committed = queue.PushReserved(
       &reservation, WDF_CAPTURE_EVENT_CHUNK_COMMITTED,
       WDF_CAPTURE_STATE_RECORDING, WDF_CAPTURE_REASON_NONE,
-      WDF_CAPTURE_ERROR_NONE, "chunks/committed/capture.mp4", 2, 3, 4);
+      WDF_CAPTURE_ERROR_NONE, "chunks/committed/manifest.json", 2, 3, 4);
   return Expect(rejected == 0 && committed != 0 && !reservation,
                 "invalid reserved push consumed the commit slot");
 }

@@ -27,13 +27,27 @@ public sealed class AiAnalysisResponseValidatorTests
     }
 
     [Fact]
-    public void ValidateFallsBackToUnknownForUnrecognizedLabels()
+    public void ValidateRejectsUnrecognizedClassificationLabels()
     {
         var request = Ai.AiAnalysisContractsTests.CreateRequest();
         var candidate = CreateCandidate() with
         {
             Category = "provider_specific_category",
             Productivity = "provider_specific_productivity",
+        };
+
+        Assert.Throws<AiAnalysisValidationException>(() =>
+            AiAnalysisResponseValidator.Validate(request, CreateResponse(candidate)));
+    }
+
+    [Fact]
+    public void ValidateAcceptsExplicitUnknownClassificationLabels()
+    {
+        var request = Ai.AiAnalysisContractsTests.CreateRequest();
+        var candidate = CreateCandidate() with
+        {
+            Category = "unknown",
+            Productivity = "unknown",
         };
 
         var activity = Assert.Single(AiAnalysisResponseValidator.Validate(

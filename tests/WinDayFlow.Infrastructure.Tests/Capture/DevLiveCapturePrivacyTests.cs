@@ -42,7 +42,7 @@ public sealed class DevLiveCapturePrivacyTests
     [Theory]
     [InlineData("WinDayFlow.App.exe")]
     [InlineData("windayflow.app.EXE")]
-    public async Task WinDayFlowProcessIsExplicitlyBlockedWithoutLosingTarget(
+    public async Task WinDayFlowProcessIsAdmittedForUserRuleEvaluation(
         string executableName)
     {
         var source = CreateObservation(
@@ -53,10 +53,10 @@ public sealed class DevLiveCapturePrivacyTests
 
         Assert.NotSame(WindowsCapturePrivacyObservation.FailClosed, result);
         Assert.Equal(
-            NativeCapturePolicyDecision.Block,
+            NativeCapturePolicyDecision.Allow,
             result.Signals.ApplicationAllowed);
         Assert.Equal(
-            NativeCapturePolicyDecision.Block,
+            NativeCapturePolicyDecision.Allow,
             result.Signals.WindowAllowed);
         Assert.Same(source.Signals.CaptureIdentity, result.Signals.CaptureIdentity);
         Assert.Same(source.Signals.Target, result.Signals.Target);
@@ -68,7 +68,7 @@ public sealed class DevLiveCapturePrivacyTests
 
     [Theory]
     [MemberData(nameof(UnresolvedWinDayFlowIdentityObservations))]
-    public async Task WinDayFlowProcessRemainsExplicitlyBlockedWhileIdentityResolves(
+    public async Task WinDayFlowProcessIsAdmittedWhenOptionalIdentityIsUnresolved(
         NativeCaptureObservation packageFamily,
         NativeCaptureObservation windowTitle)
     {
@@ -81,10 +81,10 @@ public sealed class DevLiveCapturePrivacyTests
         var result = await sampler.SampleAsync(CancellationToken.None);
 
         Assert.Equal(
-            NativeCapturePolicyDecision.Block,
+            NativeCapturePolicyDecision.Allow,
             result.Signals.ApplicationAllowed);
         Assert.Equal(
-            NativeCapturePolicyDecision.Block,
+            NativeCapturePolicyDecision.Allow,
             result.Signals.WindowAllowed);
         Assert.Same(source.Signals.Target, result.Signals.Target);
         Assert.Same(source.DisplayTarget, result.DisplayTarget);

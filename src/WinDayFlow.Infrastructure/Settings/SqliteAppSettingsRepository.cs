@@ -20,7 +20,8 @@ public sealed class SqliteAppSettingsRepository : IAppSettingsRepository
             pause_in_remote_sessions,
             pause_during_screen_sharing,
             capture_privacy_revision,
-            capture_application_privacy_mode
+            capture_application_privacy_mode,
+            capture_interval_seconds
         FROM app_settings
         WHERE id = 1;
         """;
@@ -264,7 +265,8 @@ public sealed class SqliteAppSettingsRepository : IAppSettingsRepository
                 pause_in_remote_sessions = $pause_in_remote_sessions,
                 pause_during_screen_sharing = $pause_during_screen_sharing,
                 capture_privacy_revision = $capture_privacy_revision,
-                capture_application_privacy_mode = $capture_application_privacy_mode
+                capture_application_privacy_mode = $capture_application_privacy_mode,
+                capture_interval_seconds = $capture_interval_seconds
             WHERE id = 1;
             """;
         command.Parameters.AddWithValue("$theme", (int)settings.Theme);
@@ -306,6 +308,9 @@ public sealed class SqliteAppSettingsRepository : IAppSettingsRepository
         command.Parameters.AddWithValue(
             "$capture_application_privacy_mode",
             (int)settings.CapturePrivacy.ApplicationPrivacyMode);
+        command.Parameters.AddWithValue(
+            "$capture_interval_seconds",
+            settings.CaptureIntervalSeconds);
 
         var affectedRows = await command
             .ExecuteNonQueryAsync(cancellationToken)
@@ -420,7 +425,8 @@ public sealed class SqliteAppSettingsRepository : IAppSettingsRepository
                 privacy.PauseDuringScreenSharing,
                 privacy.Revision,
                 rules,
-                privacy.ApplicationPrivacyMode));
+                privacy.ApplicationPrivacyMode),
+            settings.CaptureIntervalSeconds);
     }
 
     private static async Task<CaptureExclusionRuleSet> ReadRulesAsync(
@@ -551,7 +557,8 @@ public sealed class SqliteAppSettingsRepository : IAppSettingsRepository
                 captureEnabled,
                 cloudAnalysisEnabled,
                 consent,
-                privacy);
+                privacy,
+                checked((int)reader.GetInt64(12)));
         }
         catch (InvalidDataException)
         {

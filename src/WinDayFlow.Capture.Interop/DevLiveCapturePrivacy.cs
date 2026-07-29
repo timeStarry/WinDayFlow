@@ -24,7 +24,6 @@ internal sealed class DevLiveQaWindowsCapturePrivacySampler
     : IWindowsCapturePrivacySampler,
       IWindowsCaptureStorageSampler
 {
-    private const string WinDayFlowExecutableName = "WinDayFlow.App.exe";
     private const string WindowsLockScreenExecutableName = "LockApp.exe";
 
     private readonly IWindowsCapturePrivacySampler _inner;
@@ -72,7 +71,7 @@ internal sealed class DevLiveQaWindowsCapturePrivacySampler
             return observation;
         }
 
-        if (IsAlwaysBlockedProcess(executable))
+        if (IsWindowsLockScreen(executable))
         {
             return WithApplicationAndWindowPolicy(
                 observation,
@@ -136,17 +135,13 @@ internal sealed class DevLiveQaWindowsCapturePrivacySampler
         observation.State == NativeCaptureObservationState.Present
         && !string.IsNullOrWhiteSpace(observation.Value);
 
-    private static bool IsAlwaysBlockedProcess(
+    private static bool IsWindowsLockScreen(
         NativeCaptureObservation executable) =>
         executable.State == NativeCaptureObservationState.Present
-        && (string.Equals(
-                executable.Value,
-                WinDayFlowExecutableName,
-                StringComparison.OrdinalIgnoreCase)
-            || string.Equals(
-                executable.Value,
-                WindowsLockScreenExecutableName,
-                StringComparison.OrdinalIgnoreCase));
+        && string.Equals(
+            executable.Value,
+            WindowsLockScreenExecutableName,
+            StringComparison.OrdinalIgnoreCase);
 
     private static bool HasTargetPolicyBlock(
         NativeCapturePrivacySignals signals) =>

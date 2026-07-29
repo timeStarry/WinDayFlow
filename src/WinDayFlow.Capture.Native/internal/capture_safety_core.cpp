@@ -143,6 +143,7 @@ CaptureSafetyCore::CaptureSafetyCore(
           instance_epoch == 0 || initial_persistence_generation == 0 ||
           initial_admission_stamp == 0 || (initial_admission_stamp & 1U) != 0),
       admission_stamp_(initial_admission_stamp & ~uint64_t{1}),
+      observable_persistence_generation_(initial_persistence_generation),
       nonce_generator_(nonce_generator ? std::move(nonce_generator)
                                        : GenerateCommandAdmissionNonce),
       authorization_commit_hook_(std::move(authorization_commit_hook)),
@@ -184,9 +185,16 @@ CaptureSafetyCore::BeginAuthorizationUpdate() noexcept {
   return CloseAdmission();
 }
 
+CaptureSafetyUpdateTicket
+CaptureSafetyCore::BeginSealedAuthorizationUpdate() noexcept {
+  PrepareSealedPrefix();
+  return CloseAdmission();
+}
+
 uint64_t CaptureSafetyCore::InvalidateAuthorizationAdmission() noexcept {
   const uint64_t invalidation_epoch = AdvanceCallbackInvalidationEpoch();
-  const uint64_t admission_epoch = CloseAdmission().admission_stamp;
+  const uint64_t admission_epoch =
+      BeginSealedAuthorizationUpdate().admission_stamp;
   return invalidation_epoch == 0 ? 0 : admission_epoch;
 }
 
@@ -405,6 +413,40 @@ bool CaptureSafetyCore::IsPersistencePermitCurrent(
              permit.authorization_epoch();
 }
 
+bool CaptureSafetyCore::HasSealedPrefix(
+    const PersistenceToken& token) const noexcept {
+  return token.instance_epoch == instance_epoch_ &&
+         token.persistence_generation != 0 &&
+         sealed_prefix_generation_.load(std::memory_order_acquire) ==
+             token.persistence_generation;
+}
+
+SealedPrefixPermit CaptureSafetyCore::AcquireSealedPrefixPermit(
+    const PersistenceToken& token) const noexcept {
+  if (!HasSealedPrefix(token)) {
+    return {};
+  }
+  return SealedPrefixPermit(this, token);
+}
+
+bool CaptureSafetyCore::IsSealedPrefixPermitCurrent(
+    const SealedPrefixPermit& permit) const noexcept {
+  return permit && permit.issuer_ == this &&
+         sealed_prefix_generation_.load(std::memory_order_acquire) ==
+             permit.token_.persistence_generation;
+}
+
+void CaptureSafetyCore::ConsumeSealedPrefix(
+    const PersistenceToken& token) noexcept {
+  if (token.instance_epoch != instance_epoch_ ||
+      token.persistence_generation == 0) {
+    return;
+  }
+  uint64_t expected = token.persistence_generation;
+  static_cast<void>(sealed_prefix_generation_.compare_exchange_strong(
+      expected, 0, std::memory_order_acq_rel, std::memory_order_acquire));
+}
+
 uint64_t CaptureSafetyCore::instance_epoch() const { return instance_epoch_; }
 
 uint64_t CaptureSafetyCore::persistence_generation() const {
@@ -603,6 +645,23 @@ CaptureSafetyUpdateTicket CaptureSafetyCore::CloseAdmission() noexcept {
       callback_invalidation_epoch_.load(std::memory_order_acquire)};
 }
 
+void CaptureSafetyCore::PrepareSealedPrefix() noexcept {
+  if (!admission_open()) {
+    return;
+  }
+  const uint64_t target_epoch =
+      observable_target_epoch_.load(std::memory_order_acquire);
+  const uint64_t generation =
+      observable_persistence_generation_.load(std::memory_order_acquire);
+  if (target_epoch == 0 || generation == 0) {
+    return;
+  }
+  uint64_t expected = 0;
+  static_cast<void>(sealed_prefix_generation_.compare_exchange_strong(
+      expected, generation, std::memory_order_acq_rel,
+      std::memory_order_acquire));
+}
+
 uint64_t CaptureSafetyCore::AdvanceCallbackInvalidationEpoch() noexcept {
   uint64_t current =
       callback_invalidation_epoch_.load(std::memory_order_relaxed);
@@ -645,10 +704,14 @@ void CaptureSafetyCore::RevokeStateUnderLock() {
 }
 
 void CaptureSafetyCore::PublishObservableUnderLock() {
+  const uint64_t target_epoch =
+      current_.target.has_value() ? current_.target->target_epoch : 0;
   std::lock_guard lock(observable_mutex_);
   observable_.persistence_generation = persistence_generation_;
-  observable_.target_epoch =
-      current_.target.has_value() ? current_.target->target_epoch : 0;
+  observable_.target_epoch = target_epoch;
+  observable_target_epoch_.store(target_epoch, std::memory_order_release);
+  observable_persistence_generation_.store(persistence_generation_,
+                                           std::memory_order_release);
 }
 
 bool CaptureSafetyCore::IsCurrentTokenUnderLock(

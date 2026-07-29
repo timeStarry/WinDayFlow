@@ -130,8 +130,7 @@ enum {
   WDF_CAPTURE_CAPABILITY_PRIVACY_GUARD = 1ULL << 0,
   WDF_CAPTURE_CAPABILITY_EVENT_QUEUE = 1ULL << 1,
   WDF_CAPTURE_CAPABILITY_SCREEN_CAPTURE = 1ULL << 2,
-  WDF_CAPTURE_CAPABILITY_H264_CHUNKS = 1ULL << 3,
-  WDF_CAPTURE_CAPABILITY_EVIDENCE_EXTRACTION = 1ULL << 4,
+  WDF_CAPTURE_CAPABILITY_CANONICAL_JPEG_CHUNKS = 1ULL << 3,
   WDF_CAPTURE_CAPABILITY_TARGET_SCOPED_AUTHORIZATION = 1ULL << 5,
   WDF_CAPTURE_CAPABILITY_PERSISTENCE_GENERATION_BARRIER = 1ULL << 6,
   WDF_CAPTURE_CAPABILITY_DETERMINISTIC_STOP = 1ULL << 7,
@@ -158,11 +157,6 @@ enum {
 #define WDF_CAPTURE_RUNTIME_AUTHORIZATION_V1_LEGACY_SIZE 112U
 #define WDF_CAPTURE_DISPLAY_DEVICE_KEY_UTF8_CAPACITY 96U
 #define WDF_CAPTURE_DISPLAY_DEVICE_KEY_UTF8_MAX_LENGTH 93U
-#define WDF_CAPTURE_CHUNK_FINGERPRINT_UTF8_LENGTH 64U
-#define WDF_CAPTURE_CHUNK_FINGERPRINT_UTF8_CAPACITY 65U
-#define WDF_CAPTURE_ANALYSIS_EVIDENCE_MANIFEST_UTF8_MAX_LENGTH 65536U
-#define WDF_CAPTURE_ANALYSIS_EVIDENCE_MANIFEST_UTF8_CAPACITY 65537U
-#define WDF_CAPTURE_ANALYSIS_EVIDENCE_FRAME_MAX_BYTES 2097152U
 
 #if defined(_MSC_VER) || defined(__clang__) || defined(__GNUC__)
 #pragma pack(push, 8)
@@ -401,6 +395,12 @@ WDF_CAPTURE_API wdf_capture_result WDF_CAPTURE_CALL wdf_capture_create(
     wdf_capture_handle* handle) WDF_CAPTURE_NOEXCEPT;
 
 WDF_CAPTURE_API wdf_capture_result WDF_CAPTURE_CALL
+wdf_capture_update_timing(
+    wdf_capture_handle handle,
+    uint32_t capture_interval_ms,
+    uint32_t chunk_duration_ms) WDF_CAPTURE_NOEXCEPT;
+
+WDF_CAPTURE_API wdf_capture_result WDF_CAPTURE_CALL
 wdf_capture_update_privacy_context(
     wdf_capture_handle handle,
     const wdf_capture_privacy_context_v1* context) WDF_CAPTURE_NOEXCEPT;
@@ -462,47 +462,6 @@ WDF_CAPTURE_API wdf_capture_result WDF_CAPTURE_CALL wdf_capture_poll_event(
     char* detail_utf8,
     uint32_t detail_utf8_capacity,
     uint32_t* detail_utf8_required) WDF_CAPTURE_NOEXCEPT;
-
-WDF_CAPTURE_API wdf_capture_result WDF_CAPTURE_CALL
-wdf_capture_compute_chunk_fingerprint(
-    const char* data_root_utf8,
-    uint32_t data_root_utf8_length,
-    const char* canonical_chunk_id_utf8,
-    uint32_t canonical_chunk_id_utf8_length,
-    uint64_t expected_video_byte_count,
-    char* fingerprint_utf8,
-    uint32_t fingerprint_utf8_capacity,
-    uint32_t* fingerprint_utf8_required) WDF_CAPTURE_NOEXCEPT;
-
-WDF_CAPTURE_API wdf_capture_result WDF_CAPTURE_CALL
-wdf_capture_extract_analysis_evidence(
-    const char* data_root_utf8,
-    uint32_t data_root_utf8_length,
-    const char* canonical_chunk_id_utf8,
-    uint32_t canonical_chunk_id_utf8_length,
-    uint64_t expected_video_byte_count,
-    uint32_t expected_frame_count,
-    uint32_t expected_video_width,
-    uint32_t expected_video_height,
-    uint64_t expected_duration_ms,
-    const char* expected_source_fingerprint_utf8,
-    uint32_t expected_source_fingerprint_utf8_length,
-    char* manifest_utf8,
-    uint32_t manifest_utf8_capacity,
-    uint32_t* manifest_utf8_required) WDF_CAPTURE_NOEXCEPT;
-
-WDF_CAPTURE_API wdf_capture_result WDF_CAPTURE_CALL
-wdf_capture_read_analysis_evidence_frame(
-    const char* data_root_utf8,
-    uint32_t data_root_utf8_length,
-    const char* canonical_chunk_id_utf8,
-    uint32_t canonical_chunk_id_utf8_length,
-    const char* canonical_source_fingerprint_utf8,
-    uint32_t canonical_source_fingerprint_utf8_length,
-    uint32_t frame_index,
-    uint8_t* frame_bytes,
-    uint32_t frame_bytes_capacity,
-    uint32_t* frame_bytes_required) WDF_CAPTURE_NOEXCEPT;
 
 WDF_CAPTURE_API wdf_capture_result WDF_CAPTURE_CALL
 wdf_capture_destroy(wdf_capture_handle* handle) WDF_CAPTURE_NOEXCEPT;

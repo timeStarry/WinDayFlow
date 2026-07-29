@@ -1,6 +1,8 @@
 # ADR 0011: Authority-Checked Native Capture Worker Orchestration
 
-- Status: Accepted
+- Status: Superseded for artifact format by
+  [ADR 0014](0014-canonical-jpeg-capture-archive.md); authority and worker
+  orchestration decisions remain accepted
 - Date: 2026-07-17
 - Decision owners: WinDayFlow maintainers
 - Scope: `WinDayFlow.Capture.Native` worker orchestration, Windows component
@@ -8,6 +10,8 @@
 - Follow-up: [ADR 0012](0012-run-isolated-native-capture-instance-control.md)
   supersedes this ADR's open C ABI ownership, run-state, and recoverable
   authorization-loss items while retaining the closed live capability boundary.
+  [ADR 0014](0014-canonical-jpeg-capture-archive.md) replaces the H.264 writer,
+  MP4 artifact, and native evidence-extraction portions of this decision.
 
 ## Context
 
@@ -102,8 +106,10 @@ first frame starts the chunk clock. If a later transformed frame reaches the
 configured chunk duration, the worker finalizes and commits the old chunk before
 opening a writer for that still-owned frame. The boundary frame therefore
 becomes the next chunk's first frame; it is neither dropped nor appended with a
-full extra duration to the old chunk. With the current 10-second/60-second QA
-policy this yields six frames and 60 seconds in the first complete chunk.
+full extra duration to the old chunk. At the time of this decision, the
+10-second/60-second QA policy yielded six frames and 60 seconds in the first
+complete chunk. The current product policy keeps the same ownership invariant
+with a user-selected 5/10/15/30/60-second cadence and 15-minute chunks.
 
 ### Artifact and Event Transaction
 

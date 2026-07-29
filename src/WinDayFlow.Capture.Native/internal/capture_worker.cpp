@@ -6,6 +6,8 @@
 #include <thread>
 #include <utility>
 
+#include "process_telemetry.h"
+
 namespace windayflow::capture {
 namespace {
 
@@ -13,7 +15,8 @@ constexpr uint32_t kMaximumWorkerWaitMs = 60'000;
 constexpr uint32_t kMaximumTopologyRetryLimit = 64;
 constexpr uint32_t kMaximumRollbackAttempts = 64;
 constexpr uint32_t kMaximumRollbackDelayMs = 1'000;
-constexpr int64_t kMediaFoundationTicksPerMillisecond = 10'000;
+constexpr uint32_t kAuthorizationPauseCoordinationWaitMs = 250;
+constexpr uint8_t kMaximumDiscardedBlackChannel = 8;
 
 enum class WorkerStepResult {
   kOk,
@@ -32,22 +35,31 @@ enum class ChunkFinalizationReason {
   kStop,
 };
 
+enum class FinalizationAuthorization {
+  kCurrent,
+  kSealedPrefix,
+};
+
 struct ChunkState {
   bool writer_started = false;
+  std::string artifact_id;
   int64_t start_steady_ms = 0;
   int64_t start_unix_ms = 0;
   int64_t latest_frame_offset_ms = 0;
-  int64_t last_frame_timestamp_ticks = 0;
-  int64_t end_timestamp_ticks = 1;
   uint32_t frame_count = 0;
   uint32_t width = 0;
   uint32_t height = 0;
-  CaptureVideoTiming timing;
+  std::optional<ProcessTelemetrySample> process_telemetry_start;
 };
 
 struct PermitValidationContext {
   const CaptureSafetyCore* safety = nullptr;
   const PersistencePermit* permit = nullptr;
+};
+
+struct SealedPermitValidationContext {
+  const CaptureSafetyCore* safety = nullptr;
+  const SealedPrefixPermit* permit = nullptr;
 };
 
 class RequiredEventReservationGuard final {
@@ -86,6 +98,15 @@ bool ValidatePersistencePermit(void* context) noexcept {
          validation->safety->IsPersistencePermitCurrent(*validation->permit);
 }
 
+bool ValidateSealedPrefixPermit(void* context) noexcept {
+  const auto* validation =
+      static_cast<const SealedPermitValidationContext*>(context);
+  return validation != nullptr && validation->safety != nullptr &&
+         validation->permit != nullptr &&
+         validation->safety->IsSealedPrefixPermitCurrent(
+             *validation->permit);
+}
+
 void SecureClear(std::vector<uint8_t>* bytes) noexcept {
   if (bytes == nullptr) {
     return;
@@ -105,6 +126,21 @@ void SecureClear(BgraFrame* frame) noexcept {
   frame->height = 0;
 }
 
+bool HasMeaningfulVisualContent(const BgraFrame& frame) noexcept {
+  if (!IsValidBgraFrame(frame)) {
+    return false;
+  }
+
+  for (size_t offset = 0; offset < frame.pixels.size(); offset += 4U) {
+    if (frame.pixels[offset] > kMaximumDiscardedBlackChannel ||
+        frame.pixels[offset + 1U] > kMaximumDiscardedBlackChannel ||
+        frame.pixels[offset + 2U] > kMaximumDiscardedBlackChannel) {
+      return true;
+    }
+  }
+  return false;
+}
+
 class ScopedBgraFrame final {
  public:
   ScopedBgraFrame() = default;
@@ -116,39 +152,7 @@ class ScopedBgraFrame final {
   BgraFrame value;
 };
 
-class ScopedSensitiveBytes final {
- public:
-  ScopedSensitiveBytes() = default;
-  ~ScopedSensitiveBytes() { SecureClear(&value); }
-
-  ScopedSensitiveBytes(const ScopedSensitiveBytes&) = delete;
-  ScopedSensitiveBytes& operator=(const ScopedSensitiveBytes&) = delete;
-
-  std::vector<uint8_t> value;
-};
-
 int64_t SaturatingAddMilliseconds(int64_t value, int64_t delta) noexcept {
-  if (delta <= 0) {
-    return value;
-  }
-  if (value > std::numeric_limits<int64_t>::max() - delta) {
-    return std::numeric_limits<int64_t>::max();
-  }
-  return value + delta;
-}
-
-int64_t MillisecondsToTicks(int64_t milliseconds) noexcept {
-  if (milliseconds <= 0) {
-    return 0;
-  }
-  if (milliseconds > std::numeric_limits<int64_t>::max() /
-                         kMediaFoundationTicksPerMillisecond) {
-    return std::numeric_limits<int64_t>::max();
-  }
-  return milliseconds * kMediaFoundationTicksPerMillisecond;
-}
-
-int64_t SaturatingAddTicks(int64_t value, int64_t delta) noexcept {
   if (delta <= 0) {
     return value;
   }
@@ -264,9 +268,13 @@ bool IsValidCaptureWorkerConfiguration(
          configuration.rollback_retry_limit > 0 &&
          configuration.rollback_retry_limit <= kMaximumRollbackAttempts &&
          configuration.rollback_retry_delay_ms <= kMaximumRollbackDelayMs &&
-         configuration.average_bitrate > 0 &&
-         configuration.maximum_encoded_chunk_bytes > 0 &&
-         configuration.maximum_encoded_chunk_bytes <= kMaximumH264ChunkBytes;
+         configuration.jpeg_quality > 0.0F &&
+         configuration.jpeg_quality <= 1.0F &&
+         configuration.maximum_frame_bytes >= 4U &&
+         configuration.maximum_frame_bytes <= kMaximumChunkFrameFileBytes &&
+         configuration.maximum_chunk_bytes >=
+             configuration.maximum_frame_bytes &&
+         configuration.maximum_chunk_bytes <= kMaximumChunkFrameBytes;
 }
 
 CaptureWorker::CaptureWorker(CaptureSafetyCore& safety,
@@ -277,6 +285,21 @@ CaptureWorker::CaptureWorker(CaptureSafetyCore& safety,
       events_(events),
       backend_(backend),
       configuration_(configuration) {}
+
+bool CaptureWorker::UpdateTiming(uint32_t capture_interval_ms,
+                                 uint32_t chunk_duration_ms) noexcept {
+  if (running_.load(std::memory_order_acquire)) {
+    return false;
+  }
+  CaptureWorkerConfiguration updated = configuration_;
+  updated.policy.capture_interval_ms = capture_interval_ms;
+  updated.policy.chunk_duration_ms = chunk_duration_ms;
+  if (!IsValidCaptureWorkerConfiguration(updated)) {
+    return false;
+  }
+  configuration_ = updated;
+  return true;
+}
 
 CaptureWorker::~CaptureWorker() {
   static_cast<void>(RetryPendingCompensation(1));
@@ -401,48 +424,40 @@ void CaptureWorker::Run(CaptureRuntimeOwner& runtime,
         };
 
     auto finalize_chunk =
-        [&](ChunkFinalizationReason finalization_reason) -> WorkerStepResult {
+        [&](ChunkFinalizationReason finalization_reason,
+            FinalizationAuthorization authorization) -> WorkerStepResult {
+      SealedPrefixPermit sealed_permit;
+      if (authorization == FinalizationAuthorization::kSealedPrefix) {
+        sealed_permit = safety_.AcquireSealedPrefixPermit(token);
+        if (!sealed_permit) {
+          discard_chunk();
+          return WorkerStepResult::kAuthorizationLost;
+        }
+      }
+
+      const auto execute_stage = [&](auto&& operation) noexcept {
+        if (authorization == FinalizationAuthorization::kCurrent) {
+          return ExecuteAuthorizedStage(token,
+                                        std::forward<decltype(operation)>(
+                                            operation));
+        }
+        const CaptureWorkerBackendResult backend_result = operation();
+        if (!safety_.IsSealedPrefixPermitCurrent(sealed_permit)) {
+          return AuthorizedStageResult{};
+        }
+        return AuthorizedStageResult{true, backend_result};
+      };
+
       if (!chunk.writer_started || chunk.frame_count == 0) {
         discard_chunk();
         return WorkerStepResult::kOk;
       }
 
-      ScopedSensitiveBytes encoded_storage;
-      std::vector<uint8_t>& encoded_mp4 = encoded_storage.value;
       const int64_t finalization_steady_ms = backend_.SteadyNowMilliseconds();
-      const AuthorizedStageResult finalize =
-          ExecuteAuthorizedStage(token, [&]() noexcept {
-            return backend_.FinalizeChunk(chunk.end_timestamp_ticks,
-                                          &encoded_mp4);
-          });
-      if (!finalize.authorized) {
-        SecureClear(&encoded_mp4);
-        discard_chunk();
-        return WorkerStepResult::kAuthorizationLost;
-      }
-      if (finalize.backend_result != CaptureWorkerBackendResult::kOk ||
-          encoded_mp4.empty() ||
-          encoded_mp4.size() > configuration_.maximum_encoded_chunk_bytes) {
-        SecureClear(&encoded_mp4);
-        discard_chunk();
-        return finalize.backend_result == CaptureWorkerBackendResult::kOk
-                   ? WorkerStepResult::kEncoderFailure
-                   : MapBackendFailure(finalize.backend_result);
-      }
-
       RequiredEventReservationGuard reservation(events_);
       if (!reservation) {
-        SecureClear(&encoded_mp4);
         discard_chunk();
         return WorkerStepResult::kEventFailure;
-      }
-
-      std::string artifact_id;
-      if (!backend_.CreateArtifactId(&artifact_id)) {
-        reservation.Cancel();
-        SecureClear(&encoded_mp4);
-        discard_chunk();
-        return WorkerStepResult::kInternalFailure;
       }
 
       const int64_t elapsed_ms =
@@ -451,35 +466,46 @@ void CaptureWorker::Run(CaptureRuntimeOwner& runtime,
           chunk.frame_count, configuration_.policy.capture_interval_ms);
       const int64_t duration_ms = CalculateChunkDurationMs(
           elapsed_ms, encoded_duration_ms, chunk.latest_frame_offset_ms);
-      const ChunkManifest manifest{
-          artifact_id,
+      ChunkManifest manifest{
+          chunk.artifact_id,
           chunk.start_unix_ms,
           SaturatingAddMilliseconds(chunk.start_unix_ms, duration_ms),
           chunk.frame_count,
           chunk.width,
           chunk.height,
-          chunk.timing.frame_rate_numerator,
-          chunk.timing.frame_rate_denominator,
+          0,
           token.persistence_generation,
           token.target.target_epoch,
           token.target.scope == CaptureAuthorizationScope::kDisplayWide,
+          {},
       };
-      if (!IsValidChunkManifest(manifest)) {
-        reservation.Cancel();
-        SecureClear(&encoded_mp4);
-        discard_chunk();
-        return WorkerStepResult::kInternalFailure;
+      if (chunk.process_telemetry_start.has_value() &&
+          token.target.scope == CaptureAuthorizationScope::kForegroundTarget) {
+        const std::optional<ProcessTelemetrySample> end_sample =
+            ReadProcessTelemetrySample(
+                token.target.process_id,
+                token.target.process_creation_time_100ns);
+        if (end_sample.has_value()) {
+          const std::optional<ProcessTelemetryInterval> interval =
+              BuildProcessTelemetryInterval(
+                  *chunk.process_telemetry_start, *end_sample,
+                  static_cast<uint64_t>(std::max<int64_t>(1, elapsed_ms)));
+          if (interval.has_value()) {
+            manifest.application = ChunkApplicationManifest{
+                interval->process_name_utf8, interval->process_id,
+                interval->cpu_usage_basis_points,
+                interval->working_set_bytes,
+                interval->private_memory_bytes};
+          }
+        }
       }
 
       std::unique_ptr<CaptureWorkerPublication> publication;
-      const AuthorizedStageResult prepare =
-          ExecuteAuthorizedStage(token, [&]() noexcept {
-            return backend_.PreparePublication(artifact_id, encoded_mp4,
-                                               manifest, &publication);
-          });
-      SecureClear(&encoded_mp4);
-      if (!prepare.authorized ||
-          prepare.backend_result != CaptureWorkerBackendResult::kOk ||
+      const AuthorizedStageResult finalize = execute_stage([&]() noexcept {
+        return backend_.FinalizeChunk(&manifest, &publication);
+      });
+      if (!finalize.authorized ||
+          finalize.backend_result != CaptureWorkerBackendResult::kOk ||
           publication == nullptr) {
         const bool compensated = compensate(&publication);
         reservation.Cancel();
@@ -487,10 +513,10 @@ void CaptureWorker::Run(CaptureRuntimeOwner& runtime,
         if (!compensated) {
           return WorkerStepResult::kCompensationFailure;
         }
-        return !prepare.authorized ? WorkerStepResult::kAuthorizationLost
-               : prepare.backend_result == CaptureWorkerBackendResult::kOk
+        return !finalize.authorized ? WorkerStepResult::kAuthorizationLost
+               : finalize.backend_result == CaptureWorkerBackendResult::kOk
                    ? WorkerStepResult::kInternalFailure
-                   : MapBackendFailure(prepare.backend_result);
+                   : MapBackendFailure(finalize.backend_result);
       }
 
       std::string artifact_identifier;
@@ -511,8 +537,8 @@ void CaptureWorker::Run(CaptureRuntimeOwner& runtime,
                            : WorkerStepResult::kCompensationFailure;
       }
 
-      const AuthorizedStageResult commit = ExecuteAuthorizedStage(
-          token, [&]() noexcept { return publication->Commit(); });
+      const AuthorizedStageResult commit =
+          execute_stage([&]() noexcept { return publication->Commit(); });
       if (!commit.authorized ||
           commit.backend_result != CaptureWorkerBackendResult::kOk ||
           !publication->committed()) {
@@ -528,38 +554,41 @@ void CaptureWorker::Run(CaptureRuntimeOwner& runtime,
                    : MapBackendFailure(commit.backend_result);
       }
 
-      const std::optional<CaptureTargetIdentity> observed =
-          backend_.ObserveTarget(token.target);
       PersistencePermit event_permit;
-      if (observed.has_value()) {
-        event_permit = safety_.AcquirePersistencePermit(token, *observed);
-      }
-      if (!event_permit) {
-        const bool compensated = compensate(&publication);
-        reservation.Cancel();
-        discard_chunk();
-        return compensated ? WorkerStepResult::kAuthorizationLost
-                           : WorkerStepResult::kCompensationFailure;
-      }
-      const std::optional<CaptureTargetIdentity> observed_before_publication =
-          backend_.ObserveTarget(token.target);
-      if (!observed_before_publication.has_value() ||
-          *observed_before_publication != *observed ||
-          !safety_.IsPersistencePermitCurrent(event_permit)) {
-        const bool compensated = compensate(&publication);
-        reservation.Cancel();
-        discard_chunk();
-        return compensated ? WorkerStepResult::kAuthorizationLost
-                           : WorkerStepResult::kCompensationFailure;
+      std::optional<CaptureTargetIdentity> observed;
+      if (authorization == FinalizationAuthorization::kCurrent) {
+        observed = backend_.ObserveTarget(token.target);
+        if (observed.has_value()) {
+          event_permit = safety_.AcquirePersistencePermit(token, *observed);
+        }
+        const std::optional<CaptureTargetIdentity>
+            observed_before_publication = backend_.ObserveTarget(token.target);
+        if (!event_permit || !observed_before_publication.has_value() ||
+            *observed_before_publication != *observed ||
+            !safety_.IsPersistencePermitCurrent(event_permit)) {
+          const bool compensated = compensate(&publication);
+          reservation.Cancel();
+          discard_chunk();
+          return compensated ? WorkerStepResult::kAuthorizationLost
+                             : WorkerStepResult::kCompensationFailure;
+        }
       }
 
       PermitValidationContext validation{&safety_, &event_permit};
+      SealedPermitValidationContext sealed_validation{&safety_,
+                                                       &sealed_permit};
       const uint64_t event_sequence = events_.PushReservedValidated(
           reservation.get(), WDF_CAPTURE_EVENT_CHUNK_COMMITTED,
           EventStateFor(finalization_reason), WDF_CAPTURE_REASON_NONE,
           WDF_CAPTURE_ERROR_NONE, std::move(artifact_identifier),
           backend_.UnixNowMilliseconds(), token.persistence_generation,
-          token.target.target_epoch, ValidatePersistencePermit, &validation);
+          token.target.target_epoch,
+          authorization == FinalizationAuthorization::kCurrent
+              ? ValidatePersistencePermit
+              : ValidateSealedPrefixPermit,
+          authorization == FinalizationAuthorization::kCurrent
+              ? static_cast<void*>(&validation)
+              : static_cast<void*>(&sealed_validation));
       if (event_sequence == 0) {
         const bool compensated = compensate(&publication);
         reservation.Cancel();
@@ -567,9 +596,12 @@ void CaptureWorker::Run(CaptureRuntimeOwner& runtime,
         if (!compensated) {
           return WorkerStepResult::kCompensationFailure;
         }
-        return safety_.IsPersistencePermitCurrent(event_permit)
-                   ? WorkerStepResult::kEventFailure
-                   : WorkerStepResult::kAuthorizationLost;
+        const bool permit_current =
+            authorization == FinalizationAuthorization::kCurrent
+                ? safety_.IsPersistencePermitCurrent(event_permit)
+                : safety_.IsSealedPrefixPermitCurrent(sealed_permit);
+        return permit_current ? WorkerStepResult::kEventFailure
+                              : WorkerStepResult::kAuthorizationLost;
       }
 
       publication->Acknowledge();
@@ -580,12 +612,14 @@ void CaptureWorker::Run(CaptureRuntimeOwner& runtime,
     };
 
     auto fail = [&](WorkerStepResult step) noexcept {
+      safety_.ConsumeSealedPrefix(token);
       discard_chunk();
       result = MakeFailure(step, result);
       complete();
     };
 
     auto exit_stopped = [&]() noexcept {
+      safety_.ConsumeSealedPrefix(token);
       discard_chunk();
       backend_.ResetAcquisition();
       topology_available = false;
@@ -635,9 +669,17 @@ void CaptureWorker::Run(CaptureRuntimeOwner& runtime,
     auto enter_pause = [&](CaptureRuntimeControlSnapshot control,
                            bool finalize_authorized_chunk) {
       if (finalize_authorized_chunk) {
+        const bool sealed_prefix = safety_.HasSealedPrefix(token);
         const WorkerStepResult paused =
-            finalize_chunk(ChunkFinalizationReason::kPause);
+            finalize_chunk(ChunkFinalizationReason::kPause,
+                           sealed_prefix
+                               ? FinalizationAuthorization::kSealedPrefix
+                               : FinalizationAuthorization::kCurrent);
+        if (sealed_prefix) {
+          safety_.ConsumeSealedPrefix(token);
+        }
         if (paused == WorkerStepResult::kAuthorizationLost) {
+          safety_.ConsumeSealedPrefix(token);
           control = runtime.ReadControlSnapshot();
           observed_control_sequence = control.sequence;
           if (control.stop_requested) {
@@ -653,6 +695,7 @@ void CaptureWorker::Run(CaptureRuntimeOwner& runtime,
           return false;
         }
       } else {
+        safety_.ConsumeSealedPrefix(token);
         discard_chunk();
       }
 
@@ -668,20 +711,53 @@ void CaptureWorker::Run(CaptureRuntimeOwner& runtime,
       return await_resume(std::move(control));
     };
 
-    auto handle_authorization_loss = [&]() {
+    auto handle_authorization_loss = [&](bool prefix_sealable) {
       CaptureRuntimeControlSnapshot latest = runtime.ReadControlSnapshot();
       observed_control_sequence = latest.sequence;
+      bool sealed_prefix = safety_.HasSealedPrefix(token);
+      if (sealed_prefix && !latest.stop_requested &&
+          latest.pause_epoch == handled_pause_epoch) {
+        const std::optional<CaptureRuntimeControlSnapshot> coordinated =
+            runtime.WaitForControlChange(
+                observed_control_sequence,
+                kAuthorizationPauseCoordinationWaitMs);
+        if (coordinated.has_value()) {
+          latest = *coordinated;
+          observed_control_sequence = latest.sequence;
+        }
+      }
       if (latest.stop_requested) {
-        // A closed gate cannot authorize a partial-chunk finalization. Stop
-        // therefore owns cleanup only on this path.
+        if (sealed_prefix && prefix_sealable) {
+          const WorkerStepResult stopped = finalize_chunk(
+              ChunkFinalizationReason::kStop,
+              FinalizationAuthorization::kSealedPrefix);
+          safety_.ConsumeSealedPrefix(token);
+          if (stopped != WorkerStepResult::kOk) {
+            fail(stopped);
+            return false;
+          }
+        } else {
+          safety_.ConsumeSealedPrefix(token);
+        }
         exit_stopped();
         return false;
       }
       if (latest.pause_epoch != handled_pause_epoch) {
-        // The old token cannot contribute evidence after the gate closes. A
-        // provisional Pause keeps the thread alive for an admitted fresh token.
+        if (sealed_prefix && prefix_sealable) {
+          const WorkerStepResult paused = finalize_chunk(
+              ChunkFinalizationReason::kPause,
+              FinalizationAuthorization::kSealedPrefix);
+          safety_.ConsumeSealedPrefix(token);
+          if (paused != WorkerStepResult::kOk) {
+            fail(paused);
+            return false;
+          }
+        } else {
+          safety_.ConsumeSealedPrefix(token);
+        }
         return enter_pause(std::move(latest), false);
       }
+      safety_.ConsumeSealedPrefix(token);
       fail(WorkerStepResult::kAuthorizationLost);
       return false;
     };
@@ -691,10 +767,17 @@ void CaptureWorker::Run(CaptureRuntimeOwner& runtime,
       observed_control_sequence = control.sequence;
 
       if (control.stop_requested) {
+        const bool sealed_prefix = safety_.HasSealedPrefix(token);
         const WorkerStepResult stopped =
-            finalize_chunk(ChunkFinalizationReason::kStop);
+            finalize_chunk(ChunkFinalizationReason::kStop,
+                           sealed_prefix
+                               ? FinalizationAuthorization::kSealedPrefix
+                               : FinalizationAuthorization::kCurrent);
+        if (sealed_prefix) {
+          safety_.ConsumeSealedPrefix(token);
+        }
         if (stopped == WorkerStepResult::kAuthorizationLost) {
-          static_cast<void>(handle_authorization_loss());
+          static_cast<void>(handle_authorization_loss(false));
           return;
         }
         if (stopped != WorkerStepResult::kOk) {
@@ -722,7 +805,7 @@ void CaptureWorker::Run(CaptureRuntimeOwner& runtime,
       const AuthorizedStageResult current = ExecuteAuthorizedStage(
           token, []() noexcept { return CaptureWorkerBackendResult::kOk; });
       if (!current.authorized) {
-        if (!handle_authorization_loss()) {
+        if (!handle_authorization_loss(true)) {
           return;
         }
         continue;
@@ -734,7 +817,7 @@ void CaptureWorker::Run(CaptureRuntimeOwner& runtime,
               return backend_.InitializeAcquisition(token.target);
             });
         if (!initialized.authorized) {
-          if (!handle_authorization_loss()) {
+          if (!handle_authorization_loss(true)) {
             return;
           }
           continue;
@@ -768,9 +851,10 @@ void CaptureWorker::Run(CaptureRuntimeOwner& runtime,
           now_ms - chunk.start_steady_ms >=
               static_cast<int64_t>(configuration_.policy.chunk_duration_ms)) {
         const WorkerStepResult finalized =
-            finalize_chunk(ChunkFinalizationReason::kRegular);
+            finalize_chunk(ChunkFinalizationReason::kRegular,
+                           FinalizationAuthorization::kCurrent);
         if (finalized == WorkerStepResult::kAuthorizationLost) {
-          if (!handle_authorization_loss()) {
+          if (!handle_authorization_loss(false)) {
             return;
           }
           continue;
@@ -799,7 +883,7 @@ void CaptureWorker::Run(CaptureRuntimeOwner& runtime,
           });
       if (!acquired.authorized) {
         SecureClear(&acquired_frame);
-        if (!handle_authorization_loss()) {
+        if (!handle_authorization_loss(true)) {
           return;
         }
         continue;
@@ -812,9 +896,10 @@ void CaptureWorker::Run(CaptureRuntimeOwner& runtime,
           CaptureWorkerBackendResult::kRebuildRequired) {
         SecureClear(&acquired_frame);
         const WorkerStepResult interrupted =
-            finalize_chunk(ChunkFinalizationReason::kRegular);
+            finalize_chunk(ChunkFinalizationReason::kRegular,
+                           FinalizationAuthorization::kCurrent);
         if (interrupted == WorkerStepResult::kAuthorizationLost) {
-          if (!handle_authorization_loss()) {
+          if (!handle_authorization_loss(false)) {
             return;
           }
           continue;
@@ -855,7 +940,7 @@ void CaptureWorker::Run(CaptureRuntimeOwner& runtime,
       SecureClear(&acquired_frame);
       if (!transformed.authorized) {
         SecureClear(&transformed_frame);
-        if (!handle_authorization_loss()) {
+        if (!handle_authorization_loss(true)) {
           return;
         }
         continue;
@@ -869,13 +954,23 @@ void CaptureWorker::Run(CaptureRuntimeOwner& runtime,
         return;
       }
 
+      // A newly created capture surface can yield an empty black buffer before
+      // the compositor has published real content. It has no archival or LLM
+      // value, so reject it before opening a chunk or encoding a JPEG.
+      if (!HasMeaningfulVisualContent(transformed_frame)) {
+        SecureClear(&transformed_frame);
+        consecutive_topology_retries = 0;
+        continue;
+      }
+
       if (chunk.writer_started && (chunk.width != transformed_frame.width ||
                                    chunk.height != transformed_frame.height)) {
         const WorkerStepResult resized =
-            finalize_chunk(ChunkFinalizationReason::kRegular);
+            finalize_chunk(ChunkFinalizationReason::kRegular,
+                           FinalizationAuthorization::kCurrent);
         if (resized == WorkerStepResult::kAuthorizationLost) {
           SecureClear(&transformed_frame);
-          if (!handle_authorization_loss()) {
+          if (!handle_authorization_loss(false)) {
             return;
           }
           continue;
@@ -893,10 +988,11 @@ void CaptureWorker::Run(CaptureRuntimeOwner& runtime,
           frame_steady_ms - chunk.start_steady_ms >=
               static_cast<int64_t>(configuration_.policy.chunk_duration_ms)) {
         const WorkerStepResult boundary =
-            finalize_chunk(ChunkFinalizationReason::kRegular);
+            finalize_chunk(ChunkFinalizationReason::kRegular,
+                           FinalizationAuthorization::kCurrent);
         if (boundary == WorkerStepResult::kAuthorizationLost) {
           SecureClear(&transformed_frame);
-          if (!handle_authorization_loss()) {
+          if (!handle_authorization_loss(false)) {
             return;
           }
           continue;
@@ -909,37 +1005,42 @@ void CaptureWorker::Run(CaptureRuntimeOwner& runtime,
       }
 
       int64_t frame_offset_ms = 0;
-      int64_t frame_timestamp_ticks = 0;
       bool begin_writer = !chunk.writer_started;
-      CaptureVideoTiming timing =
-          VideoTimingForIntervalMs(configuration_.policy.capture_interval_ms);
       if (!begin_writer) {
         frame_offset_ms =
             std::max<int64_t>(0, frame_steady_ms - chunk.start_steady_ms);
-        frame_timestamp_ticks = MillisecondsToTicks(frame_offset_ms);
-        if (frame_timestamp_ticks <= chunk.last_frame_timestamp_ticks) {
-          frame_timestamp_ticks =
-              SaturatingAddTicks(chunk.last_frame_timestamp_ticks, 1);
+        if (frame_offset_ms <= chunk.latest_frame_offset_ms) {
+          frame_offset_ms = SaturatingAddMilliseconds(
+              chunk.latest_frame_offset_ms, 1);
         }
-        timing = chunk.timing;
       }
 
-      const MfH264ChunkWriterConfig writer_configuration{
+      const JpegFrameChunkWriterConfig writer_configuration{
           transformed_frame.width,
           transformed_frame.height,
-          timing.frame_rate_numerator,
-          timing.frame_rate_denominator,
-          configuration_.average_bitrate,
-          configuration_.maximum_encoded_chunk_bytes,
+          configuration_.jpeg_quality,
+          configuration_.maximum_frame_bytes,
+          configuration_.maximum_chunk_bytes,
       };
       if (begin_writer) {
+        if (token.target.scope == CaptureAuthorizationScope::kForegroundTarget) {
+          chunk.process_telemetry_start = ReadProcessTelemetrySample(
+              token.target.process_id,
+              token.target.process_creation_time_100ns);
+        }
+        if (!backend_.CreateArtifactId(&chunk.artifact_id)) {
+          SecureClear(&transformed_frame);
+          fail(WorkerStepResult::kInternalFailure);
+          return;
+        }
         const AuthorizedStageResult begun =
             ExecuteAuthorizedStage(token, [&]() noexcept {
-              return backend_.BeginChunk(writer_configuration);
+              return backend_.BeginChunk(chunk.artifact_id,
+                                         writer_configuration);
             });
         if (!begun.authorized) {
           SecureClear(&transformed_frame);
-          if (!handle_authorization_loss()) {
+          if (!handle_authorization_loss(false)) {
             return;
           }
           continue;
@@ -953,11 +1054,11 @@ void CaptureWorker::Run(CaptureRuntimeOwner& runtime,
       const AuthorizedStageResult encoded =
           ExecuteAuthorizedStage(token, [&]() noexcept {
             return backend_.EncodeFrame(transformed_frame.pixels,
-                                        frame_timestamp_ticks);
+                                        static_cast<uint64_t>(frame_offset_ms));
           });
       SecureClear(&transformed_frame);
       if (!encoded.authorized) {
-        if (!handle_authorization_loss()) {
+        if (!handle_authorization_loss(false)) {
           return;
         }
         continue;
@@ -973,14 +1074,10 @@ void CaptureWorker::Run(CaptureRuntimeOwner& runtime,
         chunk.start_unix_ms = frame_unix_ms;
         chunk.width = writer_configuration.width;
         chunk.height = writer_configuration.height;
-        chunk.timing = timing;
         schedule.ReanchorFrame(frame_steady_ms);
       }
       chunk.latest_frame_offset_ms =
           std::max(chunk.latest_frame_offset_ms, frame_offset_ms);
-      chunk.last_frame_timestamp_ticks = frame_timestamp_ticks;
-      chunk.end_timestamp_ticks = SaturatingAddTicks(
-          frame_timestamp_ticks, chunk.timing.frame_duration_ticks);
       if (chunk.frame_count < std::numeric_limits<uint32_t>::max()) {
         ++chunk.frame_count;
       }

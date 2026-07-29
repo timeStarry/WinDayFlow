@@ -52,6 +52,17 @@ public sealed class OpenAiCompatibleProviderTests
         Assert.Equal(
             AiAnalysisContract.MaximumActivities,
             activitiesSchema.GetProperty("maxItems").GetInt32());
+        var activityProperties = activitiesSchema
+            .GetProperty("items")
+            .GetProperty("properties");
+        Assert.Contains(
+            "focused_work",
+            activityProperties.GetProperty("category").GetProperty("enum")
+                .EnumerateArray().Select(static item => item.GetString()));
+        Assert.Contains(
+            "focused",
+            activityProperties.GetProperty("productivity").GetProperty("enum")
+                .EnumerateArray().Select(static item => item.GetString()));
         var systemPrompt = root.GetProperty("messages")[0].GetProperty("content").GetString();
         Assert.Contains("first start_offset_ms must be 0", systemPrompt, StringComparison.Ordinal);
         Assert.Contains("no time is omitted", systemPrompt, StringComparison.Ordinal);

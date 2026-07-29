@@ -10,8 +10,7 @@ public enum NativeCaptureCapabilities : ulong
     PrivacyGuard = 1UL << 0,
     EventQueue = 1UL << 1,
     ScreenCapture = 1UL << 2,
-    H264Chunks = 1UL << 3,
-    EvidenceExtraction = 1UL << 4,
+    CanonicalJpegChunks = 1UL << 3,
     TargetScopedAuthorization = 1UL << 5,
     PersistenceGenerationBarrier = 1UL << 6,
     DeterministicStop = 1UL << 7,
@@ -35,9 +34,9 @@ public sealed record NativeCaptureConfiguration
         string outputDirectory,
         uint captureIntervalMilliseconds = 10_000,
         uint contextIntervalMilliseconds = 1_000,
-        uint chunkDurationMilliseconds = 60_000,
-        uint maximumWidth = 1_920,
-        uint maximumHeight = 1_080,
+        uint chunkDurationMilliseconds = 900_000,
+        uint maximumWidth = 1_600,
+        uint maximumHeight = 900,
         uint eventQueueCapacity = 256)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(outputDirectory);
@@ -331,7 +330,7 @@ public static class NativeCaptureAbiContract
     public const NativeCaptureCapabilities SafeScreenCaptureCapabilities =
         RuntimeOwnerCapabilities
         | NativeCaptureCapabilities.ScreenCapture
-        | NativeCaptureCapabilities.H264Chunks;
+        | NativeCaptureCapabilities.CanonicalJpegChunks;
 
     public const NativeCaptureCapabilities DisplayWideContinuousCapabilities =
         RuntimeOwnerCapabilities

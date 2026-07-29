@@ -18,7 +18,7 @@
 #include "capture_runtime_owner.h"
 #include "capture_safety_core.h"
 #include "chunk_manifest.h"
-#include "mf_h264_chunk_writer.h"
+#include "jpeg_frame_chunk_writer.h"
 #include "wic_bgra_scaler.h"
 
 namespace windayflow::capture {
@@ -61,20 +61,17 @@ class CaptureWorkerBackend {
       BgraFrame* destination) noexcept = 0;
 
   virtual CaptureWorkerBackendResult BeginChunk(
-      const MfH264ChunkWriterConfig& config) noexcept = 0;
+      std::string_view artifact_id,
+      const JpegFrameChunkWriterConfig& config) noexcept = 0;
   virtual CaptureWorkerBackendResult EncodeFrame(
       std::span<const uint8_t> top_down_bgra,
-      int64_t timestamp_ticks) noexcept = 0;
+      uint64_t offset_milliseconds) noexcept = 0;
   virtual CaptureWorkerBackendResult FinalizeChunk(
-      int64_t end_timestamp_ticks,
-      std::vector<uint8_t>* encoded_mp4) noexcept = 0;
+      ChunkManifest* manifest,
+      std::unique_ptr<CaptureWorkerPublication>* publication) noexcept = 0;
   virtual void ResetChunk() noexcept = 0;
 
   virtual bool CreateArtifactId(std::string* artifact_id) noexcept = 0;
-  virtual CaptureWorkerBackendResult PreparePublication(
-      std::string_view artifact_id, std::span<const uint8_t> encoded_mp4,
-      const ChunkManifest& manifest,
-      std::unique_ptr<CaptureWorkerPublication>* publication) noexcept = 0;
 
   virtual int64_t SteadyNowMilliseconds() noexcept = 0;
   virtual int64_t UnixNowMilliseconds() noexcept = 0;
@@ -83,15 +80,16 @@ class CaptureWorkerBackend {
 
 struct CaptureWorkerConfiguration {
   CapturePolicy policy;
-  uint32_t maximum_width = 1'920;
-  uint32_t maximum_height = 1'080;
+  uint32_t maximum_width = 1'600;
+  uint32_t maximum_height = 900;
   uint32_t acquire_timeout_ms = 50;
   uint32_t topology_retry_ms = 100;
   uint32_t topology_retry_limit = 4;
   uint32_t rollback_retry_limit = 8;
   uint32_t rollback_retry_delay_ms = 10;
-  uint32_t average_bitrate = 2'500'000;
-  size_t maximum_encoded_chunk_bytes = kMaximumH264ChunkBytes;
+  float jpeg_quality = 0.82F;
+  size_t maximum_frame_bytes = kMaximumChunkFrameFileBytes;
+  size_t maximum_chunk_bytes = kMaximumChunkFrameBytes;
 };
 
 bool IsValidCaptureWorkerConfiguration(
@@ -147,6 +145,8 @@ class CaptureWorker final {
 
   void Run(CaptureRuntimeOwner& runtime, PersistenceToken initial_token,
            CaptureWorkerCheckpointSink checkpoint_sink = {}) noexcept;
+  bool UpdateTiming(uint32_t capture_interval_ms,
+                    uint32_t chunk_duration_ms) noexcept;
   CaptureWorkerRunResult last_result() const;
   bool RetryPendingCompensation(uint32_t attempts) noexcept;
 

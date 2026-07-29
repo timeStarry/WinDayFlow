@@ -22,13 +22,13 @@ public sealed class CaptureChunkTests
     }
 
     [Theory]
-    [InlineData("../chunks/chunk-safe/capture.mp4")]
-    [InlineData("/chunks/chunk-safe/capture.mp4")]
-    [InlineData("chunks\\chunk-safe\\capture.mp4")]
-    [InlineData("C:chunks/chunk-safe/capture.mp4")]
-    [InlineData("chunks/./capture.mp4")]
-    [InlineData("chunks/CON/capture.mp4")]
-    [InlineData("chunks/chunk-safe/capture.mp4/")]
+    [InlineData("../chunks/chunk-safe/manifest.json")]
+    [InlineData("/chunks/chunk-safe/manifest.json")]
+    [InlineData("chunks\\chunk-safe\\manifest.json")]
+    [InlineData("C:chunks/chunk-safe/manifest.json")]
+    [InlineData("chunks/./manifest.json")]
+    [InlineData("chunks/CON/manifest.json")]
+    [InlineData("chunks/chunk-safe/manifest.json/")]
     public void RejectsUnsafeEvidenceRelativePaths(string value)
     {
         Assert.ThrowsAny<ArgumentException>(() => new EvidenceRelativePath(value));
@@ -40,14 +40,12 @@ public sealed class CaptureChunkTests
         var start = DateTimeOffset.UtcNow;
         Assert.Throws<ArgumentException>(() => new CaptureChunk(
             "chunk-safe",
-            new EvidenceRelativePath("chunks/chunk-other/capture.mp4"),
             new EvidenceRelativePath("chunks/chunk-other/manifest.json"),
             new TimeRange(start, start.AddMinutes(1)),
             1,
+            1,
             1920,
             1080,
-            1,
-            10,
             1024,
             1,
             1,
@@ -73,15 +71,13 @@ public sealed class CaptureChunkTests
         const string id = "chunk-safe";
         return new CaptureChunk(
             id,
-            new EvidenceRelativePath($"chunks/{id}/capture.mp4"),
             new EvidenceRelativePath($"chunks/{id}/manifest.json"),
             new TimeRange(start, start.AddMinutes(1)),
+            capturedFrameCount: 10,
             frameCount: 6,
-            videoWidth: 1920,
-            videoHeight: 1080,
-            frameRateNumerator: 1,
-            frameRateDenominator: 10,
-            videoByteCount: 4096,
+            frameWidth: 1600,
+            frameHeight: 900,
+            frameByteCount: 4096,
             persistenceGeneration,
             targetEpoch,
             committedAtUtc: start.AddMinutes(1).ToOffset(TimeSpan.FromHours(-4)),

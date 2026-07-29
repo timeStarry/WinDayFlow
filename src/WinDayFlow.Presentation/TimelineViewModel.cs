@@ -1181,6 +1181,9 @@ public sealed partial class TimelineViewModel : ObservableObject, IDisposable
             .Where(entry => !SelectedCategory.HasValue || entry.Category == SelectedCategory.Value)
             .Where(entry => !SelectedProductivity.HasValue || entry.Productivity == SelectedProductivity.Value)
             .Where(entry => MatchesSearch(entry, search))
+            .OrderByDescending(static entry => entry.Range.Start)
+            .ThenByDescending(static entry => entry.Range.End)
+            .ThenByDescending(static entry => entry.Id)
             .Select(entry => new TimelineEntryItemViewModel(entry))
             .ToArray();
 
@@ -1248,9 +1251,9 @@ public sealed partial class TimelineViewModel : ObservableObject, IDisposable
                 .GetForUtcRangeAsync(utcRange, cancellationToken)
                 .ConfigureAwait(true);
             IReadOnlyList<UnprocessedIntervalItemViewModel> items = intervals
-                .OrderBy(static interval => interval.Range.Start)
-                .ThenBy(static interval => interval.Range.End)
-                .ThenBy(static interval => interval.CaptureChunkId, StringComparer.Ordinal)
+                .OrderByDescending(static interval => interval.Range.Start)
+                .ThenByDescending(static interval => interval.Range.End)
+                .ThenByDescending(static interval => interval.CaptureChunkId, StringComparer.Ordinal)
                 .Select(static interval => new UnprocessedIntervalItemViewModel(interval))
                 .ToArray();
             return LoadResult<IReadOnlyList<UnprocessedIntervalItemViewModel>>.Success(items);

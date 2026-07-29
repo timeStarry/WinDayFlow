@@ -6,7 +6,7 @@ using WinDayFlow.Infrastructure.Persistence;
 
 namespace WinDayFlow.Infrastructure.Analysis;
 
-public sealed class SqliteAnalysisResultCommitter : IAnalysisResultCommitter
+public sealed class SqliteAnalysisResultCommitter : IAnalysisWindowResultCommitter
 {
     private readonly SqliteConnectionFactory _connectionFactory;
 
@@ -16,13 +16,50 @@ public sealed class SqliteAnalysisResultCommitter : IAnalysisResultCommitter
             ?? throw new ArgumentNullException(nameof(connectionFactory));
     }
 
-    public async Task<AnalysisResultCommitStatus> TryCommitAsync(
+    public Task<AnalysisResultCommitStatus> TryCommitAsync(
         AnalysisJobLease lease,
         Guid providerProfileId,
         long providerProfileRevision,
         IReadOnlyList<TimelineEntry> entries,
         DateTimeOffset committedAtUtc,
+        CancellationToken cancellationToken = default) =>
+        TryCommitCoreAsync(
+            lease,
+            providerProfileId,
+            providerProfileRevision,
+            window: null,
+            entries,
+            committedAtUtc,
+            cancellationToken);
+
+    public Task<AnalysisResultCommitStatus> TryCommitWindowAsync(
+        AnalysisJobLease lease,
+        Guid providerProfileId,
+        long providerProfileRevision,
+        AnalysisWindowSnapshot window,
+        IReadOnlyList<TimelineEntry> entries,
+        DateTimeOffset committedAtUtc,
         CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(window);
+        return TryCommitCoreAsync(
+            lease,
+            providerProfileId,
+            providerProfileRevision,
+            window,
+            entries,
+            committedAtUtc,
+            cancellationToken);
+    }
+
+    private async Task<AnalysisResultCommitStatus> TryCommitCoreAsync(
+        AnalysisJobLease lease,
+        Guid providerProfileId,
+        long providerProfileRevision,
+        AnalysisWindowSnapshot? window,
+        IReadOnlyList<TimelineEntry> entries,
+        DateTimeOffset committedAtUtc,
+        CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(lease);
         if (providerProfileId == Guid.Empty)
@@ -98,7 +135,28 @@ public sealed class SqliteAnalysisResultCommitter : IAnalysisResultCommitter
                 "The committing analysis job does not match the expected provider revision.");
         }
 
-        ValidateEntries(entries, job);
+        ValidateEntries(entries, job, window);
+        if (window is not null)
+        {
+            if (!await WindowBaselineMatchesAsync(
+                    connection,
+                    transaction,
+                    window,
+                    cancellationToken)
+                .ConfigureAwait(false))
+            {
+                await transaction.RollbackAsync(cancellationToken).ConfigureAwait(false);
+                return AnalysisResultCommitStatus.WindowChanged;
+            }
+
+            await RewriteEligibleWindowEntriesAsync(
+                    connection,
+                    transaction,
+                    window.Range,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+
         foreach (var entry in entries)
         {
             if (await TryInsertEntryAsync(
@@ -272,16 +330,36 @@ public sealed class SqliteAnalysisResultCommitter : IAnalysisResultCommitter
 
     private static void ValidateEntries(
         IReadOnlyList<TimelineEntry> entries,
-        CommittingJob job)
+        CommittingJob job,
+        AnalysisWindowSnapshot? window)
     {
+        var orderedEntries = entries
+            .OrderBy(static entry => entry.Range.Start)
+            .ThenBy(static entry => entry.Range.End)
+            .ToArray();
+        for (var index = 1; index < orderedEntries.Length; index++)
+        {
+            if (orderedEntries[index - 1].Range.End > orderedEntries[index].Range.Start)
+            {
+                throw new ArgumentException(
+                    "Analysis results cannot contain overlapping timeline entries.",
+                    nameof(entries));
+            }
+        }
+
+        var allowedChunks = window?.Members
+            .Select(static member => member.Chunk.Id)
+            .ToHashSet(StringComparer.Ordinal);
         foreach (var entry in entries)
         {
             if (entry.Origin != TimelineEntryOrigin.Analyzed
-                || entry.Evidence is null
-                || !string.Equals(
-                    entry.Evidence.CaptureChunkId,
-                    job.CaptureChunkId,
-                    StringComparison.Ordinal)
+                || entry.EvidenceReferences.Count == 0
+                || entry.EvidenceReferences.Any(evidence => allowedChunks is null
+                    ? !string.Equals(
+                        evidence.CaptureChunkId,
+                        job.CaptureChunkId,
+                        StringComparison.Ordinal)
+                    : !allowedChunks.Contains(evidence.CaptureChunkId))
                 || !string.Equals(
                     entry.AnalysisVersion,
                     job.AnalysisVersion,
@@ -293,7 +371,109 @@ public sealed class SqliteAnalysisResultCommitter : IAnalysisResultCommitter
                     "Analysis results must contain new, unedited entries for the claimed job.",
                     nameof(entries));
             }
+
+            if (window is not null
+                && (entry.Range.Start < window.Range.Start
+                    || entry.Range.End > window.Range.End
+                    || window.ExistingEntries.Any(existing =>
+                        existing.IsRewriteProtectedBy(window.Range)
+                        && existing.Range.Start < entry.Range.End
+                        && existing.Range.End > entry.Range.Start)))
+            {
+                throw new ArgumentException(
+                    "Window analysis results must stay inside the window and avoid preserved entries.",
+                    nameof(entries));
+            }
         }
+    }
+
+    private static async Task<bool> WindowBaselineMatchesAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        AnalysisWindowSnapshot window,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT id, revision
+            FROM timeline_entries
+            WHERE start_utc_ticks < $window_end_utc_ticks
+                AND end_utc_ticks > $window_start_utc_ticks
+            ORDER BY start_utc_ticks, end_utc_ticks, id;
+            """;
+        AddWindowParameters(command.Parameters, window.Range);
+
+        var actual = new List<(Guid Id, long Revision)>();
+        await using var reader = await command
+            .ExecuteReaderAsync(cancellationToken)
+            .ConfigureAwait(false);
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            actual.Add((Guid.Parse(reader.GetString(0)), reader.GetInt64(1)));
+        }
+
+        var expected = window.ExistingEntries
+            .OrderBy(static entry => entry.Range.Start)
+            .ThenBy(static entry => entry.Range.End)
+            .ThenBy(static entry => entry.Id)
+            .Select(static entry => (entry.Id, entry.Revision))
+            .ToArray();
+        return actual.SequenceEqual(expected);
+    }
+
+    private static async Task RewriteEligibleWindowEntriesAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        TimeRange window,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            UPDATE timeline_entries
+            SET end_utc_ticks = $window_start_utc_ticks,
+                end_offset_minutes = $window_start_offset_minutes,
+                revision = revision + 1
+            WHERE origin = 0
+                AND range_edited_at IS NULL
+                AND title_edited_at IS NULL
+                AND summary_edited_at IS NULL
+                AND category_edited_at IS NULL
+                AND productivity_edited_at IS NULL
+                AND tags_edited_at IS NULL
+                AND start_utc_ticks < $window_start_utc_ticks
+                AND end_utc_ticks > $window_start_utc_ticks
+                AND end_utc_ticks <= $window_end_utc_ticks;
+
+            DELETE FROM timeline_entries
+            WHERE origin = 0
+                AND range_edited_at IS NULL
+                AND title_edited_at IS NULL
+                AND summary_edited_at IS NULL
+                AND category_edited_at IS NULL
+                AND productivity_edited_at IS NULL
+                AND tags_edited_at IS NULL
+                AND start_utc_ticks >= $window_start_utc_ticks
+                AND end_utc_ticks <= $window_end_utc_ticks;
+            """;
+        AddWindowParameters(command.Parameters, window);
+        command.Parameters.AddWithValue(
+            "$window_start_offset_minutes",
+            checked((int)window.Start.Offset.TotalMinutes));
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static void AddWindowParameters(
+        SqliteParameterCollection parameters,
+        TimeRange window)
+    {
+        parameters.AddWithValue(
+            "$window_start_utc_ticks",
+            window.Start.UtcDateTime.Ticks);
+        parameters.AddWithValue(
+            "$window_end_utc_ticks",
+            window.End.UtcDateTime.Ticks);
     }
 
     private static async Task<bool> TryInsertEntryAsync(
@@ -396,6 +576,64 @@ public sealed class SqliteAnalysisResultCommitter : IAnalysisResultCommitter
             if (Convert.ToInt32(
                     await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false),
                     CultureInfo.InvariantCulture) != 1)
+            {
+                return false;
+            }
+        }
+
+        await using (var command = connection.CreateCommand())
+        {
+            command.Transaction = transaction;
+            command.CommandText = """
+                SELECT
+                    ordinal,
+                    capture_chunk_id,
+                    artifact_path,
+                    contribution_start_utc_ticks,
+                    contribution_start_offset_minutes,
+                    contribution_end_utc_ticks,
+                    contribution_end_offset_minutes
+                FROM timeline_entry_evidence
+                WHERE timeline_entry_id = $id
+                ORDER BY ordinal;
+                """;
+            command.Parameters.AddWithValue("$id", FormatId(entry.Id));
+            await using var reader = await command
+                .ExecuteReaderAsync(cancellationToken)
+                .ConfigureAwait(false);
+            var index = 0;
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                if (index >= entry.EvidenceReferences.Count)
+                {
+                    return false;
+                }
+
+                var expected = entry.EvidenceReferences[index];
+                var contribution = expected.ContributionRange ?? entry.Range;
+                if (reader.GetInt32(0) != index
+                    || !string.Equals(
+                        reader.GetString(1),
+                        expected.CaptureChunkId,
+                        StringComparison.Ordinal)
+                    || !string.Equals(
+                        reader.GetString(2),
+                        expected.ArtifactPath,
+                        StringComparison.Ordinal)
+                    || reader.GetInt64(3) != contribution.Start.UtcDateTime.Ticks
+                    || reader.GetInt32(4)
+                        != checked((int)contribution.Start.Offset.TotalMinutes)
+                    || reader.GetInt64(5) != contribution.End.UtcDateTime.Ticks
+                    || reader.GetInt32(6)
+                        != checked((int)contribution.End.Offset.TotalMinutes))
+                {
+                    return false;
+                }
+
+                index++;
+            }
+
+            if (index != entry.EvidenceReferences.Count)
             {
                 return false;
             }
@@ -513,6 +751,51 @@ public sealed class SqliteAnalysisResultCommitter : IAnalysisResultCommitter
         TimelineEntry entry,
         CancellationToken cancellationToken)
     {
+        for (var index = 0; index < entry.EvidenceReferences.Count; index++)
+        {
+            var evidence = entry.EvidenceReferences[index];
+            var contribution = evidence.ContributionRange ?? entry.Range;
+            await using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = """
+                INSERT INTO timeline_entry_evidence(
+                    timeline_entry_id,
+                    ordinal,
+                    capture_chunk_id,
+                    artifact_path,
+                    contribution_start_utc_ticks,
+                    contribution_start_offset_minutes,
+                    contribution_end_utc_ticks,
+                    contribution_end_offset_minutes)
+                VALUES (
+                    $timeline_entry_id,
+                    $ordinal,
+                    $capture_chunk_id,
+                    $artifact_path,
+                    $contribution_start_utc_ticks,
+                    $contribution_start_offset_minutes,
+                    $contribution_end_utc_ticks,
+                    $contribution_end_offset_minutes);
+                """;
+            command.Parameters.AddWithValue("$timeline_entry_id", FormatId(entry.Id));
+            command.Parameters.AddWithValue("$ordinal", index);
+            command.Parameters.AddWithValue("$capture_chunk_id", evidence.CaptureChunkId);
+            command.Parameters.AddWithValue("$artifact_path", evidence.ArtifactPath);
+            command.Parameters.AddWithValue(
+                "$contribution_start_utc_ticks",
+                contribution.Start.UtcDateTime.Ticks);
+            command.Parameters.AddWithValue(
+                "$contribution_start_offset_minutes",
+                checked((int)contribution.Start.Offset.TotalMinutes));
+            command.Parameters.AddWithValue(
+                "$contribution_end_utc_ticks",
+                contribution.End.UtcDateTime.Ticks);
+            command.Parameters.AddWithValue(
+                "$contribution_end_offset_minutes",
+                checked((int)contribution.End.Offset.TotalMinutes));
+            await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+
         for (var index = 0; index < entry.Apps.Count; index++)
         {
             var app = entry.Apps[index];

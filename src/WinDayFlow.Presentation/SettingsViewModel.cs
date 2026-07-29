@@ -28,6 +28,7 @@ public sealed partial class SettingsViewModel : ObservableObject, IDisposable
     [NotifyPropertyChangedFor(nameof(CanGrantConsent))]
     [NotifyPropertyChangedFor(nameof(CanRevokeConsent))]
     [NotifyPropertyChangedFor(nameof(CanChangePrivacy))]
+    [NotifyPropertyChangedFor(nameof(CanChangeCaptureInterval))]
     [NotifyPropertyChangedFor(nameof(CanChangeApplicationPrivacyMode))]
     [NotifyPropertyChangedFor(nameof(CanChangeApplicationProtection))]
     [NotifyPropertyChangedFor(nameof(CanAddExclusionRule))]
@@ -67,6 +68,9 @@ public sealed partial class SettingsViewModel : ObservableObject, IDisposable
     public bool CaptureEnabled => _settingsService.Current.CaptureEnabled;
 
     public bool CloudAnalysisEnabled => _settingsService.Current.CloudAnalysisEnabled;
+
+    public int CaptureIntervalSeconds =>
+        _settingsService.Current.CaptureIntervalSeconds;
 
     public bool HasValidRecordingConsent => _settingsService.HasValidRecordingConsent;
 
@@ -123,6 +127,8 @@ public sealed partial class SettingsViewModel : ObservableObject, IDisposable
     public bool CanRevokeConsent => !IsBusy && HasValidRecordingConsent;
 
     public bool CanChangePrivacy => !IsBusy;
+
+    public bool CanChangeCaptureInterval => !IsBusy;
 
     public bool CanChangeApplicationPrivacyMode => !IsBusy;
 
@@ -345,6 +351,69 @@ public sealed partial class SettingsViewModel : ObservableObject, IDisposable
                 if (shouldStop)
                 {
                     await _captureService.StopAsync(token).ConfigureAwait(false);
+                }
+            },
+            CaptureErrorText,
+            cancellationToken).ConfigureAwait(true);
+    }
+
+    public async Task<bool> SetCaptureIntervalSecondsAsync(
+        int captureIntervalSeconds,
+        CancellationToken cancellationToken = default)
+    {
+        return await RunMutationAsync(
+            async token =>
+            {
+                if (_settingsService.Current.CaptureIntervalSeconds
+                    == captureIntervalSeconds)
+                {
+                    return;
+                }
+
+                var shouldRestart = ShouldStopCapture(
+                    _captureService.CurrentStatus.State);
+                if (shouldRestart)
+                {
+                    await _captureService.StopAsync(token).ConfigureAwait(false);
+                }
+
+                try
+                {
+                    await _settingsService
+                        .SetCaptureIntervalSecondsAsync(
+                            captureIntervalSeconds,
+                            token)
+                        .ConfigureAwait(false);
+                }
+                catch
+                {
+                    if (shouldRestart)
+                    {
+                        await _captureService
+                            .StartAsync(CancellationToken.None)
+                            .ConfigureAwait(false);
+                    }
+
+                    throw;
+                }
+
+                if (!shouldRestart)
+                {
+                    return;
+                }
+
+                try
+                {
+                    await _captureService.StartAsync(token).ConfigureAwait(false);
+                }
+                catch
+                {
+                    await _settingsService
+                        .SetCaptureEnabledAsync(
+                            enabled: false,
+                            CancellationToken.None)
+                        .ConfigureAwait(false);
+                    throw;
                 }
             },
             CaptureErrorText,
@@ -688,6 +757,7 @@ public sealed partial class SettingsViewModel : ObservableObject, IDisposable
         OnPropertyChanged(nameof(Theme));
         OnPropertyChanged(nameof(CaptureEnabled));
         OnPropertyChanged(nameof(CloudAnalysisEnabled));
+        OnPropertyChanged(nameof(CaptureIntervalSeconds));
         OnPropertyChanged(nameof(HasValidRecordingConsent));
         OnPropertyChanged(nameof(HasOutdatedRecordingConsent));
         OnPropertyChanged(nameof(EvidenceRetentionDays));
@@ -702,6 +772,7 @@ public sealed partial class SettingsViewModel : ObservableObject, IDisposable
         OnPropertyChanged(nameof(CanGrantConsent));
         OnPropertyChanged(nameof(CanRevokeConsent));
         OnPropertyChanged(nameof(CanChangePrivacy));
+        OnPropertyChanged(nameof(CanChangeCaptureInterval));
         OnPropertyChanged(nameof(CanChangeApplicationPrivacyMode));
         OnPropertyChanged(nameof(CanChangeApplicationProtection));
         OnPropertyChanged(nameof(ConsentStatusText));

@@ -45,10 +45,10 @@ public sealed class TimelineViewModelTests
         Assert.False(viewModel.IsLoading);
         Assert.False(viewModel.IsEmpty);
         Assert.False(viewModel.HasError);
-        Assert.Equal([earlyEntry.Id, lateEntry.Id], viewModel.Entries.Select(entry => entry.Id));
-        Assert.Equal("Editor", viewModel.Entries[0].PrimaryApplicationText);
+        Assert.Equal([lateEntry.Id, earlyEntry.Id], viewModel.Entries.Select(entry => entry.Id));
+        Assert.Equal("Terminal", viewModel.Entries[0].PrimaryApplicationText);
         Assert.True(viewModel.Entries[0].HasTags);
-        Assert.Equal("roadmap", viewModel.Entries[0].TagsText);
+        Assert.Equal("validation", viewModel.Entries[0].TagsText);
     }
 
     [Fact]

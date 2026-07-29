@@ -42,7 +42,8 @@ public sealed class SqliteAppSettingsRepositoryTests
             CaptureEnabled: false,
             CloudAnalysisEnabled: true,
             consent,
-            privacy);
+            privacy,
+            CaptureIntervalSeconds: 30);
 
         await new SqliteAppSettingsRepository(factory).SaveAsync(
             AppSettings.Default,
@@ -56,6 +57,7 @@ public sealed class SqliteAppSettingsRepositoryTests
         Assert.Equal(consent.AcceptedAtUtc, restored.RecordingConsent?.AcceptedAtUtc);
         Assert.Equal(consent.PrivacyRevision, restored.RecordingConsent?.PrivacyRevision);
         Assert.Equal(privacy, restored.CapturePrivacy);
+        Assert.Equal(30, restored.CaptureIntervalSeconds);
         Assert.Equal(
             CaptureApplicationPrivacyMode.AllowAllApplications,
             restored.CapturePrivacy.ApplicationPrivacyMode);
@@ -217,7 +219,7 @@ public sealed class SqliteAppSettingsRepositoryTests
             CloudAnalysisEnabled: true,
             RecordingConsent: null);
 
-        await Assert.ThrowsAsync<InvalidOperationException>(
+        await Assert.ThrowsAsync<SqliteException>(
             () => repository.SaveAsync(AppSettings.Default, changed));
 
         Assert.Equal(AppSettings.Default, await repository.GetAsync());

@@ -109,10 +109,10 @@ public sealed class NativeCaptureInteropTests
     [InlineData((ulong)(NativeCaptureCapabilities.PrivacyGuard
         | NativeCaptureCapabilities.EventQueue
         | NativeCaptureCapabilities.ScreenCapture
-        | NativeCaptureCapabilities.H264Chunks))]
+        | NativeCaptureCapabilities.CanonicalJpegChunks))]
     [InlineData((ulong)(NativeCaptureCapabilities.PrivacyGuard
         | NativeCaptureCapabilities.EventQueue
-        | NativeCaptureCapabilities.H264Chunks))]
+        | NativeCaptureCapabilities.CanonicalJpegChunks))]
     public void KnownCapabilityDependencyViolationsAreRejected(ulong rawCapabilities)
     {
         using var nativeApi = new FakeNativeCaptureApi
@@ -312,6 +312,15 @@ public sealed class NativeCaptureInteropTests
     }
 
     [Fact]
+    public void ManagedCaptureDefaultsBoundArchivedFramesTo1600By900()
+    {
+        var configuration = new NativeCaptureConfiguration(Path.GetTempPath());
+
+        Assert.Equal(1_600U, configuration.MaximumWidth);
+        Assert.Equal(900U, configuration.MaximumHeight);
+    }
+
+    [Fact]
     public void ManagedContractsRejectValuesTheNativeBoundaryCannotAccept()
     {
         Assert.Throws<ArgumentException>(
@@ -367,13 +376,13 @@ public sealed class NativeCaptureInteropTests
             NativeCaptureCapabilities.DisplayBoundCommandAdmission));
 #if WDF_DEV_LIVE_CAPTURE
         Assert.True(probe.Capabilities.HasFlag(NativeCaptureCapabilities.ScreenCapture));
-        Assert.True(probe.Capabilities.HasFlag(NativeCaptureCapabilities.H264Chunks));
+        Assert.True(probe.Capabilities.HasFlag(
+            NativeCaptureCapabilities.CanonicalJpegChunks));
 #else
         Assert.False(probe.Capabilities.HasFlag(NativeCaptureCapabilities.ScreenCapture));
-        Assert.False(probe.Capabilities.HasFlag(NativeCaptureCapabilities.H264Chunks));
-#endif
         Assert.False(probe.Capabilities.HasFlag(
-            NativeCaptureCapabilities.EvidenceExtraction));
+            NativeCaptureCapabilities.CanonicalJpegChunks));
+#endif
         Assert.Null(probe.Failure);
     }
 
@@ -1460,6 +1469,165 @@ public sealed class NativeCaptureInteropTests
     }
 
     [Fact]
+    public async Task SealedChunkAfterCallbackInvalidationIsPublishedOncePaused()
+    {
+        using var directory = new TemporaryDirectory();
+        using var nativeApi = new FakeNativeCaptureApi();
+        using var backend = CreateBackend(directory.Path, nativeApi);
+        var persistenceGeneration = await backend.UpdateRuntimeAuthorizationAsync(
+            CreateAllowedRuntimeAuthorization(runtimePolicyRevision: 2));
+        var committed = new TaskCompletionSource<NativeCaptureChunkCommitted>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        backend.ChunkCommitted += (_, eventArgs) =>
+            committed.TrySetResult(eventArgs.Chunk);
+
+        backend.InvalidateRuntimeAuthorization();
+        nativeApi.Enqueue(
+            sequence: 1,
+            NativeCaptureEventKind.ChunkCommitted,
+            CaptureState.Paused,
+            detail: "chunks/sealed-prefix",
+            persistenceGeneration: persistenceGeneration,
+            targetEpoch: 1);
+
+        var chunk = await committed.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.Equal(persistenceGeneration, chunk.PersistenceGeneration);
+        Assert.Equal<ulong>(1, chunk.TargetEpoch);
+        Assert.NotEqual(CaptureState.Faulted, backend.CurrentStatus.State);
+    }
+
+    [Fact]
+    public async Task SealedChunkBoundaryIsConsumedAfterOnePublication()
+    {
+        using var directory = new TemporaryDirectory();
+        using var nativeApi = new FakeNativeCaptureApi();
+        using var backend = CreateBackend(directory.Path, nativeApi);
+        var persistenceGeneration = await backend.UpdateRuntimeAuthorizationAsync(
+            CreateAllowedRuntimeAuthorization(runtimePolicyRevision: 2));
+        var published = 0;
+        backend.ChunkCommitted += (_, _) => Interlocked.Increment(ref published);
+
+        backend.InvalidateRuntimeAuthorization();
+        nativeApi.Enqueue(
+            sequence: 1,
+            NativeCaptureEventKind.ChunkCommitted,
+            CaptureState.Paused,
+            detail: "chunks/sealed-prefix",
+            persistenceGeneration: persistenceGeneration,
+            targetEpoch: 1);
+        await WaitUntilAsync(
+            () => Volatile.Read(ref published) == 1,
+            TimeSpan.FromSeconds(2));
+
+        nativeApi.Enqueue(
+            sequence: 2,
+            NativeCaptureEventKind.ChunkCommitted,
+            CaptureState.Paused,
+            detail: "chunks/replayed-sealed-prefix",
+            persistenceGeneration: persistenceGeneration,
+            targetEpoch: 1);
+
+        await WaitUntilAsync(
+            () => backend.CurrentStatus.State == CaptureState.Faulted,
+            TimeSpan.FromSeconds(2));
+        Assert.Equal(1, Volatile.Read(ref published));
+    }
+
+    [Fact]
+    public async Task RecordingChunkCannotUseASealedCallbackBoundary()
+    {
+        using var directory = new TemporaryDirectory();
+        using var nativeApi = new FakeNativeCaptureApi();
+        using var backend = CreateBackend(directory.Path, nativeApi);
+        var persistenceGeneration = await backend.UpdateRuntimeAuthorizationAsync(
+            CreateAllowedRuntimeAuthorization(runtimePolicyRevision: 2));
+        var published = 0;
+        backend.ChunkCommitted += (_, _) => Interlocked.Increment(ref published);
+
+        backend.InvalidateRuntimeAuthorization();
+        nativeApi.Enqueue(
+            sequence: 1,
+            NativeCaptureEventKind.ChunkCommitted,
+            CaptureState.Recording,
+            detail: "chunks/not-sealed",
+            persistenceGeneration: persistenceGeneration,
+            targetEpoch: 1);
+
+        await WaitUntilAsync(
+            () => backend.CurrentStatus.State == CaptureState.Faulted,
+            TimeSpan.FromSeconds(2));
+        Assert.Equal(0, Volatile.Read(ref published));
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task WrongBoundaryCannotUseASealedCallbackBoundary(
+        bool wrongGeneration)
+    {
+        using var directory = new TemporaryDirectory();
+        using var nativeApi = new FakeNativeCaptureApi();
+        using var backend = CreateBackend(directory.Path, nativeApi);
+        var persistenceGeneration = await backend.UpdateRuntimeAuthorizationAsync(
+            CreateAllowedRuntimeAuthorization(runtimePolicyRevision: 2));
+        var published = 0;
+        backend.ChunkCommitted += (_, _) => Interlocked.Increment(ref published);
+
+        backend.InvalidateRuntimeAuthorization();
+        nativeApi.Enqueue(
+            sequence: 1,
+            NativeCaptureEventKind.ChunkCommitted,
+            CaptureState.Paused,
+            detail: "chunks/wrong-sealed-boundary",
+            persistenceGeneration: wrongGeneration
+                ? persistenceGeneration - 1
+                : persistenceGeneration,
+            targetEpoch: wrongGeneration ? 1UL : 2UL);
+
+        await WaitUntilAsync(
+            () => backend.CurrentStatus.State == CaptureState.Faulted,
+            TimeSpan.FromSeconds(2));
+        Assert.Equal(0, Volatile.Read(ref published));
+    }
+
+    [Fact]
+    public async Task PausedStateClearsAnUnusedSealedCallbackBoundary()
+    {
+        using var directory = new TemporaryDirectory();
+        using var nativeApi = new FakeNativeCaptureApi();
+        using var backend = CreateBackend(directory.Path, nativeApi);
+        var persistenceGeneration = await backend.UpdateRuntimeAuthorizationAsync(
+            CreateAllowedRuntimeAuthorization(runtimePolicyRevision: 2));
+        var published = 0;
+        backend.ChunkCommitted += (_, _) => Interlocked.Increment(ref published);
+
+        backend.InvalidateRuntimeAuthorization();
+        nativeApi.Enqueue(
+            sequence: 1,
+            NativeCaptureEventKind.StateChanged,
+            CaptureState.Paused,
+            detail: "paused without evidence",
+            persistenceGeneration: persistenceGeneration,
+            targetEpoch: 1);
+        await WaitUntilAsync(
+            () => backend.CurrentStatus.Sequence == 1,
+            TimeSpan.FromSeconds(2));
+
+        nativeApi.Enqueue(
+            sequence: 2,
+            NativeCaptureEventKind.ChunkCommitted,
+            CaptureState.Paused,
+            detail: "chunks/late-sealed-prefix",
+            persistenceGeneration: persistenceGeneration,
+            targetEpoch: 1);
+
+        await WaitUntilAsync(
+            () => backend.CurrentStatus.State == CaptureState.Faulted,
+            TimeSpan.FromSeconds(2));
+        Assert.Equal(0, Volatile.Read(ref published));
+    }
+
+    [Fact]
     public async Task StaleChunkAuthorizationIsFaultedBeforeManagedPublication()
     {
         using var directory = new TemporaryDirectory();
@@ -1856,7 +2024,7 @@ public sealed class NativeCaptureInteropTests
             NativeCaptureCapabilities.PrivacyGuard
             | NativeCaptureCapabilities.EventQueue
             | NativeCaptureCapabilities.ScreenCapture
-            | NativeCaptureCapabilities.H264Chunks
+            | NativeCaptureCapabilities.CanonicalJpegChunks
             | NativeCaptureCapabilities.TargetScopedAuthorization
             | NativeCaptureCapabilities.PersistenceGenerationBarrier
             | NativeCaptureCapabilities.DeterministicStop

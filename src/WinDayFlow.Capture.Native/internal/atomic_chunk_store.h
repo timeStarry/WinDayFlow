@@ -1,8 +1,6 @@
 // Adapted from QiDayflow windows/runner/capture_service.cpp at commit
 // 8b82f8a3b23cb29f2b86ee1a6eff19b9343e2e1e.
-// Original SHA-256:
-// FF967B90A95EFAA608BF6CDC4AD985299313A5A058D61A397A63847C3CA4E8FD. Heavily
-// modified for transactional WinDayFlow publication; see
+// Heavily modified for transactional WinDayFlow JPEG-frame publication; see
 // THIRD_PARTY_NOTICES.md.
 
 #ifndef WINDAYFLOW_ATOMIC_CHUNK_STORE_H_
@@ -10,7 +8,6 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <filesystem>
 #include <memory>
 #include <span>
 #include <string>
@@ -18,7 +15,8 @@
 
 namespace windayflow::capture {
 
-inline constexpr size_t kMaximumEncodedChunkBytes = 64U * 1024U * 1024U;
+inline constexpr size_t kMaximumChunkFrameBytes = 64U * 1024U * 1024U;
+inline constexpr size_t kMaximumChunkFrameFileBytes = 2U * 1024U * 1024U;
 inline constexpr size_t kMaximumChunkManifestBytes = 64U * 1024U;
 
 enum class AtomicChunkStoreResult {
@@ -30,7 +28,9 @@ enum class AtomicChunkStoreResult {
   kIoFailure,
 };
 
+struct ChunkFrameManifest;
 struct ChunkManifest;
+class AtomicChunkState;
 
 using AtomicChunkStorePrepareCheckpoint = void (*)();
 
@@ -53,10 +53,34 @@ class AtomicChunkPublication {
   AtomicChunkStoreResult Rollback() noexcept;
 
  private:
-  friend class AtomicChunkStore;
+  friend class AtomicChunkWriter;
+  std::unique_ptr<AtomicChunkState> state_;
+};
 
-  class State;
-  std::unique_ptr<State> state_;
+class AtomicChunkWriter {
+ public:
+  AtomicChunkWriter();
+  ~AtomicChunkWriter();
+
+  AtomicChunkWriter(const AtomicChunkWriter&) = delete;
+  AtomicChunkWriter& operator=(const AtomicChunkWriter&) = delete;
+  AtomicChunkWriter(AtomicChunkWriter&& other) noexcept;
+  AtomicChunkWriter& operator=(AtomicChunkWriter&& other) = delete;
+
+  explicit operator bool() const noexcept;
+  const std::string& chunk_id() const noexcept;
+
+  AtomicChunkStoreResult AppendFrame(
+      const ChunkFrameManifest& frame,
+      std::span<const uint8_t> jpeg_bytes) noexcept;
+  AtomicChunkStoreResult Prepare(
+      const ChunkManifest& manifest,
+      AtomicChunkPublication* publication) noexcept;
+  AtomicChunkStoreResult Reset() noexcept;
+
+ private:
+  friend class AtomicChunkStore;
+  std::unique_ptr<AtomicChunkState> state_;
 };
 
 class AtomicChunkStore {
@@ -65,10 +89,9 @@ class AtomicChunkStore {
       std::wstring output_root,
       AtomicChunkStorePrepareCheckpoint prepare_checkpoint = nullptr);
 
-  AtomicChunkStoreResult Prepare(
-      std::string_view artifact_id, std::span<const uint8_t> encoded_mp4,
-      const ChunkManifest& manifest,
-      AtomicChunkPublication* publication) const noexcept;
+  AtomicChunkStoreResult Begin(
+      std::string_view artifact_id,
+      AtomicChunkWriter* writer) const noexcept;
 
  private:
   std::wstring output_root_;

@@ -89,6 +89,15 @@ public static class AiAnalysisResponseValidator
             }
 
             var apps = BuildApplicationUsage(candidate, index, range, contextByApplication);
+            var evidenceReferences = request.EvidenceReferences
+                .Where(evidence => evidence.ContributionRange is not { } contribution
+                    || contribution.Start < range.End && contribution.End > range.Start)
+                .ToArray();
+            if (evidenceReferences.Length == 0)
+            {
+                evidenceReferences = request.EvidenceReferences.ToArray();
+            }
+
             activities.Add(new Activity(
                 range,
                 candidate.Title,
@@ -98,7 +107,7 @@ public static class AiAnalysisResponseValidator
                 apps,
                 candidate.Tags,
                 candidate.Confidence,
-                new EvidenceReference(request.CaptureChunkId, request.ArtifactPath)));
+                evidenceReferences));
             previousEndOffset = candidate.EndOffsetMilliseconds;
         }
 
@@ -136,6 +145,16 @@ public static class AiAnalysisResponseValidator
         ValidateText(candidate.Summary, MaximumSummaryLength, allowEmpty: true, index, "summary");
         ValidateText(candidate.Category, 64, allowEmpty: false, index, "category");
         ValidateText(candidate.Productivity, 64, allowEmpty: false, index, "productivity");
+        if (!TryMapCategory(candidate.Category, out _))
+        {
+            throw new AiAnalysisValidationException(
+                $"Activity candidate {index} contains an unsupported category label.");
+        }
+        if (!TryMapProductivity(candidate.Productivity, out _))
+        {
+            throw new AiAnalysisValidationException(
+                $"Activity candidate {index} contains an unsupported productivity label.");
+        }
         if (candidate.Confidence is < 0 or > 1 || double.IsNaN(candidate.Confidence))
         {
             throw new AiAnalysisValidationException(
@@ -294,8 +313,19 @@ public static class AiAnalysisResponseValidator
 
     private static ActivityCategory MapCategory(string category)
     {
-        return category switch
+        return TryMapCategory(category, out var mapped)
+            ? mapped
+            : throw new AiAnalysisValidationException(
+                "The AI response contains an unsupported category label.");
+    }
+
+    private static bool TryMapCategory(
+        string category,
+        out ActivityCategory mapped)
+    {
+        mapped = category switch
         {
+            "unknown" => ActivityCategory.Unknown,
             "focused_work" => ActivityCategory.FocusedWork,
             "communication" => ActivityCategory.Communication,
             "meeting" => ActivityCategory.Meeting,
@@ -305,19 +335,32 @@ public static class AiAnalysisResponseValidator
             "learning" => ActivityCategory.Learning,
             "break" => ActivityCategory.Break,
             "personal" => ActivityCategory.Personal,
-            _ => ActivityCategory.Unknown,
+            _ => (ActivityCategory)(-1),
         };
+        return mapped >= ActivityCategory.Unknown;
     }
 
     private static ProductivityKind MapProductivity(string productivity)
     {
-        return productivity switch
+        return TryMapProductivity(productivity, out var mapped)
+            ? mapped
+            : throw new AiAnalysisValidationException(
+                "The AI response contains an unsupported productivity label.");
+    }
+
+    private static bool TryMapProductivity(
+        string productivity,
+        out ProductivityKind mapped)
+    {
+        mapped = productivity switch
         {
+            "unknown" => ProductivityKind.Unknown,
             "focused" => ProductivityKind.Focused,
             "neutral" => ProductivityKind.Neutral,
             "distracting" => ProductivityKind.Distracting,
             "break" => ProductivityKind.Break,
-            _ => ProductivityKind.Unknown,
+            _ => (ProductivityKind)(-1),
         };
+        return mapped >= ProductivityKind.Unknown;
     }
 }

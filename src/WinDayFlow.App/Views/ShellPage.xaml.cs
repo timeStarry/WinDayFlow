@@ -27,6 +27,12 @@ public sealed partial class ShellPage : Page
 
     public ShellViewModel ViewModel { get; }
 
+    public void OpenHome()
+    {
+        Navigation.SelectedItem = TimelineNavigationItem;
+        Navigate("timeline");
+    }
+
     private void OnNavigationLoaded(object sender, RoutedEventArgs e)
     {
         UpdateHeaderLayout(Navigation.ActualWidth);

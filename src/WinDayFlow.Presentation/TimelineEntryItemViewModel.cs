@@ -65,9 +65,19 @@ public sealed class TimelineEntryItemViewModel
 
     public string AnalysisVersionText => Entry.AnalysisVersion ?? "不适用";
 
-    public string EvidenceChunkText => Entry.Evidence?.CaptureChunkId ?? "无";
+    public string EvidenceChunkText => Entry.EvidenceReferences.Count switch
+    {
+        0 => "无",
+        1 => Entry.EvidenceReferences[0].CaptureChunkId,
+        var count => $"{count} 个录制块",
+    };
 
-    public string EvidencePathText => Entry.Evidence?.ArtifactPath ?? "无";
+    public string EvidencePathText => Entry.EvidenceReferences.Count switch
+    {
+        0 => "无",
+        1 => Entry.EvidenceReferences[0].ArtifactPath,
+        var count => $"{count} 份证据清单",
+    };
 
     public string TimeText => $"{Start:HH:mm} - {End:HH:mm}";
 

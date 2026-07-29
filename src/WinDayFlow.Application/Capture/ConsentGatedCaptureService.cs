@@ -217,6 +217,14 @@ public sealed class ConsentGatedCaptureService : ICaptureService, IDisposable
                 .ConfigureAwait(false);
             if (admissionStamp is null)
             {
+                if (admissionOperation == CaptureAdmissionOperation.Start
+                    && !_runtimeAuthorization.IsCaptureAuthorized
+                    && TryDeferStartUntilRuntimeAuthorization(expectedIntentVersion))
+                {
+                    SignalRuntimeResumeReconciliation();
+                    return;
+                }
+
                 throw new RecordingConsentRequiredException();
             }
 
@@ -1114,6 +1122,40 @@ public sealed class ConsentGatedCaptureService : ICaptureService, IDisposable
 
         AdvanceHandledRuntimeInvalidation(admittedInvalidationGeneration);
         return true;
+    }
+
+    private bool TryDeferStartUntilRuntimeAuthorization(
+        long expectedIntentVersion)
+    {
+        var backendState = _backend.CurrentStatus.State;
+        if (backendState is not (CaptureState.Stopped or CaptureState.Paused))
+        {
+            return false;
+        }
+
+        lock (_sync)
+        {
+            if (_disposed
+                || _userIntentVersion != expectedIntentVersion
+                || !HasPersistentCaptureAuthorization())
+            {
+                return false;
+            }
+
+            if (_userIntent == CaptureUserIntent.Recording
+                && (_startupStartPending || backendState == CaptureState.Paused))
+            {
+                return true;
+            }
+
+            _userIntent = CaptureUserIntent.Recording;
+            _userIntentVersion = unchecked(_userIntentVersion + 1);
+            _startupStartPending = backendState == CaptureState.Stopped;
+            _startupStartCanSatisfyExplicitStart = false;
+            _startCommandAwaitingStatusObservation = false;
+            _runtimeRecoveryAwaitingConfirmation = null;
+            return true;
+        }
     }
 
     private long ReadUserIntentVersion()

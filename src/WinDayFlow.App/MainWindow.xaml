@@ -17,6 +17,6 @@
             AutomationProperties.Name="WinDayFlow 窗口标题栏"
             Title="WinDayFlow" />
 
-        <views:ShellPage Grid.Row="1" />
+        <views:ShellPage x:Name="ShellContent" Grid.Row="1" />
     </Grid>
 </Window>

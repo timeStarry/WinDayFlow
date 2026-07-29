@@ -60,8 +60,7 @@ int main(void) {
       (capabilities &
        WDF_CAPTURE_CAPABILITY_CALLBACK_TIME_AUTHORIZATION_INVALIDATION) == 0 ||
       (capabilities &
-       WDF_CAPTURE_CAPABILITY_DISPLAY_WIDE_CONTINUOUS_AUTHORIZATION) == 0 ||
-      (capabilities & WDF_CAPTURE_CAPABILITY_EVIDENCE_EXTRACTION) != 0) {
+       WDF_CAPTURE_CAPABILITY_DISPLAY_WIDE_CONTINUOUS_AUTHORIZATION) == 0) {
     fputs("C translation unit observed incomplete foundation capabilities\n",
           stderr);
     return 1;
@@ -69,14 +68,14 @@ int main(void) {
 
 #if WDF_ENABLE_DEV_LIVE_CAPTURE
   if ((capabilities & WDF_CAPTURE_CAPABILITY_SCREEN_CAPTURE) == 0 ||
-      (capabilities & WDF_CAPTURE_CAPABILITY_H264_CHUNKS) == 0) {
+      (capabilities & WDF_CAPTURE_CAPABILITY_CANONICAL_JPEG_CHUNKS) == 0) {
     fputs("C translation unit did not observe development live capture\n",
           stderr);
     return 1;
   }
 #else
   if ((capabilities & WDF_CAPTURE_CAPABILITY_SCREEN_CAPTURE) != 0 ||
-      (capabilities & WDF_CAPTURE_CAPABILITY_H264_CHUNKS) != 0) {
+      (capabilities & WDF_CAPTURE_CAPABILITY_CANONICAL_JPEG_CHUNKS) != 0) {
     fputs("C translation unit observed production live capture\n", stderr);
     return 1;
   }
@@ -104,11 +103,6 @@ int main(void) {
       WDF_CAPTURE_RUNTIME_AUTHORIZATION_V1_LEGACY_SIZE != 112U ||
       WDF_CAPTURE_DISPLAY_DEVICE_KEY_UTF8_CAPACITY != 96U ||
       WDF_CAPTURE_DISPLAY_DEVICE_KEY_UTF8_MAX_LENGTH != 93U ||
-      WDF_CAPTURE_CHUNK_FINGERPRINT_UTF8_LENGTH != 64U ||
-      WDF_CAPTURE_CHUNK_FINGERPRINT_UTF8_CAPACITY != 65U ||
-      WDF_CAPTURE_ANALYSIS_EVIDENCE_MANIFEST_UTF8_MAX_LENGTH != 65536U ||
-      WDF_CAPTURE_ANALYSIS_EVIDENCE_MANIFEST_UTF8_CAPACITY != 65537U ||
-      WDF_CAPTURE_ANALYSIS_EVIDENCE_FRAME_MAX_BYTES != 2097152U ||
       sizeof(wdf_capture_config_v1) != 80 ||
       sizeof(wdf_capture_privacy_context_v1) != 80 ||
       sizeof(wdf_capture_runtime_authorization_v1) != 224 ||
@@ -293,74 +287,6 @@ int main(void) {
       return 1;
     }
 #endif
-  }
-
-  {
-    static const char relative_root[] = "relative\\evidence";
-    static const char chunk_id[] = "chunk-1";
-    char fingerprint[WDF_CAPTURE_CHUNK_FINGERPRINT_UTF8_CAPACITY];
-    uint32_t required = 0;
-    memset(fingerprint, 'X', sizeof(fingerprint));
-    if (wdf_capture_compute_chunk_fingerprint(
-            relative_root,
-            (uint32_t)(sizeof(relative_root) - 1U),
-            chunk_id,
-            (uint32_t)(sizeof(chunk_id) - 1U),
-            1,
-            fingerprint,
-            (uint32_t)sizeof(fingerprint),
-            &required) != WDF_CAPTURE_RESULT_INVALID_ARGUMENT ||
-        required != WDF_CAPTURE_CHUNK_FINGERPRINT_UTF8_CAPACITY ||
-        fingerprint[0] != '\0') {
-      fputs("C translation unit observed an incompatible fingerprint export\n",
-            stderr);
-      return 1;
-    }
-  }
-
-  {
-    static const char relative_root[] = "relative\\evidence";
-    static const char chunk_id[] = "chunk-1";
-    static const char fingerprint[] =
-        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
-    char manifest[32];
-    uint8_t frame[32];
-    uint32_t manifest_required = 99;
-    uint32_t frame_required = 99;
-    memset(manifest, 'X', sizeof(manifest));
-    memset(frame, 'X', sizeof(frame));
-    if (wdf_capture_extract_analysis_evidence(
-            relative_root,
-            (uint32_t)(sizeof(relative_root) - 1U),
-            chunk_id,
-            (uint32_t)(sizeof(chunk_id) - 1U),
-            1,
-            1,
-            64,
-            48,
-            1000,
-            fingerprint,
-            (uint32_t)(sizeof(fingerprint) - 1U),
-            manifest,
-            (uint32_t)sizeof(manifest),
-            &manifest_required) != WDF_CAPTURE_RESULT_INVALID_ARGUMENT ||
-        manifest_required != 0 || manifest[0] != '\0' ||
-        wdf_capture_read_analysis_evidence_frame(
-            relative_root,
-            (uint32_t)(sizeof(relative_root) - 1U),
-            chunk_id,
-            (uint32_t)(sizeof(chunk_id) - 1U),
-            fingerprint,
-            (uint32_t)(sizeof(fingerprint) - 1U),
-            0,
-            frame,
-            (uint32_t)sizeof(frame),
-            &frame_required) != WDF_CAPTURE_RESULT_INVALID_ARGUMENT ||
-        frame_required != 0 || frame[0] != 0) {
-      fputs("C translation unit observed incompatible evidence exports\n",
-            stderr);
-      return 1;
-    }
   }
 
   puts("C header and DLL compatibility test passed");

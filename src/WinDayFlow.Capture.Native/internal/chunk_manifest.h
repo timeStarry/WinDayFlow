@@ -8,22 +8,46 @@
 #define WINDAYFLOW_CHUNK_MANIFEST_H_
 
 #include <cstdint>
+#include <optional>
 #include <string>
+#include <vector>
 
 namespace windayflow::capture {
+
+inline constexpr uint32_t kCanonicalJpegQuality = 82U;
+
+struct ChunkFrameManifest {
+  uint32_t index = 0;
+  uint64_t offset_milliseconds = 0;
+  uint32_t byte_count = 0;
+  std::string sha256;
+
+  bool operator==(const ChunkFrameManifest&) const = default;
+};
+
+struct ChunkApplicationManifest {
+  std::string process_name_utf8;
+  uint32_t process_id = 0;
+  uint32_t cpu_usage_basis_points = 0;
+  uint64_t working_set_bytes = 0;
+  uint64_t private_memory_bytes = 0;
+
+  bool operator==(const ChunkApplicationManifest&) const = default;
+};
 
 struct ChunkManifest {
   std::string chunk_id;
   int64_t start_time_unix_ms = 0;
   int64_t end_time_unix_ms = 0;
-  uint32_t frame_count = 0;
-  uint32_t video_width = 0;
-  uint32_t video_height = 0;
-  uint32_t frame_rate_numerator = 0;
-  uint32_t frame_rate_denominator = 0;
+  uint32_t captured_frame_count = 0;
+  uint32_t frame_width = 0;
+  uint32_t frame_height = 0;
+  uint64_t frame_byte_count = 0;
   uint64_t persistence_generation = 0;
   uint64_t target_epoch = 0;
   bool display_wide_scope = false;
+  std::vector<ChunkFrameManifest> frames;
+  std::optional<ChunkApplicationManifest> application;
 };
 
 bool IsValidChunkManifest(const ChunkManifest& manifest) noexcept;

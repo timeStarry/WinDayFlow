@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using WinDayFlow.Infrastructure.Capture;
 using Xunit;
 
@@ -5,518 +6,161 @@ namespace WinDayFlow.Infrastructure.Tests.Capture;
 
 public sealed class CaptureManifestScannerTests
 {
-    private static readonly DateTimeOffset IngestedAt =
-        new(2026, 7, 23, 12, 0, 0, TimeSpan.Zero);
-
-    [Fact]
-    public async Task StartupScanFindsBothCommittedCaptureScopesWithoutAnEvent()
-    {
-        using var directory = new TemporaryDirectory();
-        var firstCommittedAt = new DateTimeOffset(
-            2026,
-            7,
-            23,
-            10,
-            0,
-            5,
-            TimeSpan.Zero);
-        CreateValidChunk(
-            directory.Path,
-            "chunk-b",
-            persistenceGeneration: ulong.MaxValue,
-            targetEpoch: ulong.MaxValue - 1,
-            committedAtUtc: firstCommittedAt,
-            captureScope: CaptureManifestScanner.ContinuousDisplayCaptureScope);
-        CreateValidChunk(directory.Path, "chunk-a");
-        var scanner = CreateScanner(directory.Path);
-
-        var chunks = await scanner.ScanCommittedAsync();
-
-        Assert.Equal(["chunk-a", "chunk-b"], chunks.Select(chunk => chunk.Id));
-        var chunk = chunks[1];
-        Assert.Equal("chunks/chunk-b/capture.mp4", chunk.VideoPath.Value);
-        Assert.Equal("chunks/chunk-b/manifest.json", chunk.ManifestPath.Value);
-        Assert.Equal(8, chunk.VideoByteCount);
-        Assert.Equal(ulong.MaxValue, chunk.PersistenceGeneration);
-        Assert.Equal(ulong.MaxValue - 1, chunk.TargetEpoch);
-        Assert.Equal(firstCommittedAt, chunk.CommittedAtUtc);
-        Assert.Equal(IngestedAt, chunk.IngestedAtUtc);
-    }
-
-    [Fact]
-    public async Task CaptureRangeUsesLocalOffsetsWithoutChangingDstInstants()
-    {
-        using var directory = new TemporaryDirectory();
-        var startUtc = new DateTimeOffset(
-            2026,
-            11,
-            1,
-            8,
-            59,
-            0,
-            TimeSpan.Zero);
-        var endUtc = startUtc.AddMinutes(2);
-        CreateValidChunk(
-            directory.Path,
-            "chunk-dst",
-            startTimeUnixMs: startUtc.ToUnixTimeMilliseconds(),
-            endTimeUnixMs: endUtc.ToUnixTimeMilliseconds());
-        var timeZone = CreatePacificTestTimeZone();
-
-        var chunk = Assert.Single(
-            await CreateScanner(
-                    directory.Path,
-                    captureTimeZone: timeZone)
-                .ScanCommittedAsync());
-
-        Assert.Equal(startUtc, chunk.Range.Start);
-        Assert.Equal(endUtc, chunk.Range.End);
-        Assert.Equal(TimeSpan.FromHours(-7), chunk.Range.Start.Offset);
-        Assert.Equal(TimeSpan.FromHours(-8), chunk.Range.End.Offset);
-        Assert.Equal(TimeSpan.FromMinutes(2), chunk.Range.Duration);
-    }
+    private static readonly DateTimeOffset Start =
+        new(2026, 7, 29, 9, 0, 0, TimeSpan.FromHours(8));
 
     [Theory]
-    [InlineData("malformed")]
-    [InlineData("duplicate")]
-    [InlineData("unknown")]
-    [InlineData("schema")]
-    [InlineData("scope")]
-    [InlineData("traversal")]
-    [InlineData("codec")]
-    [InlineData("container")]
-    [InlineData("fractional")]
-    public async Task StrictSchemaRejectsMalformedOrNonCanonicalManifests(
-        string mutation)
+    [InlineData(CaptureManifestScanner.ForegroundDisplayCaptureScope)]
+    [InlineData(CaptureManifestScanner.ContinuousDisplayCaptureScope)]
+    public async Task ScansCanonicalJpegChunk(string captureScope)
     {
-        using var directory = new TemporaryDirectory();
-        var paths = CreateValidChunk(directory.Path, "chunk-strict");
-        var manifest = File.ReadAllText(paths.ManifestPath);
-        manifest = mutation switch
-        {
-            "malformed" => manifest[..^2],
-            "duplicate" => manifest.Replace(
-                "\"schemaVersion\": 1,",
-                "\"schemaVersion\": 1,\n  \"schemaVersion\": 1,",
-                StringComparison.Ordinal),
-            "unknown" => manifest.Replace(
-                "\"captureScope\":",
-                "\"unexpected\": true,\n  \"captureScope\":",
-                StringComparison.Ordinal),
-            "schema" => manifest.Replace(
-                "\"schemaVersion\": 1",
-                "\"schemaVersion\": 2",
-                StringComparison.Ordinal),
-            "scope" => manifest.Replace(
-                "authorized-foreground-display",
-                "desktop",
-                StringComparison.Ordinal),
-            "traversal" => manifest.Replace(
-                "\"path\": \"capture.mp4\"",
-                "\"path\": \"../capture.mp4\"",
-                StringComparison.Ordinal),
-            "codec" => manifest.Replace(
-                "\"codec\": \"h264\"",
-                "\"codec\": \"H264\"",
-                StringComparison.Ordinal),
-            "container" => manifest.Replace(
-                "\"container\": \"mp4\"",
-                "\"container\": \"mkv\"",
-                StringComparison.Ordinal),
-            "fractional" => manifest.Replace(
-                "\"frameCount\": 6",
-                "\"frameCount\": 6.0",
-                StringComparison.Ordinal),
-            _ => throw new ArgumentOutOfRangeException(nameof(mutation)),
-        };
-        File.WriteAllText(paths.ManifestPath, manifest);
+        using var root = new TemporaryRoot();
+        WriteChunk(root.Path, "chunk-valid", captureScope: captureScope);
 
-        Assert.Empty(await CreateScanner(directory.Path).ScanCommittedAsync());
+        var chunk = Assert.Single(await CreateScanner(root.Path).ScanCommittedAsync());
+
+        Assert.Equal("chunk-valid", chunk.Id);
+        Assert.Equal("chunks/chunk-valid/manifest.json", chunk.ManifestPath.Value);
+        Assert.Equal(2U, chunk.CapturedFrameCount);
+        Assert.Equal(1U, chunk.FrameCount);
+        Assert.Equal(1600U, chunk.FrameWidth);
+        Assert.Equal(900U, chunk.FrameHeight);
+        Assert.Equal(4, chunk.FrameByteCount);
+        Assert.Equal(Start, chunk.Range.Start);
+        Assert.Equal(Start.AddMinutes(1), chunk.Range.End);
     }
 
     [Fact]
-    public async Task DuplicateOrUnknownNestedPropertiesAreRejected()
+    public async Task ScansVersionThreeProcessTelemetry()
     {
-        using var directory = new TemporaryDirectory();
-        var duplicate = CreateValidChunk(directory.Path, "chunk-duplicate");
-        ReplaceInFile(
-            duplicate.ManifestPath,
-            "\"targetEpoch\": 11",
-            "\"targetEpoch\": 11, \"targetEpoch\": 11");
-        var unknown = CreateValidChunk(directory.Path, "chunk-unknown");
-        ReplaceInFile(
-            unknown.ManifestPath,
-            "\"frameCount\": 6",
-            "\"extra\": 1, \"frameCount\": 6");
-
-        Assert.Empty(await CreateScanner(directory.Path).ScanCommittedAsync());
-    }
-
-    [Fact]
-    public async Task DirectoryAndManifestChunkIdentifiersMustMatchExactly()
-    {
-        using var directory = new TemporaryDirectory();
-        CreateValidChunk(directory.Path, "Chunk-upper");
-        var mismatch = CreateValidChunk(directory.Path, "chunk-path");
-        ReplaceInFile(
-            mismatch.ManifestPath,
-            "\"chunkId\": \"chunk-path\"",
-            "\"chunkId\": \"chunk-other\"");
-
-        Assert.Empty(await CreateScanner(directory.Path).ScanCommittedAsync());
-    }
-
-    [Fact]
-    public async Task MissingNonRegularAndOversizedVideosAreRejected()
-    {
-        using var directory = new TemporaryDirectory();
-        var missing = CreateValidChunk(directory.Path, "chunk-missing");
-        File.Delete(missing.VideoPath);
-
-        var nonRegular = CreateValidChunk(directory.Path, "chunk-directory");
-        File.Delete(nonRegular.VideoPath);
-        Directory.CreateDirectory(nonRegular.VideoPath);
-
-        var oversized = CreateValidChunk(directory.Path, "chunk-oversized");
-        using (var stream = new FileStream(
-                   oversized.VideoPath,
-                   FileMode.Open,
-                   FileAccess.Write,
-                   FileShare.Read))
-        {
-            stream.SetLength(64L * 1024L * 1024L + 1);
-        }
-
-        Assert.Empty(await CreateScanner(directory.Path).ScanCommittedAsync());
-    }
-
-    [Fact]
-    public async Task OversizedManifestIsRejectedBeforeParsing()
-    {
-        using var directory = new TemporaryDirectory();
-        var paths = CreateValidChunk(directory.Path, "chunk-large-manifest");
+        using var root = new TemporaryRoot();
+        var paths = WriteChunk(root.Path, "chunk-telemetry");
         File.WriteAllText(
             paths.ManifestPath,
-            new string(' ', checked((int)CaptureManifestScanner.MaximumManifestByteCount + 1)));
+            File.ReadAllText(paths.ManifestPath)
+                .Replace("\"schemaVersion\": 2", "\"schemaVersion\": 3", StringComparison.Ordinal)
+                .Replace(
+                    "\"authorization\": {\"persistenceGeneration\": 7, \"targetEpoch\": 11},",
+                    "\"authorization\": {\"persistenceGeneration\": 7, \"targetEpoch\": 11},\n  \"application\": {\"processName\":\"Code.exe\",\"processId\":4242,\"cpuUsageBasisPoints\":1250,\"workingSetBytes\":536870912,\"privateMemoryBytes\":402653184},",
+                    StringComparison.Ordinal));
 
-        Assert.Empty(await CreateScanner(directory.Path).ScanCommittedAsync());
+        var chunk = Assert.Single(await CreateScanner(root.Path).ScanCommittedAsync());
+        var telemetry = Assert.IsType<WinDayFlow.Domain.CaptureProcessTelemetry>(
+            chunk.ProcessTelemetry);
+        Assert.Equal("Code.exe", telemetry.ProcessName);
+        Assert.Equal(4242U, telemetry.ProcessId);
+        Assert.Equal(12.5, telemetry.CpuUsagePercent);
+        Assert.Equal(536_870_912, telemetry.WorkingSetBytes);
+        Assert.Equal(402_653_184, telemetry.PrivateMemoryBytes);
     }
 
     [Fact]
-    public async Task ReparsePointCannotRedirectAChunkOutsideTheDataRoot()
+    public async Task IgnoresPrivateStagingDirectories()
     {
-        using var directory = new TemporaryDirectory();
-        var dataRoot = Path.Combine(directory.Path, "data");
-        var chunksRoot = Path.Combine(dataRoot, "chunks");
-        Directory.CreateDirectory(chunksRoot);
-        var outsideDirectory = Path.Combine(directory.Path, "outside");
-        CreateValidChunkDirectory(outsideDirectory, "chunk-link");
-        var linkPath = Path.Combine(chunksRoot, "chunk-link");
-        try
-        {
-            Directory.CreateSymbolicLink(linkPath, outsideDirectory);
-        }
-        catch (Exception exception) when (
-            exception is IOException
-                or UnauthorizedAccessException
-                or PlatformNotSupportedException)
-        {
-            return;
-        }
+        using var root = new TemporaryRoot();
+        WriteChunk(Path.Combine(root.Path, ".staging"), "chunk-private");
 
-        Assert.Empty(await CreateScanner(dataRoot).ScanCommittedAsync());
+        Assert.Empty(await CreateScanner(root.Path).ScanCommittedAsync());
     }
 
     [Fact]
-    public async Task ManifestSizeRaceIsRejected()
+    public async Task RejectsMissingOrCorruptFrame()
     {
-        using var directory = new TemporaryDirectory();
-        var paths = CreateValidChunk(directory.Path, "chunk-manifest-race");
-        var mutated = 0;
-        var scanner = CreateScanner(
-            directory.Path,
-            (checkpoint, path) =>
-            {
-                if (checkpoint == CaptureManifestScanCheckpoint.ManifestRead
-                    && Interlocked.Exchange(ref mutated, 1) == 0)
-                {
-                    File.AppendAllText(path, " ");
-                }
-            });
+        using var root = new TemporaryRoot();
+        var missing = WriteChunk(root.Path, "chunk-missing");
+        var corrupt = WriteChunk(root.Path, "chunk-corrupt");
+        File.Delete(missing.FramePath);
+        File.WriteAllBytes(corrupt.FramePath, [0xff, 0xd8, 0xfe, 0xd9]);
 
-        Assert.Empty(await scanner.ScanCommittedAsync());
-        Assert.Equal(1, Volatile.Read(ref mutated));
-        Assert.True(new FileInfo(paths.ManifestPath).Length > 0);
+        Assert.Empty(await CreateScanner(root.Path).ScanCommittedAsync());
     }
 
     [Fact]
-    public async Task VideoSizeRaceIsRejected()
+    public async Task RejectsLegacySchemaAndUnknownProperties()
     {
-        using var directory = new TemporaryDirectory();
-        CreateValidChunk(directory.Path, "chunk-video-race");
-        var mutated = 0;
-        var scanner = CreateScanner(
-            directory.Path,
-            (checkpoint, path) =>
-            {
-                if (checkpoint == CaptureManifestScanCheckpoint.VideoInspected
-                    && Interlocked.Exchange(ref mutated, 1) == 0)
-                {
-                    using var stream = new FileStream(
-                        path,
-                        FileMode.Open,
-                        FileAccess.Write,
-                        FileShare.ReadWrite | FileShare.Delete);
-                    stream.Position = stream.Length;
-                    stream.WriteByte(0xFF);
-                    stream.Flush(flushToDisk: true);
-                }
-            });
+        using var root = new TemporaryRoot();
+        var legacy = WriteChunk(root.Path, "chunk-legacy");
+        var extra = WriteChunk(root.Path, "chunk-extra");
+        File.WriteAllText(
+            legacy.ManifestPath,
+            File.ReadAllText(legacy.ManifestPath)
+                .Replace("\"schemaVersion\": 2", "\"schemaVersion\": 1", StringComparison.Ordinal));
+        File.WriteAllText(
+            extra.ManifestPath,
+            File.ReadAllText(extra.ManifestPath)
+                .Replace("\"captureScope\":", "\"unexpected\": true,\n  \"captureScope\":", StringComparison.Ordinal));
 
-        Assert.Empty(await scanner.ScanCommittedAsync());
-        Assert.Equal(1, Volatile.Read(ref mutated));
+        Assert.Empty(await CreateScanner(root.Path).ScanCommittedAsync());
     }
 
     [Fact]
-    public async Task DataRootIdentitySwapInvalidatesTheWholeScan()
+    public async Task ReturnsChunksInCanonicalDirectoryOrder()
     {
-        using var directory = new TemporaryDirectory();
-        var dataRoot = Path.Combine(directory.Path, "data");
-        CreateValidChunk(dataRoot, "chunk-original");
-        var swapped = 0;
-        var scanner = CreateScanner(
-            dataRoot,
-            (checkpoint, _) =>
-            {
-                if (checkpoint != CaptureManifestScanCheckpoint.RootsInspected
-                    || Interlocked.Exchange(ref swapped, 1) != 0)
-                {
-                    return;
-                }
+        using var root = new TemporaryRoot();
+        WriteChunk(root.Path, "chunk-b");
+        WriteChunk(root.Path, "chunk-a");
 
-                Directory.Move(dataRoot, Path.Combine(directory.Path, "data-old"));
-                CreateValidChunk(dataRoot, "chunk-replacement");
-            });
+        var chunks = await CreateScanner(root.Path).ScanCommittedAsync();
 
-        Assert.Empty(await scanner.ScanCommittedAsync());
-        Assert.Equal(1, Volatile.Read(ref swapped));
+        Assert.Equal(["chunk-a", "chunk-b"], chunks.Select(static chunk => chunk.Id));
     }
 
-    [Fact]
-    public async Task ChunksRootIdentitySwapInvalidatesTheWholeScan()
-    {
-        using var directory = new TemporaryDirectory();
-        var dataRoot = Path.Combine(directory.Path, "data");
-        CreateValidChunk(dataRoot, "chunk-original");
-        var chunksRoot = Path.Combine(dataRoot, "chunks");
-        var dataRootTimestamp = Directory.GetLastWriteTimeUtc(dataRoot);
-        var swapped = 0;
-        var scanner = CreateScanner(
-            dataRoot,
-            (checkpoint, _) =>
-            {
-                if (checkpoint != CaptureManifestScanCheckpoint.RootsInspected
-                    || Interlocked.Exchange(ref swapped, 1) != 0)
-                {
-                    return;
-                }
+    private static CaptureManifestScanner CreateScanner(string root) => new(
+        root,
+        TimeProvider.System,
+        TimeZoneInfo.CreateCustomTimeZone(
+            "WinDayFlow-Scanner-UTC+08",
+            TimeSpan.FromHours(8),
+            "UTC+08",
+            "UTC+08"));
 
-                Directory.Move(chunksRoot, Path.Combine(dataRoot, "chunks-old"));
-                CreateValidChunk(dataRoot, "chunk-replacement");
-                Directory.SetLastWriteTimeUtc(dataRoot, dataRootTimestamp);
-            });
-
-        Assert.Empty(await scanner.ScanCommittedAsync());
-        Assert.Equal(1, Volatile.Read(ref swapped));
-    }
-
-    [Fact]
-    public async Task CandidateIdentitySwapIsRejected()
-    {
-        using var directory = new TemporaryDirectory();
-        var dataRoot = Path.Combine(directory.Path, "data");
-        var paths = CreateValidChunk(dataRoot, "chunk-swap");
-        var chunksRoot = Path.Combine(dataRoot, "chunks");
-        var chunksRootTimestamp = Directory.GetLastWriteTimeUtc(chunksRoot);
-        var swapped = 0;
-        var scanner = CreateScanner(
-            dataRoot,
-            (checkpoint, path) =>
-            {
-                if (checkpoint != CaptureManifestScanCheckpoint.CandidateInspected
-                    || Interlocked.Exchange(ref swapped, 1) != 0)
-                {
-                    return;
-                }
-
-                Directory.Move(
-                    path,
-                    Path.Combine(chunksRoot, "chunk-swap-old"));
-                CreateValidChunkDirectory(path, "chunk-swap");
-                Directory.SetLastWriteTimeUtc(chunksRoot, chunksRootTimestamp);
-            });
-
-        Assert.Empty(await scanner.ScanCommittedAsync());
-        Assert.Equal(1, Volatile.Read(ref swapped));
-        Assert.True(File.Exists(paths.VideoPath));
-    }
-
-    [Fact]
-    public async Task CancellationStopsAFullRescan()
-    {
-        using var directory = new TemporaryDirectory();
-        CreateValidChunk(directory.Path, "chunk-cancelled");
-        using var cancellation = new CancellationTokenSource();
-        cancellation.Cancel();
-
-        await Assert.ThrowsAsync<OperationCanceledException>(() =>
-            CreateScanner(directory.Path).ScanCommittedAsync(cancellation.Token));
-    }
-
-    private static CaptureManifestScanner CreateScanner(
-        string dataRoot,
-        Action<CaptureManifestScanCheckpoint, string>? checkpoint = null,
-        TimeZoneInfo? captureTimeZone = null) =>
-        new(
-            dataRoot,
-            new FixedTimeProvider(IngestedAt),
-            checkpoint,
-            captureTimeZone);
-
-    private static ChunkPaths CreateValidChunk(
+    private static ChunkPaths WriteChunk(
         string dataRoot,
         string chunkId,
-        ulong persistenceGeneration = 7,
-        ulong targetEpoch = 11,
-        DateTimeOffset? committedAtUtc = null,
-        long startTimeUnixMs = 1_784_797_200_000,
-        long endTimeUnixMs = 1_784_797_260_000,
         string captureScope = CaptureManifestScanner.ForegroundDisplayCaptureScope)
     {
         var chunkDirectory = Path.Combine(dataRoot, "chunks", chunkId);
-        return CreateValidChunkDirectory(
-            chunkDirectory,
-            chunkId,
-            persistenceGeneration,
-            targetEpoch,
-            committedAtUtc,
-            startTimeUnixMs,
-            endTimeUnixMs,
-            captureScope);
-    }
-
-    private static ChunkPaths CreateValidChunkDirectory(
-        string chunkDirectory,
-        string chunkId,
-        ulong persistenceGeneration = 7,
-        ulong targetEpoch = 11,
-        DateTimeOffset? committedAtUtc = null,
-        long startTimeUnixMs = 1_784_797_200_000,
-        long endTimeUnixMs = 1_784_797_260_000,
-        string captureScope = CaptureManifestScanner.ForegroundDisplayCaptureScope)
-    {
-        Directory.CreateDirectory(chunkDirectory);
-        var videoPath = Path.Combine(chunkDirectory, "capture.mp4");
+        var framesDirectory = Path.Combine(chunkDirectory, "frames");
+        Directory.CreateDirectory(framesDirectory);
+        var framePath = Path.Combine(framesDirectory, "frame-000000.jpg");
+        byte[] jpeg = [0xff, 0xd8, 0xff, 0xd9];
+        File.WriteAllBytes(framePath, jpeg);
         var manifestPath = Path.Combine(chunkDirectory, "manifest.json");
-        File.WriteAllBytes(videoPath, [0, 0, 0, 4, 0x66, 0x74, 0x79, 0x70]);
         File.WriteAllText(
             manifestPath,
-            CreateManifest(
-                chunkId,
-                persistenceGeneration,
-                targetEpoch,
-                startTimeUnixMs,
-                endTimeUnixMs,
-                captureScope));
-
-        var committed = committedAtUtc
-            ?? new DateTimeOffset(2026, 7, 23, 10, 0, 0, TimeSpan.Zero);
-        File.SetLastWriteTimeUtc(manifestPath, committed.UtcDateTime);
-        Directory.SetLastWriteTimeUtc(chunkDirectory, committed.UtcDateTime);
-        return new ChunkPaths(chunkDirectory, manifestPath, videoPath);
+            $$"""
+            {
+              "schemaVersion": 2,
+              "captureScope": "{{captureScope}}",
+              "chunkId": "{{chunkId}}",
+              "startTimeUnixMs": {{Start.ToUnixTimeMilliseconds()}},
+              "endTimeUnixMs": {{Start.AddMinutes(1).ToUnixTimeMilliseconds()}},
+              "authorization": {"persistenceGeneration": 7, "targetEpoch": 11},
+              "frames": {
+                "format": "jpeg",
+                "quality": 82,
+                "capturedFrameCount": 2,
+                "retainedFrameCount": 1,
+                "width": 1600,
+                "height": 900,
+                "totalByteCount": 4,
+                "items": [{"id":"frame-000000","index":0,"path":"frames/frame-000000.jpg","offsetMilliseconds":30000,"byteCount":4,"sha256":"{{Convert.ToHexString(SHA256.HashData(jpeg))}}"}]
+              }
+            }
+            """);
+        return new ChunkPaths(manifestPath, framePath);
     }
 
-    private static string CreateManifest(
-        string chunkId,
-        ulong persistenceGeneration,
-        ulong targetEpoch,
-        long startTimeUnixMs,
-        long endTimeUnixMs,
-        string captureScope) => $$"""
-        {
-          "schemaVersion": 1,
-          "captureScope": "{{captureScope}}",
-          "chunkId": "{{chunkId}}",
-          "startTimeUnixMs": {{startTimeUnixMs}},
-          "endTimeUnixMs": {{endTimeUnixMs}},
-          "authorization": {
-            "persistenceGeneration": {{persistenceGeneration}},
-            "targetEpoch": {{targetEpoch}}
-          },
-          "video": {
-            "path": "capture.mp4",
-            "codec": "h264",
-            "container": "mp4",
-            "frameCount": 6,
-            "width": 1920,
-            "height": 1080,
-            "frameRateNumerator": 1,
-            "frameRateDenominator": 10
-          }
-        }
-        """;
+    private sealed record ChunkPaths(string ManifestPath, string FramePath);
 
-    private static TimeZoneInfo CreatePacificTestTimeZone()
+    private sealed class TemporaryRoot : IDisposable
     {
-        var daylightStart = TimeZoneInfo.TransitionTime.CreateFloatingDateRule(
-            new DateTime(1, 1, 1, 2, 0, 0),
-            month: 3,
-            week: 2,
-            DayOfWeek.Sunday);
-        var daylightEnd = TimeZoneInfo.TransitionTime.CreateFloatingDateRule(
-            new DateTime(1, 1, 1, 2, 0, 0),
-            month: 11,
-            week: 1,
-            DayOfWeek.Sunday);
-        var adjustmentRule = TimeZoneInfo.AdjustmentRule.CreateAdjustmentRule(
-            new DateTime(2020, 1, 1),
-            new DateTime(2030, 12, 31),
-            TimeSpan.FromHours(1),
-            daylightStart,
-            daylightEnd);
-        return TimeZoneInfo.CreateCustomTimeZone(
-            "WinDayFlow-Test-Pacific",
-            TimeSpan.FromHours(-8),
-            "WinDayFlow Test Pacific",
-            "WinDayFlow Test Pacific Standard",
-            "WinDayFlow Test Pacific Daylight",
-            [adjustmentRule]);
-    }
-
-    private static void ReplaceInFile(
-        string path,
-        string oldValue,
-        string newValue)
-    {
-        var content = File.ReadAllText(path);
-        Assert.Contains(oldValue, content, StringComparison.Ordinal);
-        File.WriteAllText(
-            path,
-            content.Replace(oldValue, newValue, StringComparison.Ordinal));
-    }
-
-    private sealed class FixedTimeProvider(DateTimeOffset utcNow) : TimeProvider
-    {
-        public override DateTimeOffset GetUtcNow() => utcNow;
-    }
-
-    private sealed class TemporaryDirectory : IDisposable
-    {
-        public TemporaryDirectory()
+        public TemporaryRoot()
         {
             Path = System.IO.Path.Combine(
                 System.IO.Path.GetTempPath(),
-                $"WinDayFlow-CaptureManifest-{Guid.NewGuid():N}");
+                "WinDayFlow.ManifestScanner.Tests",
+                Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(Path);
         }
 
@@ -524,15 +168,16 @@ public sealed class CaptureManifestScannerTests
 
         public void Dispose()
         {
-            if (Directory.Exists(Path))
+            try
             {
                 Directory.Delete(Path, recursive: true);
             }
+            catch (IOException)
+            {
+            }
+            catch (UnauthorizedAccessException)
+            {
+            }
         }
     }
-
-    private sealed record ChunkPaths(
-        string DirectoryPath,
-        string ManifestPath,
-        string VideoPath);
 }

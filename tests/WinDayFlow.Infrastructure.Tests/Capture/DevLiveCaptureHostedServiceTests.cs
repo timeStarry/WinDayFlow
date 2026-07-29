@@ -9,7 +9,7 @@ namespace WinDayFlow.Infrastructure.Tests.Capture;
 public sealed class DevLiveCaptureHostedServiceTests
 {
     [Fact]
-    public void DevNativeBinaryAdvertisesLiveWriterButNotExtractionCapability()
+    public void DevNativeBinaryAdvertisesCanonicalJpegWriter()
     {
         if (!OperatingSystem.IsWindows()
             || !Environment.Is64BitProcess
@@ -28,9 +28,7 @@ public sealed class DevLiveCaptureHostedServiceTests
         Assert.True(probe.Capabilities.HasFlag(
             NativeCaptureCapabilities.ScreenCapture));
         Assert.True(probe.Capabilities.HasFlag(
-            NativeCaptureCapabilities.H264Chunks));
-        Assert.False(probe.Capabilities.HasFlag(
-            NativeCaptureCapabilities.EvidenceExtraction));
+            NativeCaptureCapabilities.CanonicalJpegChunks));
     }
 
     [Fact]
