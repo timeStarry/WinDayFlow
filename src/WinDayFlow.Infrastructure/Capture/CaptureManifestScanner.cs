@@ -2,11 +2,14 @@ using System.Runtime.InteropServices;
 using System.Text.Json;
 using Microsoft.Win32.SafeHandles;
 using WinDayFlow.Application.Capture;
+using WinDayFlow.Application.Settings;
 using WinDayFlow.Domain;
 
 namespace WinDayFlow.Infrastructure.Capture;
 
-public sealed class CaptureManifestScanner : ICaptureManifestScanner
+public sealed class CaptureManifestScanner :
+    ICaptureManifestScanner,
+    ICaptureManifestContextSource
 {
     internal const long MaximumManifestByteCount = 64L * 1024L;
 
@@ -36,6 +39,9 @@ public sealed class CaptureManifestScanner : ICaptureManifestScanner
     private readonly TimeZoneInfo _captureTimeZone;
     private readonly Action<CaptureManifestScanCheckpoint, string>? _checkpoint;
     private readonly CanonicalCaptureFrameArchive _frameArchive;
+    private readonly object _contextSync = new();
+    private readonly Dictionary<string, IReadOnlyList<CaptureContextSample>>
+        _contextByChunk = new(StringComparer.Ordinal);
 
     public CaptureManifestScanner(
         string dataRootPath,
@@ -127,6 +133,21 @@ public sealed class CaptureManifestScanner : ICaptureManifestScanner
         return chunks.ToArray();
     }
 
+    public Task<IReadOnlyList<CaptureContextSample>> ReadContextAsync(
+        CaptureChunk chunk,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(chunk);
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (_contextSync)
+        {
+            return Task.FromResult(
+                _contextByChunk.TryGetValue(chunk.Id, out var samples)
+                    ? samples
+                    : (IReadOnlyList<CaptureContextSample>)[]);
+        }
+    }
+
     private async Task<CaptureChunk?> TryReadChunkAsync(
         string candidateDirectory,
         DateTimeOffset ingestedAtUtc,
@@ -186,7 +207,9 @@ public sealed class CaptureManifestScanner : ICaptureManifestScanner
                     directoryBefore.LastWriteTimeFileTime,
                     manifestRead.Value.Snapshot.LastWriteTimeFileTime),
                 ingestedAtUtc,
-                processTelemetry: manifest.ProcessTelemetry);
+                processTelemetry: manifest.ProcessTelemetry,
+                blackFrameCount: manifest.BlackFrameCount,
+                duplicateFrameCount: manifest.DuplicateFrameCount);
             var frames = await _frameArchive.ListFramesAsync(chunk, cancellationToken)
                 .ConfigureAwait(false);
             foreach (var frame in frames)
@@ -202,6 +225,11 @@ public sealed class CaptureManifestScanner : ICaptureManifestScanner
                 || !directoryBefore.IsSameEntryAndTimestamp(directoryAfter))
             {
                 return null;
+            }
+
+            lock (_contextSync)
+            {
+                _contextByChunk[chunk.Id] = manifest.ContextSamples;
             }
 
             return chunk;
@@ -294,29 +322,18 @@ public sealed class CaptureManifestScanner : ICaptureManifestScanner
         var root = document.RootElement;
         if (root.ValueKind != JsonValueKind.Object
             || !TryReadCanonicalUInt32(root, "schemaVersion", out var schemaVersion)
-            || schemaVersion is not (2 or 3)
+            || schemaVersion != 4
             || !HasExactProperties(
                 root,
-                schemaVersion == 2
-                    ? [
-                        "schemaVersion",
-                        "captureScope",
-                        "chunkId",
-                        "startTimeUnixMs",
-                        "endTimeUnixMs",
-                        "authorization",
-                        "frames",
-                    ]
-                    : [
-                        "schemaVersion",
-                        "captureScope",
-                        "chunkId",
-                        "startTimeUnixMs",
-                        "endTimeUnixMs",
-                        "authorization",
-                        "application",
-                        "frames",
-                    ])
+                "schemaVersion",
+                "captureScope",
+                "chunkId",
+                "startTimeUnixMs",
+                "endTimeUnixMs",
+                "authorization",
+                "application",
+                "contextSamples",
+                "frames")
             || !TryReadString(root, "captureScope", out var captureScope)
             || captureScope is not (ForegroundDisplayCaptureScope
                 or ContinuousDisplayCaptureScope)
@@ -331,7 +348,7 @@ public sealed class CaptureManifestScanner : ICaptureManifestScanner
         }
 
         CaptureProcessTelemetry? processTelemetry = null;
-        if (schemaVersion == 3)
+        if (schemaVersion == 4)
         {
             var application = root.GetProperty("application");
             if (application.ValueKind == JsonValueKind.Object)
@@ -407,7 +424,9 @@ public sealed class CaptureManifestScanner : ICaptureManifestScanner
                 frames,
                 "format",
                 "quality",
-                "capturedFrameCount",
+                "sampledFrameCount",
+                "blackFrameCount",
+                "duplicateFrameCount",
                 "retainedFrameCount",
                 "width",
                 "height",
@@ -418,16 +437,25 @@ public sealed class CaptureManifestScanner : ICaptureManifestScanner
             || quality != 82
             || !TryReadCanonicalUInt32(
                 frames,
-                "capturedFrameCount",
+                "sampledFrameCount",
                 out var capturedFrameCount)
             || capturedFrameCount == 0
             || !TryReadCanonicalUInt32(
                 frames,
+                "blackFrameCount",
+                out var blackFrameCount)
+            || !TryReadCanonicalUInt32(
+                frames,
+                "duplicateFrameCount",
+                out var duplicateFrameCount)
+            || !TryReadCanonicalUInt32(
+                frames,
                 "retainedFrameCount",
                 out var frameCount)
-            || frameCount == 0
             || frameCount > capturedFrameCount
             || frameCount > CaptureChunk.MaximumFramesPerChunk
+            || (ulong)blackFrameCount + duplicateFrameCount + frameCount
+                != capturedFrameCount
             || !TryReadCanonicalUInt32(frames, "width", out var width)
             || width < 2
             || (width & 1U) != 0
@@ -438,8 +466,9 @@ public sealed class CaptureManifestScanner : ICaptureManifestScanner
                 frames,
                 "totalByteCount",
                 out var totalByteCount)
-            || totalByteCount == 0
             || totalByteCount > CaptureChunk.MaximumFrameByteCount
+            || (frameCount == 0 && totalByteCount != 0)
+            || (frameCount != 0 && totalByteCount == 0)
             || frames.GetProperty("items").ValueKind != JsonValueKind.Array
             || frames.GetProperty("items").GetArrayLength() != frameCount)
         {
@@ -448,6 +477,16 @@ public sealed class CaptureManifestScanner : ICaptureManifestScanner
 
         var startUtc = DateTimeOffset.FromUnixTimeMilliseconds(startUnixMs);
         var endUtc = DateTimeOffset.FromUnixTimeMilliseconds(endUnixMs);
+        if (!TryReadContextSamples(
+                root.GetProperty("contextSamples"),
+                chunkId,
+                TimeZoneInfo.ConvertTime(startUtc, captureTimeZone),
+                TimeZoneInfo.ConvertTime(endUtc, captureTimeZone),
+                capturedFrameCount,
+                out var contextSamples))
+        {
+            return false;
+        }
         manifest = new ParsedManifest(
             TimeZoneInfo.ConvertTime(startUtc, captureTimeZone),
             TimeZoneInfo.ConvertTime(endUtc, captureTimeZone),
@@ -458,7 +497,135 @@ public sealed class CaptureManifestScanner : ICaptureManifestScanner
             totalByteCount,
             persistenceGeneration,
             targetEpoch,
-            processTelemetry);
+            processTelemetry,
+            blackFrameCount,
+            duplicateFrameCount,
+            contextSamples);
+        return true;
+    }
+
+    private static bool TryReadContextSamples(
+        JsonElement element,
+        string chunkId,
+        DateTimeOffset start,
+        DateTimeOffset end,
+        uint sampledFrameCount,
+        out IReadOnlyList<CaptureContextSample> samples)
+    {
+        samples = [];
+        if (element.ValueKind != JsonValueKind.Array
+            || element.GetArrayLength() > sampledFrameCount)
+        {
+            return false;
+        }
+
+        var parsed = new List<CaptureContextSample>(element.GetArrayLength());
+        uint? previousIndex = null;
+        ulong? previousOffset = null;
+        foreach (var item in element.EnumerateArray())
+        {
+            if (item.ValueKind != JsonValueKind.Object
+                || !HasExactProperties(
+                    item,
+                    "sampleIndex",
+                    "offsetMilliseconds",
+                    "application")
+                || !TryReadCanonicalUInt32(item, "sampleIndex", out var sampleIndex)
+                || sampleIndex >= sampledFrameCount
+                || !TryReadCanonicalUInt64(
+                    item,
+                    "offsetMilliseconds",
+                    out var offsetMilliseconds)
+                || offsetMilliseconds >= (ulong)(end - start).TotalMilliseconds
+                || previousIndex >= sampleIndex
+                || previousOffset >= offsetMilliseconds)
+            {
+                return false;
+            }
+
+            CaptureContextApplication? application = null;
+            var applicationElement = item.GetProperty("application");
+            if (applicationElement.ValueKind == JsonValueKind.Object)
+            {
+                if (!HasExactProperties(
+                        applicationElement,
+                        "applicationId",
+                        "displayName",
+                        "processId",
+                        "cpuUsageBasisPoints",
+                        "workingSetBytes",
+                        "privateMemoryBytes")
+                    || !TryReadString(
+                        applicationElement,
+                        "applicationId",
+                        out var serializedApplicationId)
+                    || !TryReadString(
+                        applicationElement,
+                        "displayName",
+                        out var displayName)
+                    || !TryReadCanonicalUInt32(
+                        applicationElement,
+                        "processId",
+                        out var processId)
+                    || !TryReadCanonicalUInt32(
+                        applicationElement,
+                        "cpuUsageBasisPoints",
+                        out var cpuUsageBasisPoints)
+                    || !TryReadCanonicalUInt64(
+                        applicationElement,
+                        "workingSetBytes",
+                        out var workingSetBytes)
+                    || !TryReadCanonicalUInt64(
+                        applicationElement,
+                        "privateMemoryBytes",
+                        out var privateMemoryBytes)
+                    || workingSetBytes > long.MaxValue
+                    || privateMemoryBytes > long.MaxValue)
+                {
+                    return false;
+                }
+
+                var identityValue = displayName;
+                if (!CaptureExclusionRule.TryNormalizeApplicationIdentity(
+                        ApplicationIdentityKind.ExecutableName,
+                        identityValue,
+                        out identityValue))
+                {
+                    return false;
+                }
+                var applicationId = $"process:{identityValue.ToLowerInvariant()}";
+                if (!string.Equals(
+                        serializedApplicationId,
+                        applicationId,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    return false;
+                }
+                application = new CaptureContextApplication(
+                    applicationId,
+                    displayName,
+                    ApplicationIdentityKind.ExecutableName,
+                    identityValue,
+                    processId,
+                    cpuUsageBasisPoints,
+                    checked((long)workingSetBytes),
+                    checked((long)privateMemoryBytes));
+            }
+            else if (applicationElement.ValueKind != JsonValueKind.Null)
+            {
+                return false;
+            }
+
+            parsed.Add(new CaptureContextSample(
+                chunkId,
+                checked((int)sampleIndex),
+                start.AddMilliseconds(offsetMilliseconds),
+                application));
+            previousIndex = sampleIndex;
+            previousOffset = offsetMilliseconds;
+        }
+
+        samples = Array.AsReadOnly(parsed.ToArray());
         return true;
     }
 
@@ -759,7 +926,10 @@ public sealed class CaptureManifestScanner : ICaptureManifestScanner
         ulong TotalByteCount,
         ulong PersistenceGeneration,
         ulong TargetEpoch,
-        CaptureProcessTelemetry? ProcessTelemetry);
+        CaptureProcessTelemetry? ProcessTelemetry,
+        uint BlackFrameCount,
+        uint DuplicateFrameCount,
+        IReadOnlyList<CaptureContextSample> ContextSamples);
 
     private readonly record struct FileSnapshot(
         uint VolumeSerialNumber,

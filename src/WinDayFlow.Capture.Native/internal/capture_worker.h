@@ -19,6 +19,7 @@
 #include "capture_safety_core.h"
 #include "chunk_manifest.h"
 #include "jpeg_frame_chunk_writer.h"
+#include "process_telemetry.h"
 #include "wic_bgra_scaler.h"
 
 namespace windayflow::capture {
@@ -32,6 +33,11 @@ enum class CaptureWorkerBackendResult {
   kEncoderFailure,
   kStorageFailure,
   kInternalFailure,
+};
+
+enum class CaptureFrameWriteDisposition {
+  kRetained,
+  kDuplicate,
 };
 
 class CaptureWorkerPublication {
@@ -60,12 +66,16 @@ class CaptureWorkerBackend {
       const BgraFrame& source, uint32_t maximum_width, uint32_t maximum_height,
       BgraFrame* destination) noexcept = 0;
 
+  virtual std::optional<ProcessTelemetrySample> ObserveApplicationContext(
+      const CaptureTargetIdentity& capture_target) noexcept = 0;
+
   virtual CaptureWorkerBackendResult BeginChunk(
       std::string_view artifact_id,
       const JpegFrameChunkWriterConfig& config) noexcept = 0;
   virtual CaptureWorkerBackendResult EncodeFrame(
       std::span<const uint8_t> top_down_bgra,
-      uint64_t offset_milliseconds) noexcept = 0;
+      uint64_t offset_milliseconds,
+      CaptureFrameWriteDisposition* disposition) noexcept = 0;
   virtual CaptureWorkerBackendResult FinalizeChunk(
       ChunkManifest* manifest,
       std::unique_ptr<CaptureWorkerPublication>* publication) noexcept = 0;
@@ -118,6 +128,16 @@ struct CaptureWorkerRunResult {
   bool operator==(const CaptureWorkerRunResult&) const = default;
 };
 
+struct CaptureWorkerHealthSnapshot {
+  int64_t last_successful_sample_unix_ms = 0;
+  int64_t last_retained_frame_unix_ms = 0;
+  uint64_t sampled_frame_count = 0;
+  uint64_t black_frame_count = 0;
+  uint64_t duplicate_frame_count = 0;
+  uint64_t retained_frame_count = 0;
+  uint64_t revision = 0;
+};
+
 enum class CaptureWorkerCheckpointKind {
   kReady,
   kPaused,
@@ -148,6 +168,7 @@ class CaptureWorker final {
   bool UpdateTiming(uint32_t capture_interval_ms,
                     uint32_t chunk_duration_ms) noexcept;
   CaptureWorkerRunResult last_result() const;
+  CaptureWorkerHealthSnapshot health_snapshot() const noexcept;
   bool RetryPendingCompensation(uint32_t attempts) noexcept;
 
  private:
@@ -191,6 +212,13 @@ class CaptureWorker final {
   mutable std::mutex result_mutex_;
   CaptureWorkerRunResult last_result_;
   std::unique_ptr<CaptureWorkerPublication> pending_compensation_;
+  std::atomic<int64_t> last_successful_sample_unix_ms_{0};
+  std::atomic<int64_t> last_retained_frame_unix_ms_{0};
+  std::atomic<uint64_t> sampled_frame_count_{0};
+  std::atomic<uint64_t> black_frame_count_{0};
+  std::atomic<uint64_t> duplicate_frame_count_{0};
+  std::atomic<uint64_t> retained_frame_count_{0};
+  std::atomic<uint64_t> health_revision_{0};
 };
 
 }  // namespace windayflow::capture

@@ -4,6 +4,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
+using WinDayFlow.Application.Ai;
 using WinDayFlow.Application.Settings;
 using WinDayFlow.Presentation.Settings;
 
@@ -15,8 +16,8 @@ public sealed partial class SettingsPage : Page
 
     private bool _dialogOpen;
     private ExclusionRuleItemViewModel? _editingExclusionRule;
+    private AiProviderProfileItemViewModel? _editingProvider;
     private bool _isSubscribed;
-    private bool _isUpdatingCloudAnalysisToggle;
     private bool _isUpdatingCaptureInterval;
     private bool _isUpdatingCaptureToggle;
     private bool _isUpdatingExclusionRuleControls;
@@ -27,9 +28,11 @@ public sealed partial class SettingsPage : Page
     public SettingsPage()
     {
         ViewModel = App.GetService<SettingsViewModel>();
-        AiViewModel = App.GetService<AiProviderSettingsViewModel>();
+        RoutingViewModel = App.GetService<AiRoutingSettingsViewModel>();
         InitializeComponent();
         DataFolderTextBox.Text = App.DataDirectoryPath;
+        SettingsNavigation.SelectedItem = RecordingSettingsNavigationItem;
+        ShowSettingsSection("capture");
         Loaded += OnLoaded;
         Unloaded += OnUnloaded;
         SizeChanged += OnSizeChanged;
@@ -40,22 +43,22 @@ public sealed partial class SettingsPage : Page
         UpdateConsentActions();
         UpdateCaptureInformation();
         UpdateExclusionRuleInformation();
-        SynchronizeAiProviderControls();
-        UpdateAiProviderInformation();
     }
 
     public SettingsViewModel ViewModel { get; }
 
-    public AiProviderSettingsViewModel AiViewModel { get; }
+    public AiRoutingSettingsViewModel RoutingViewModel { get; }
 
-    private void OnLoaded(object sender, RoutedEventArgs e)
+    private async void OnLoaded(object sender, RoutedEventArgs e)
     {
         if (!_isSubscribed)
         {
             ViewModel.PropertyChanged += OnViewModelPropertyChanged;
-            AiViewModel.PropertyChanged += OnAiViewModelPropertyChanged;
+            RoutingViewModel.PropertyChanged += OnRoutingViewModelPropertyChanged;
             _isSubscribed = true;
         }
+
+        await RoutingViewModel.LoadAsync();
 
         UpdateResponsiveLayout(ActualWidth);
         SynchronizeThemePicker();
@@ -66,8 +69,7 @@ public sealed partial class SettingsPage : Page
         UpdateCaptureInformation();
         UpdateExclusionRuleInformation();
         UpdateErrorInformation();
-        SynchronizeAiProviderControls();
-        UpdateAiProviderInformation();
+        UpdateRoutingInformation();
     }
 
     private void OnUnloaded(object sender, RoutedEventArgs e)
@@ -75,7 +77,7 @@ public sealed partial class SettingsPage : Page
         if (_isSubscribed)
         {
             ViewModel.PropertyChanged -= OnViewModelPropertyChanged;
-            AiViewModel.PropertyChanged -= OnAiViewModelPropertyChanged;
+            RoutingViewModel.PropertyChanged -= OnRoutingViewModelPropertyChanged;
             _isSubscribed = false;
         }
 
@@ -83,12 +85,60 @@ public sealed partial class SettingsPage : Page
         Loaded -= OnLoaded;
         Unloaded -= OnUnloaded;
         ViewModel.Dispose();
-        AiViewModel.Dispose();
+        RoutingViewModel.Dispose();
     }
 
     private void OnSizeChanged(object sender, SizeChangedEventArgs e)
     {
         UpdateResponsiveLayout(e.NewSize.Width);
+    }
+
+    private void OnSettingsSectionChanged(
+        NavigationView sender,
+        NavigationViewSelectionChangedEventArgs args)
+    {
+        if (args.SelectedItemContainer?.Tag is string section)
+        {
+            ShowSettingsSection(section);
+        }
+    }
+
+    private void ShowSettingsSection(string section)
+    {
+        CaptureSection.Visibility = section == "capture"
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+        StorageSection.Visibility = section == "storage"
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+        PrivacySection.Visibility = section == "privacy"
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+        ProviderSection.Visibility = section == "providers"
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+        AppearanceSection.Visibility = section == "appearance"
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+        AboutSection.Visibility = section == "about"
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+    }
+
+    private async void OnOpenDataFolder(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            Directory.CreateDirectory(App.DataDirectoryPath);
+            if (!await Windows.System.Launcher.LaunchFolderPathAsync(App.DataDirectoryPath))
+            {
+                ShowPageError("Windows 无法打开本地数据目录。");
+            }
+        }
+        catch (Exception)
+        {
+            ShowPageError("本地数据目录暂时无法打开。");
+        }
     }
 
     private async void OnThemeChanged(object sender, SelectionChangedEventArgs e)
@@ -230,45 +280,7 @@ public sealed partial class SettingsPage : Page
             return;
         }
 
-        await PersistPrivacyControlsAsync(retentionDays);
-    }
-
-    private async void OnPrivacyToggleChanged(object sender, RoutedEventArgs e)
-    {
-        if (_isUpdatingPrivacyControls)
-        {
-            return;
-        }
-
-        await PersistPrivacyControlsAsync(ViewModel.EvidenceRetentionDays);
-    }
-
-    private async void OnApplicationPrivacyModeChanged(
-        object sender,
-        SelectionChangedEventArgs e)
-    {
-        if (_isUpdatingPrivacyControls
-            || ApplicationPrivacyModePicker.SelectedIndex is < 0 or > 1)
-        {
-            return;
-        }
-
-        var mode = ApplicationPrivacyModePicker.SelectedIndex == 1
-            ? CaptureApplicationPrivacyMode.AllowAllApplications
-            : CaptureApplicationPrivacyMode.ProtectByForegroundApplication;
-        if (mode == ViewModel.ApplicationPrivacyMode)
-        {
-            return;
-        }
-
-        if (mode == CaptureApplicationPrivacyMode.AllowAllApplications
-            && !await ConfirmContinuousCaptureScopeAsync())
-        {
-            SynchronizePrivacyControls();
-            return;
-        }
-
-        if (!await ViewModel.SetCaptureApplicationPrivacyModeAsync(mode))
+        if (!await ViewModel.SetEvidenceRetentionDaysAsync(retentionDays))
         {
             SynchronizePrivacyControls();
         }
@@ -276,185 +288,190 @@ public sealed partial class SettingsPage : Page
         UpdateErrorInformation();
     }
 
-    private async Task<bool> ConfirmContinuousCaptureScopeAsync()
+    private async void OnAddProvider(object sender, RoutedEventArgs e)
     {
-        if (_dialogOpen)
+        if (_dialogOpen || !RoutingViewModel.CanMutate)
         {
-            return false;
+            return;
         }
 
-        var content = new StackPanel
+        _editingProvider = null;
+        ProviderEditorDialog.Title = "新增供应商";
+        ProviderEditorDialog.PrimaryButtonText = "新增";
+        ProviderEditorNameTextBox.Text = string.Empty;
+        ProviderEditorEndpointTextBox.Text = string.Empty;
+        ProviderEditorModelTextBox.Text = string.Empty;
+        ProviderEditorTimeoutNumberBox.Value = 60;
+        ProviderEditorApiKeyPasswordBox.Password = string.Empty;
+        ProviderEditorClearApiKeyCheckBox.IsChecked = false;
+        ProviderEditorClearApiKeyCheckBox.Visibility = Visibility.Collapsed;
+        ProviderEditorErrorInfoBar.IsOpen = false;
+        _ = await ShowDialogAsync(ProviderEditorDialog);
+    }
+
+    private async void OnEditProvider(object sender, RoutedEventArgs e)
+    {
+        if (_dialogOpen
+            || !RoutingViewModel.CanMutate
+            || (sender as FrameworkElement)?.DataContext
+                is not AiProviderProfileItemViewModel profile)
         {
-            MaxWidth = 540,
-            Spacing = 10,
-        };
-        content.Children.Add(CreateDialogText(
-            "范围：每次开始录制时固定当时授权的一个显示器；不会录制所有显示器。"));
-        content.Children.Add(CreateDialogText(
-            "会被记录：该固定显示器上的普通桌面内容，包括 WinDayFlow 设置页、AI 提供方配置，以及原本匹配敏感应用或自定义排除规则的内容。"));
-        content.Children.Add(CreateDialogText(
-            "体验改善：录制期间切换应用或把焦点移到其他显示器都不会改换录制目标，避免授权反复暂停、恢复和丢弃未完成录制块，因此时间线更连续。"));
-        content.Children.Add(CreateDialogText(
-            "更换显示器：请等待录制完全停止，将 WinDayFlow 窗口移到目标显示器，并在那里重新开始录制；仅把焦点移到其他显示器不会切换录制目标。"));
-        content.Children.Add(CreateDialogText(
-            "仍会暂停或停止：显示器断开或显示拓扑变化、锁屏、安全桌面、睡眠、Windows 会话切换、存储异常、撤销同意和手动暂停或停止。远程会话与 Windows 演示模式仍遵循当前设置。"));
-        content.Children.Add(CreateDialogText(
-            "切换后会立即停止当前录制、使旧授权失效；你需要阅读新范围并重新同意，录制才可再次开启。"));
+            return;
+        }
+
+        _editingProvider = profile;
+        ProviderEditorDialog.Title = $"编辑“{profile.DisplayName}”";
+        ProviderEditorDialog.PrimaryButtonText = "保存";
+        ProviderEditorNameTextBox.Text = profile.DisplayName;
+        ProviderEditorEndpointTextBox.Text = profile.BaseEndpoint;
+        ProviderEditorModelTextBox.Text = profile.Model;
+        ProviderEditorTimeoutNumberBox.Value = profile.RequestTimeoutSeconds;
+        ProviderEditorApiKeyPasswordBox.Password = string.Empty;
+        ProviderEditorClearApiKeyCheckBox.IsChecked = false;
+        ProviderEditorClearApiKeyCheckBox.Visibility = Visibility.Visible;
+        ProviderEditorErrorInfoBar.IsOpen = false;
+        _ = await ShowDialogAsync(ProviderEditorDialog);
+    }
+
+    private async void OnDeleteProvider(object sender, RoutedEventArgs e)
+    {
+        if (_dialogOpen
+            || !RoutingViewModel.CanMutate
+            || (sender as FrameworkElement)?.DataContext
+                is not AiProviderProfileItemViewModel profile)
+        {
+            return;
+        }
 
         var dialog = new ContentDialog
         {
             XamlRoot = XamlRoot,
-            Title = "允许固定显示器上的全部应用？",
-            Content = content,
-            PrimaryButtonText = "理解范围并切换",
+            Title = $"删除“{profile.DisplayName}”？",
+            Content = CreateDialogText(
+                "只有未被隐私检查或时间线分析引用的供应商可以删除。"),
+            PrimaryButtonText = "删除",
             CloseButtonText = "取消",
             DefaultButton = ContentDialogButton.Close,
         };
-
-        return await ShowDialogAsync(dialog) == ContentDialogResult.Primary;
-    }
-
-    private async Task PersistPrivacyControlsAsync(int retentionDays)
-    {
-        if (!await ViewModel.SetCapturePrivacyAsync(
-                retentionDays,
-                SensitiveApplicationToggle.IsOn,
-                RemoteSessionToggle.IsOn,
-                ScreenSharingToggle.IsOn))
+        if (await ShowDialogAsync(dialog) == ContentDialogResult.Primary)
         {
-            SynchronizePrivacyControls();
+            _ = await RoutingViewModel.DeleteProfileAsync(profile);
+            UpdateRoutingInformation();
         }
-
-        UpdateErrorInformation();
     }
 
-    private async void OnSaveAiProvider(object sender, RoutedEventArgs e)
+    private async void OnValidateProviderPrivacy(object sender, RoutedEventArgs e)
     {
-        if (AiViewModel.IsBusy)
+        if ((sender as FrameworkElement)?.DataContext
+            is AiProviderProfileItemViewModel profile)
         {
+            _ = await RoutingViewModel.ValidateStageAsync(
+                profile,
+                AnalysisStage.PrivacyInspection);
+            UpdateRoutingInformation();
+        }
+    }
+
+    private async void OnValidateProviderTimeline(object sender, RoutedEventArgs e)
+    {
+        if ((sender as FrameworkElement)?.DataContext
+            is AiProviderProfileItemViewModel profile)
+        {
+            _ = await RoutingViewModel.ValidateStageAsync(
+                profile,
+                AnalysisStage.TimelineAnalysis);
+            UpdateRoutingInformation();
+        }
+    }
+
+    private async void OnSavePrivacyRoute(object sender, RoutedEventArgs e)
+    {
+        if (RoutingViewModel.PrivacyEnabled
+            && RoutingViewModel.PrivacyProvider is null)
+        {
+            RoutingInfoBar.Title = "请选择隐私检查供应商";
+            RoutingInfoBar.Message = "启用前必须为隐私检查选择一个供应商。";
+            RoutingInfoBar.Severity = InfoBarSeverity.Warning;
+            RoutingInfoBar.IsOpen = true;
             return;
         }
 
-        if (!TryReadAiProviderTimeout(out var requestTimeoutSeconds))
+        _ = await RoutingViewModel.SavePrivacyBindingAsync();
+        UpdateRoutingInformation();
+    }
+
+    private async void OnSaveTimelineRoute(object sender, RoutedEventArgs e)
+    {
+        if (RoutingViewModel.TimelineEnabled
+            && RoutingViewModel.TimelineProvider is null)
         {
-            ShowAiProviderError("请求超时必须是 10 到 600 之间的整数秒数。");
-            AiProviderTimeoutNumberBox.Focus(FocusState.Programmatic);
+            RoutingInfoBar.Title = "请选择时间线分析供应商";
+            RoutingInfoBar.Message = "启用前必须为时间线分析选择一个供应商。";
+            RoutingInfoBar.Severity = InfoBarSeverity.Warning;
+            RoutingInfoBar.IsOpen = true;
             return;
         }
 
-        var apiKey = AiProviderApiKeyPasswordBox.Password;
+        _ = await RoutingViewModel.SaveTimelineBindingAsync();
+        UpdateRoutingInformation();
+    }
+
+    private async void OnProviderEditorPrimaryButtonClick(
+        ContentDialog sender,
+        ContentDialogButtonClickEventArgs args)
+    {
+        var deferral = args.GetDeferral();
         try
         {
-            var saved = await AiViewModel.SaveAsync(
-                AiProviderNameTextBox.Text.Trim(),
-                AiProviderEndpointTextBox.Text.Trim(),
-                AiProviderModelTextBox.Text.Trim(),
-                requestTimeoutSeconds,
-                apiKey,
-                ClearAiProviderApiKeyCheckBox.IsChecked == true);
-            if (saved)
+            if (!TryReadProviderEditorTimeout(out var timeoutSeconds))
             {
-                SynchronizeAiProviderControls();
+                args.Cancel = true;
+                ShowProviderEditorError("请求超时必须是 10 到 600 之间的整数秒数。");
+                return;
+            }
+
+            ProviderEditorProgressBar.Visibility = Visibility.Visible;
+            sender.IsPrimaryButtonEnabled = false;
+            var saved = await RoutingViewModel.SaveProfileAsync(
+                _editingProvider?.Id,
+                _editingProvider?.Revision,
+                ProviderEditorNameTextBox.Text.Trim(),
+                ProviderEditorEndpointTextBox.Text.Trim(),
+                ProviderEditorModelTextBox.Text.Trim(),
+                timeoutSeconds,
+                ProviderEditorApiKeyPasswordBox.Password,
+                ProviderEditorClearApiKeyCheckBox.IsChecked == true);
+            if (!saved)
+            {
+                args.Cancel = true;
+                ShowProviderEditorError(RoutingViewModel.ErrorMessage);
             }
         }
         finally
         {
-            AiProviderApiKeyPasswordBox.Password = string.Empty;
+            ProviderEditorApiKeyPasswordBox.Password = string.Empty;
+            ProviderEditorProgressBar.Visibility = Visibility.Collapsed;
+            sender.IsPrimaryButtonEnabled = true;
+            UpdateRoutingInformation();
+            deferral.Complete();
         }
-
-        UpdateAiProviderInformation();
     }
 
-    private async void OnTestAiProvider(object sender, RoutedEventArgs e)
+    private bool TryReadProviderEditorTimeout(out int timeoutSeconds)
     {
-        if (AiViewModel.IsBusy)
-        {
-            return;
-        }
-
-        _ = await AiViewModel.TestConnectionAsync();
-        UpdateAiProviderInformation();
+        var value = ProviderEditorTimeoutNumberBox.Value;
+        timeoutSeconds = double.IsFinite(value) ? checked((int)value) : 0;
+        return value == timeoutSeconds && timeoutSeconds is >= 10 and <= 600;
     }
 
-    private async void OnCloudAnalysisToggled(object sender, RoutedEventArgs e)
+    private void ShowProviderEditorError(string message)
     {
-        if (_isUpdatingCloudAnalysisToggle
-            || AiViewModel.IsBusy
-            || CloudAnalysisToggle.IsOn == AiViewModel.CloudAnalysisEnabled)
-        {
-            return;
-        }
-
-        var requestedState = CloudAnalysisToggle.IsOn;
-        if (requestedState && !await ConfirmCloudAnalysisDisclosureAsync())
-        {
-            SynchronizeCloudAnalysisToggle();
-            return;
-        }
-
-        if (!await AiViewModel.SetCloudAnalysisEnabledAsync(requestedState))
-        {
-            SynchronizeCloudAnalysisToggle();
-        }
-
-        UpdateAiProviderInformation();
+        ProviderEditorErrorInfoBar.Message = string.IsNullOrWhiteSpace(message)
+            ? "无法保存供应商配置，请检查输入。"
+            : message;
+        ProviderEditorErrorInfoBar.IsOpen = true;
     }
 
-    private async Task<bool> ConfirmCloudAnalysisDisclosureAsync()
-    {
-        if (_dialogOpen)
-        {
-            return false;
-        }
-
-        var endpointOrigin = Uri.TryCreate(
-            AiViewModel.BaseEndpoint,
-            UriKind.Absolute,
-            out var endpoint)
-                ? endpoint.GetLeftPart(UriPartial.Authority)
-                : AiViewModel.BaseEndpoint;
-        var content = new StackPanel
-        {
-            MaxWidth = 520,
-            Spacing = 10,
-        };
-        content.Children.Add(CreateDialogText($"接收方：{endpointOrigin}"));
-        content.Children.Add(CreateDialogText(
-            "发送内容：从已提交录制块提取的少量静态截图、对应时间范围，以及经过隐私规则筛选的应用上下文。"));
-        content.Children.Add(CreateDialogText(
-            "启用范围：包括启用前已保存在本机但尚未分析的录制块，以及之后新产生的录制块。"));
-        content.Children.Add(CreateDialogText(
-            "不会发送：完整录制视频、未选择的本地文件或 WinDayFlow 数据库。"));
-        content.Children.Add(CreateDialogText(
-            "关闭此开关会阻止新任务发起网络分析；已经发送的请求仍受所选提供方的条款约束。"));
-
-        var dialog = new ContentDialog
-        {
-            XamlRoot = XamlRoot,
-            Title = "允许向此提供方发送分析证据？",
-            Content = content,
-            PrimaryButtonText = "允许并启用",
-            CloseButtonText = "取消",
-            DefaultButton = ContentDialogButton.Close,
-        };
-
-        return await ShowDialogAsync(dialog) == ContentDialogResult.Primary;
-    }
-
-    private bool TryReadAiProviderTimeout(out int requestTimeoutSeconds)
-    {
-        var value = AiProviderTimeoutNumberBox.Value;
-        if (!double.IsFinite(value)
-            || value != Math.Truncate(value)
-            || value is < 10 or > 600)
-        {
-            requestTimeoutSeconds = 0;
-            return false;
-        }
-
-        requestTimeoutSeconds = checked((int)value);
-        return true;
-    }
 
     private async void OnAddExclusionRule(object sender, RoutedEventArgs e)
     {
@@ -730,11 +747,7 @@ public sealed partial class SettingsPage : Page
             SynchronizeCaptureInterval();
         }
 
-        if (e.PropertyName is nameof(SettingsViewModel.EvidenceRetentionDays)
-            or nameof(SettingsViewModel.ExcludeSensitiveApplications)
-            or nameof(SettingsViewModel.PauseInRemoteSessions)
-            or nameof(SettingsViewModel.PauseDuringScreenSharing)
-            or nameof(SettingsViewModel.ApplicationPrivacyMode))
+        if (e.PropertyName == nameof(SettingsViewModel.EvidenceRetentionDays))
         {
             SynchronizePrivacyControls();
         }
@@ -776,23 +789,13 @@ public sealed partial class SettingsPage : Page
         }
     }
 
-    private void OnAiViewModelPropertyChanged(object? sender, PropertyChangedEventArgs e)
+    private void OnRoutingViewModelPropertyChanged(
+        object? sender,
+        PropertyChangedEventArgs e)
     {
         _ = sender;
-        if (e.PropertyName is nameof(AiProviderSettingsViewModel.DisplayName)
-            or nameof(AiProviderSettingsViewModel.BaseEndpoint)
-            or nameof(AiProviderSettingsViewModel.Model)
-            or nameof(AiProviderSettingsViewModel.RequestTimeoutSeconds))
-        {
-            SynchronizeAiProviderControls();
-        }
-
-        if (e.PropertyName == nameof(AiProviderSettingsViewModel.CloudAnalysisEnabled))
-        {
-            SynchronizeCloudAnalysisToggle();
-        }
-
-        UpdateAiProviderInformation();
+        _ = e;
+        UpdateRoutingInformation();
     }
 
     private void PrepareCreateExclusionRuleEditor()
@@ -1236,14 +1239,6 @@ public sealed partial class SettingsPage : Page
             }
 
             RetentionPicker.SelectedItem = matchingItem;
-            ApplicationPrivacyModePicker.SelectedIndex =
-                ViewModel.ApplicationPrivacyMode
-                    == CaptureApplicationPrivacyMode.AllowAllApplications
-                        ? 1
-                        : 0;
-            SensitiveApplicationToggle.IsOn = ViewModel.ExcludeSensitiveApplications;
-            RemoteSessionToggle.IsOn = ViewModel.PauseInRemoteSessions;
-            ScreenSharingToggle.IsOn = ViewModel.PauseDuringScreenSharing;
         }
         finally
         {
@@ -1251,66 +1246,42 @@ public sealed partial class SettingsPage : Page
         }
     }
 
-    private void SynchronizeAiProviderControls()
+    private void UpdateRoutingInformation()
     {
-        AiProviderNameTextBox.Text = AiViewModel.DisplayName;
-        AiProviderEndpointTextBox.Text = AiViewModel.BaseEndpoint;
-        AiProviderModelTextBox.Text = AiViewModel.Model;
-        AiProviderTimeoutNumberBox.Value = AiViewModel.RequestTimeoutSeconds;
-        ClearAiProviderApiKeyCheckBox.IsChecked = false;
-        AiCredentialStatusText.Text = AiViewModel.CredentialStatusText;
-        AiValidationStatusText.Text = AiViewModel.ValidationStatusText;
-        SynchronizeCloudAnalysisToggle();
-    }
-
-    private void SynchronizeCloudAnalysisToggle()
-    {
-        _isUpdatingCloudAnalysisToggle = true;
-        CloudAnalysisToggle.IsOn = AiViewModel.CloudAnalysisEnabled;
-        _isUpdatingCloudAnalysisToggle = false;
-    }
-
-    private void UpdateAiProviderInformation()
-    {
-        AiProviderProgressBar.Visibility = AiViewModel.IsBusy
+        ProviderEmptyState.Visibility = RoutingViewModel.HasProfiles
+            ? Visibility.Collapsed
+            : Visibility.Visible;
+        ProviderList.Visibility = RoutingViewModel.HasProfiles
             ? Visibility.Visible
             : Visibility.Collapsed;
-        AiCredentialStatusText.Text = AiViewModel.CredentialStatusText;
-        AiValidationStatusText.Text = AiViewModel.ValidationStatusText;
-        CloudAnalysisStatusText.Text = AiViewModel.CloudAnalysisStatusText;
 
-        if (AiViewModel.HasError)
+        var title = string.Empty;
+        var message = string.Empty;
+        var severity = InfoBarSeverity.Informational;
+        var isOpen = false;
+        if (RoutingViewModel.HasError)
         {
-            AiProviderInfoBar.Title = "分析提供方操作失败";
-            AiProviderInfoBar.Message = AiViewModel.ErrorMessage;
-            AiProviderInfoBar.Severity = InfoBarSeverity.Error;
+            title = "供应商或阶段设置失败";
+            message = RoutingViewModel.ErrorMessage;
+            severity = InfoBarSeverity.Error;
+            isOpen = true;
         }
-        else if (AiViewModel.HasNotice)
+        else if (RoutingViewModel.HasNotice)
         {
-            AiProviderInfoBar.Title = "分析提供方已更新";
-            AiProviderInfoBar.Message = AiViewModel.NoticeMessage;
-            AiProviderInfoBar.Severity = InfoBarSeverity.Success;
-        }
-        else
-        {
-            AiProviderInfoBar.Title = AiViewModel.IsValidated
-                ? "分析提供方已验证"
-                : "分析提供方";
-            AiProviderInfoBar.Message = AiViewModel.ValidationStatusText;
-            AiProviderInfoBar.Severity = AiViewModel.HasProfile
-                ? InfoBarSeverity.Informational
-                : InfoBarSeverity.Warning;
+            title = "设置已更新";
+            message = RoutingViewModel.NoticeMessage;
+            severity = InfoBarSeverity.Success;
+            isOpen = true;
         }
 
-        AiProviderInfoBar.IsOpen = true;
-    }
-
-    private void ShowAiProviderError(string message)
-    {
-        AiProviderInfoBar.Title = "请检查分析提供方配置";
-        AiProviderInfoBar.Message = message;
-        AiProviderInfoBar.Severity = InfoBarSeverity.Error;
-        AiProviderInfoBar.IsOpen = true;
+        RoutingInfoBar.Title = title;
+        RoutingInfoBar.Message = message;
+        RoutingInfoBar.Severity = severity;
+        RoutingInfoBar.IsOpen = isOpen;
+        ProviderRoutingInfoBar.Title = title;
+        ProviderRoutingInfoBar.Message = message;
+        ProviderRoutingInfoBar.Severity = severity;
+        ProviderRoutingInfoBar.IsOpen = isOpen;
     }
 
     private void UpdateConsentActions()
@@ -1372,20 +1343,9 @@ public sealed partial class SettingsPage : Page
         UpdateSettingLayout(StorageSettingLayout, DataFolderTextBox, useStackedLayout);
         UpdateSettingLayout(RetentionSettingLayout, RetentionPicker, useStackedLayout);
         UpdateSettingLayout(
-            ApplicationPrivacyModeSettingLayout,
-            ApplicationPrivacyModePicker,
-            useStackedLayout);
-        UpdateSettingLayout(
-            SensitiveApplicationSettingLayout,
-            SensitiveApplicationToggle,
-            useStackedLayout);
-        UpdateSettingLayout(
             ExclusionRulesHeaderLayout,
             AddExclusionRuleButton,
             useStackedLayout);
-        UpdateSettingLayout(RemoteSessionSettingLayout, RemoteSessionToggle, useStackedLayout);
-        UpdateSettingLayout(ScreenSharingSettingLayout, ScreenSharingToggle, useStackedLayout);
-        UpdateSettingLayout(CloudSettingLayout, CloudAnalysisToggle, useStackedLayout);
 
         ConsentActionPanel.Orientation = useStackedLayout
             ? Orientation.Vertical

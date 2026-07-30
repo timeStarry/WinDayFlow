@@ -85,13 +85,6 @@ public sealed class CanonicalFrameAnalysisEvidenceExtractor(
                 bytes));
         }
 
-        if (images.Count == 0)
-        {
-            throw new AnalysisEvidenceExtractionException(
-                AnalysisEvidenceExtractionFailureKind.EvidenceTooLarge,
-                resultCode: 0);
-        }
-
         var current = await _fingerprintProvider.ComputeAsync(chunk, cancellationToken)
             .ConfigureAwait(false);
         if (!string.Equals(

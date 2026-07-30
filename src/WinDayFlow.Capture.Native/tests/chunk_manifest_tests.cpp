@@ -15,7 +15,7 @@ bool Expect(bool condition, const char* message) {
 }
 
 windayflow::capture::ChunkManifest ValidManifest() {
-  return windayflow::capture::ChunkManifest{
+  windayflow::capture::ChunkManifest manifest{
       "chunk_20260717_120000_000001",
       1'784'269'200'000,
       1'784'269'260'000,
@@ -30,7 +30,18 @@ windayflow::capture::ChunkManifest ValidManifest() {
        {1, 50'000, 4, std::string(64, 'B')}},
       windayflow::capture::ChunkApplicationManifest{
           "Code.exe", 4242, 1'250, 536'870'912, 402'653'184},
+      0,
+      4,
   };
+  manifest.context_samples = {
+      {0, 0,
+       windayflow::capture::ChunkApplicationManifest{
+           "Code.exe", 4242, 0, 536'870'912, 402'653'184}},
+      {5, 50'000,
+       windayflow::capture::ChunkApplicationManifest{
+           "Code.exe", 4242, 1'250, 536'870'912, 402'653'184}},
+  };
+  return manifest;
 }
 
 bool TestBuildsStablePrivacySafeSchema() {
@@ -40,8 +51,8 @@ bool TestBuildsStablePrivacySafeSchema() {
               "valid chunk manifest was rejected")) {
     return false;
   }
-  const std::array<std::string, 17> required{
-      "\"schemaVersion\": 3",
+  const std::array<std::string, 23> required{
+      "\"schemaVersion\": 4",
       "\"captureScope\": \"authorized-foreground-display\"",
       "\"chunkId\": \"chunk_20260717_120000_000001\"",
       "\"startTimeUnixMs\": 1784269200000",
@@ -53,9 +64,15 @@ bool TestBuildsStablePrivacySafeSchema() {
       "\"cpuUsageBasisPoints\":1250",
       "\"workingSetBytes\":536870912",
       "\"privateMemoryBytes\":402653184",
+      "\"contextSamples\"",
+      "\"sampleIndex\":0",
+      "\"applicationId\":\"process:Code.exe\"",
+      "\"displayName\":\"Code.exe\"",
       "\"format\": \"jpeg\"",
       "\"quality\": 82",
-      "\"capturedFrameCount\": 6",
+      "\"sampledFrameCount\": 6",
+      "\"blackFrameCount\": 0",
+      "\"duplicateFrameCount\": 4",
       "\"retainedFrameCount\": 2",
       "\"path\":\"frames/frame-000001.jpg\"",
   };
@@ -119,6 +136,11 @@ bool TestRejectsInvalidFieldsAndClearsOutput() {
   value = ValidManifest();
   value.application->cpu_usage_basis_points = 10'001;
   if (!Expect(Reject(value), "invalid process CPU utilization was accepted")) {
+    return false;
+  }
+  value = ValidManifest();
+  value.context_samples[1].sample_index = 0;
+  if (!Expect(Reject(value), "duplicate context sample index was accepted")) {
     return false;
   }
   value = ValidManifest();

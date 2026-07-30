@@ -4,24 +4,29 @@ using WinDayFlow.Application.Capture;
 
 namespace WinDayFlow.Presentation.Capture;
 
+public enum CaptureDisplayState
+{
+    Recording = 0,
+    Paused = 1,
+    Stopped = 2,
+    NeedsAttention = 3,
+}
+
 public sealed partial class CaptureStatusViewModel : ObservableObject, IDisposable
 {
-    private static readonly TimeSpan AutomaticRebindStatusDelay =
-        TimeSpan.FromMilliseconds(750);
-
     private readonly ICaptureService _captureService;
     private readonly SynchronizationContext? _synchronizationContext;
-    private readonly Func<TimeSpan, CancellationToken, Task> _delayAsync;
     private CaptureStatus _status;
-    private CaptureStatus _observedStatus;
-    private CaptureStatus? _pendingAutomaticRebindStatus;
-    private CancellationTokenSource? _automaticRebindDelayCancellation;
     private bool _isDisposed;
 
     public CaptureStatusViewModel(ICaptureService captureService)
         : this(
             captureService,
-            static (delay, cancellationToken) => Task.Delay(delay, cancellationToken))
+            static (_, cancellationToken) =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                return Task.CompletedTask;
+            })
     {
     }
 
@@ -29,58 +34,47 @@ public sealed partial class CaptureStatusViewModel : ObservableObject, IDisposab
         ICaptureService captureService,
         Func<TimeSpan, CancellationToken, Task> delayAsync)
     {
-        _captureService = captureService ?? throw new ArgumentNullException(nameof(captureService));
-        _delayAsync = delayAsync ?? throw new ArgumentNullException(nameof(delayAsync));
+        _captureService = captureService
+            ?? throw new ArgumentNullException(nameof(captureService));
+        _ = delayAsync ?? throw new ArgumentNullException(nameof(delayAsync));
         _synchronizationContext = SynchronizationContext.Current;
         _status = captureService.CurrentStatus;
-        _observedStatus = _status;
         _captureService.StatusChanged += OnStatusChanged;
         ApplyStatus(_captureService.CurrentStatus);
     }
 
     public CaptureState State => _status.State;
 
+    public CaptureDisplayState DisplayState => ProjectDisplayState(_status);
+
     public DateTimeOffset ChangedAt => _status.ChangedAt;
 
     public CaptureReasonCode Reason => _status.Reason;
 
-    public bool IsPrivacyProtected =>
-        (State is CaptureState.Pausing or CaptureState.Paused)
-        && IsAutomaticProtectionReason(Reason);
 
-    public string StatusText => State switch
+    public string StatusText => DisplayState switch
     {
-        CaptureState.Unavailable => "录制不可用",
-        CaptureState.BlockedByConsent => "需要录制授权",
-        CaptureState.Stopped => "录制已停止",
-        CaptureState.Starting => "正在启动录制",
-        CaptureState.Recording => "正在录制",
-        CaptureState.Pausing when IsPrivacyProtected => ProtectionStatusText(Reason),
-        CaptureState.Pausing => "正在暂停录制",
-        CaptureState.Paused when IsPrivacyProtected => ProtectionStatusText(Reason),
-        CaptureState.Paused => "录制已暂停",
-        CaptureState.Resuming => "正在恢复录制",
-        CaptureState.Stopping => "正在停止录制",
-        CaptureState.Faulted => "录制发生错误",
-        _ => "录制状态未知",
+        CaptureDisplayState.Recording => "正在录制",
+        CaptureDisplayState.Paused => "录制已暂停",
+        CaptureDisplayState.Stopped => "录制已停止",
+        CaptureDisplayState.NeedsAttention => "录制需要处理",
+        _ => throw new InvalidOperationException("The capture display state is unsupported."),
     };
 
-    public string DetailText => ProtectionDetailText() ?? _status.Detail ?? State switch
+    public string DetailText => _status.Detail ?? DisplayState switch
     {
-        CaptureState.Unavailable => "原生录制组件尚未接入。",
-        CaptureState.BlockedByConsent => "请先在设置中确认录制授权。",
-        CaptureState.Stopped => "可以开始记录工作活动。",
-        CaptureState.Recording => "WinDayFlow 正在本地记录屏幕活动。",
-        CaptureState.Paused => "活动记录已暂停。",
-        CaptureState.Faulted => "请检查录制组件后重试。",
-        _ => string.Empty,
+        CaptureDisplayState.Recording => "WinDayFlow 正在本地记录屏幕活动。",
+        CaptureDisplayState.Paused => "本地活动记录已由用户暂停。",
+        CaptureDisplayState.Stopped => "可以开始记录工作活动。",
+        CaptureDisplayState.NeedsAttention => NeedsAttentionDetail(_status),
+        _ => throw new InvalidOperationException("The capture display state is unsupported."),
     };
 
     public bool IsCaptureAvailable => State != CaptureState.Unavailable;
 
-    public bool IsOperational => _status.IsOperational;
+    public bool IsOperational => DisplayState != CaptureDisplayState.NeedsAttention;
 
-    public bool IsRecording => State == CaptureState.Recording;
+    public bool IsRecording => DisplayState == CaptureDisplayState.Recording;
 
     public bool IsTransitioning => State is
         CaptureState.Starting or
@@ -91,20 +85,17 @@ public sealed partial class CaptureStatusViewModel : ObservableObject, IDisposab
     public bool CanStartCapture => State is CaptureState.Stopped or CaptureState.Faulted;
 
     public bool CanPauseCapture => State is
-        CaptureState.Recording or
-        CaptureState.BlockedByConsent;
-
-    public bool CanResumeCapture => State == CaptureState.Paused
-        && !IsAutomaticProtectionReason(Reason);
-
-    public bool CanStopCapture => State is
         CaptureState.Starting or
         CaptureState.Recording or
-        CaptureState.Pausing or
-        CaptureState.Paused or
-        CaptureState.Resuming or
-        CaptureState.BlockedByConsent or
-        CaptureState.Faulted;
+        CaptureState.Resuming;
+
+    public bool CanResumeCapture => State == CaptureState.Paused
+        && Reason is CaptureReasonCode.None or CaptureReasonCode.UserPaused;
+
+    public bool CanStopCapture => State is not (
+        CaptureState.Unavailable or
+        CaptureState.Stopped or
+        CaptureState.Stopping);
 
     [RelayCommand(CanExecute = nameof(CanStartCapture))]
     private async Task StartCaptureAsync(CancellationToken cancellationToken)
@@ -143,10 +134,11 @@ public sealed partial class CaptureStatusViewModel : ObservableObject, IDisposab
 
         _isDisposed = true;
         _captureService.StatusChanged -= OnStatusChanged;
-        CancelPendingAutomaticRebind();
     }
 
-    private void OnStatusChanged(object? sender, CaptureStatusChangedEventArgs eventArgs)
+    private void OnStatusChanged(
+        object? sender,
+        CaptureStatusChangedEventArgs eventArgs)
     {
         _ = sender;
         _ = eventArgs;
@@ -155,6 +147,7 @@ public sealed partial class CaptureStatusViewModel : ObservableObject, IDisposab
             return;
         }
 
+        var current = _captureService.CurrentStatus;
         if (_synchronizationContext is not null
             && SynchronizationContext.Current != _synchronizationContext)
         {
@@ -162,174 +155,30 @@ public sealed partial class CaptureStatusViewModel : ObservableObject, IDisposab
                 static state =>
                 {
                     var update = (StatusUpdate)state!;
-                    update.ViewModel.ApplyStatus(update.Status);
+                    update.ViewModel.ApplyStatus(
+                        update.ViewModel._captureService.CurrentStatus);
                 },
-                new StatusUpdate(this, eventArgs.Current));
+                new StatusUpdate(this));
             return;
         }
 
-        ApplyStatus(_captureService.CurrentStatus);
+        ApplyStatus(current);
     }
 
     private void ApplyStatus(CaptureStatus status)
     {
         if (_isDisposed
-            || status.Sequence < _observedStatus.Sequence
-            || status == _observedStatus)
-        {
-            return;
-        }
-
-        _observedStatus = status;
-
-        if (ShouldCoalesceAutomaticRebind(status))
-        {
-            QueueAutomaticRebindStatus(status);
-            return;
-        }
-
-        CancelPendingAutomaticRebind();
-        PublishStatus(status);
-    }
-
-    private bool ShouldCoalesceAutomaticRebind(CaptureStatus status)
-    {
-        if (_pendingAutomaticRebindStatus is not null)
-        {
-            return status.State == CaptureState.Resuming
-                || IsGenericAutomaticRebindPause(status);
-        }
-
-        return (_status.State == CaptureState.Recording
-                && IsGenericAutomaticRebindPause(status))
-            || (status.State == CaptureState.Resuming
-                && IsAutomaticProtectionPause(_status));
-    }
-
-    private void QueueAutomaticRebindStatus(CaptureStatus status)
-    {
-        _pendingAutomaticRebindStatus = status;
-        if (status.State == CaptureState.Resuming)
-        {
-            CancelAutomaticRebindDelay();
-            return;
-        }
-
-        if (_automaticRebindDelayCancellation is not null)
-        {
-            return;
-        }
-
-        StartAutomaticRebindDelay();
-    }
-
-    private void StartAutomaticRebindDelay()
-    {
-        var delayCancellation = new CancellationTokenSource();
-        _automaticRebindDelayCancellation = delayCancellation;
-        _ = RevealAutomaticRebindStatusAfterDelayAsync(delayCancellation);
-    }
-
-    private async Task RevealAutomaticRebindStatusAfterDelayAsync(
-        CancellationTokenSource delayCancellation)
-    {
-        try
-        {
-            await _delayAsync(
-                    AutomaticRebindStatusDelay,
-                    delayCancellation.Token)
-                .ConfigureAwait(false);
-        }
-        catch (OperationCanceledException) when (delayCancellation.IsCancellationRequested)
-        {
-            return;
-        }
-
-        if (_synchronizationContext is not null
-            && SynchronizationContext.Current != _synchronizationContext)
-        {
-            _synchronizationContext.Post(
-                static state =>
-                {
-                    var request = ((CaptureStatusViewModel ViewModel,
-                        CancellationTokenSource DelayCancellation))state!;
-                    request.ViewModel.RevealPendingAutomaticRebind(
-                        request.DelayCancellation);
-                },
-                (this, delayCancellation));
-            return;
-        }
-
-        RevealPendingAutomaticRebind(delayCancellation);
-    }
-
-    private void RevealPendingAutomaticRebind(
-        CancellationTokenSource delayCancellation)
-    {
-        if (_isDisposed
-            || delayCancellation.IsCancellationRequested
-            || !ReferenceEquals(
-                _automaticRebindDelayCancellation,
-                delayCancellation))
-        {
-            return;
-        }
-
-        var currentStatus = _captureService.CurrentStatus;
-        if (currentStatus.Sequence >= _observedStatus.Sequence
-            && currentStatus != _observedStatus)
-        {
-            ApplyStatus(currentStatus);
-            if (!ReferenceEquals(
-                _automaticRebindDelayCancellation,
-                delayCancellation))
-            {
-                return;
-            }
-        }
-
-        var pendingStatus = _pendingAutomaticRebindStatus;
-        _pendingAutomaticRebindStatus = null;
-        _automaticRebindDelayCancellation = null;
-        delayCancellation.Dispose();
-
-        if (pendingStatus is not null)
-        {
-            PublishStatus(pendingStatus);
-        }
-    }
-
-    private void CancelPendingAutomaticRebind()
-    {
-        _pendingAutomaticRebindStatus = null;
-        CancelAutomaticRebindDelay();
-    }
-
-    private void CancelAutomaticRebindDelay()
-    {
-        var delayCancellation = _automaticRebindDelayCancellation;
-        _automaticRebindDelayCancellation = null;
-        if (delayCancellation is null)
-        {
-            return;
-        }
-
-        delayCancellation.Cancel();
-        delayCancellation.Dispose();
-    }
-
-    private void PublishStatus(CaptureStatus status)
-    {
-        if (_isDisposed || status == _status)
+            || status.Sequence < _status.Sequence
+            || status == _status)
         {
             return;
         }
 
         _status = status;
         OnPropertyChanged(nameof(State));
+        OnPropertyChanged(nameof(DisplayState));
         OnPropertyChanged(nameof(ChangedAt));
         OnPropertyChanged(nameof(Reason));
-        OnPropertyChanged(nameof(IsPrivacyProtected));
         OnPropertyChanged(nameof(StatusText));
         OnPropertyChanged(nameof(DetailText));
         OnPropertyChanged(nameof(IsCaptureAvailable));
@@ -347,73 +196,46 @@ public sealed partial class CaptureStatusViewModel : ObservableObject, IDisposab
         StopCaptureCommand.NotifyCanExecuteChanged();
     }
 
-    private static bool IsGenericAutomaticRebindPause(CaptureStatus status)
+    private static CaptureDisplayState ProjectDisplayState(CaptureStatus status)
     {
-        return status.State is CaptureState.Pausing or CaptureState.Paused
-            && status.Reason == CaptureReasonCode.PolicyBlocked;
-    }
-
-    private static bool IsAutomaticProtectionPause(CaptureStatus status)
-    {
-        return status.State is CaptureState.Pausing or CaptureState.Paused
-            && IsAutomaticProtectionReason(status.Reason);
-    }
-
-    private string? ProtectionDetailText()
-    {
-        if (!IsPrivacyProtected)
+        return status.State switch
         {
-            return null;
-        }
-
-        return Reason switch
-        {
-            CaptureReasonCode.ExcludedApplication =>
-                "当前应用已按隐私规则排除；切换到其他应用后将自动恢复。",
-            CaptureReasonCode.ExcludedWindow =>
-                "当前窗口已按隐私规则排除；切换窗口后将自动恢复。",
-            CaptureReasonCode.SessionLocked => "会话锁定期间不会记录屏幕活动。",
-            CaptureReasonCode.SecureDesktop => "安全桌面期间不会记录屏幕活动。",
-            CaptureReasonCode.RemoteSession => "远程会话期间已按当前设置暂停记录。",
-            CaptureReasonCode.PresentationMode => "屏幕共享或演示期间已按当前设置暂停记录。",
-            CaptureReasonCode.SystemSleep => "系统恢复后将重新确认录制条件。",
-            CaptureReasonCode.StorageConstrained => "请释放本地存储空间后再继续记录。",
-            CaptureReasonCode.DisplayUnavailable or CaptureReasonCode.AccessLost =>
-                "正在等待可用屏幕；恢复后将自动继续。",
-            _ => "正在重新确认当前录制范围；确认后将自动恢复。",
+            CaptureState.Starting or
+            CaptureState.Recording or
+            CaptureState.Resuming => CaptureDisplayState.Recording,
+            CaptureState.Pausing or CaptureState.Paused
+                when status.Reason is CaptureReasonCode.None
+                    or CaptureReasonCode.UserPaused =>
+                CaptureDisplayState.Paused,
+            CaptureState.Stopped or CaptureState.Stopping =>
+                CaptureDisplayState.Stopped,
+            _ => CaptureDisplayState.NeedsAttention,
         };
     }
 
-    private static string ProtectionStatusText(CaptureReasonCode reason)
+    private static string NeedsAttentionDetail(CaptureStatus status)
     {
-        return reason switch
+        return status.State switch
         {
-            CaptureReasonCode.ExcludedApplication or CaptureReasonCode.ExcludedWindow =>
-                "当前内容已排除",
-            CaptureReasonCode.StorageConstrained => "存储空间不足",
-            CaptureReasonCode.DisplayUnavailable or CaptureReasonCode.AccessLost =>
-                "等待屏幕恢复",
-            _ => "隐私保护中",
+            CaptureState.Unavailable => "当前设备上的录制组件不可用。",
+            CaptureState.BlockedByConsent => "请先在设置中确认录制授权。",
+            CaptureState.Faulted => "录制组件发生错误，请重试或重新启动应用。",
+            _ => status.Reason switch
+            {
+                CaptureReasonCode.SessionLocked or
+                CaptureReasonCode.SecureDesktop =>
+                    "Windows 安全会话结束后将自动恢复录制。",
+                CaptureReasonCode.SystemSleep =>
+                    "系统恢复后将重新确认录制条件。",
+                CaptureReasonCode.StorageConstrained =>
+                    "请释放本地存储空间后再继续记录。",
+                CaptureReasonCode.DisplayUnavailable or
+                CaptureReasonCode.AccessLost =>
+                    "正在等待可用显示器或录制权限恢复。",
+                _ => "录制状态与当前意图不一致，请重试或重新启动应用。",
+            },
         };
     }
 
-    private static bool IsAutomaticProtectionReason(CaptureReasonCode reason)
-    {
-        return reason is
-            CaptureReasonCode.ExcludedApplication or
-            CaptureReasonCode.ExcludedWindow or
-            CaptureReasonCode.SessionLocked or
-            CaptureReasonCode.SecureDesktop or
-            CaptureReasonCode.RemoteSession or
-            CaptureReasonCode.PresentationMode or
-            CaptureReasonCode.SystemSleep or
-            CaptureReasonCode.DisplayUnavailable or
-            CaptureReasonCode.AccessLost or
-            CaptureReasonCode.StorageConstrained or
-            CaptureReasonCode.PolicyBlocked;
-    }
-
-    private sealed record StatusUpdate(
-        CaptureStatusViewModel ViewModel,
-        CaptureStatus Status);
+    private sealed record StatusUpdate(CaptureStatusViewModel ViewModel);
 }

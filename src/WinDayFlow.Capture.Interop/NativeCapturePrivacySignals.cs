@@ -103,35 +103,10 @@ public static class NativeCapturePrivacyPolicy
         ArgumentNullException.ThrowIfNull(settings);
         ArgumentNullException.ThrowIfNull(signals);
 
-        var consentGranted = settings.CaptureEnabled
+        var consentGranted = settings.CaptureIntent == CaptureIntent.Recording
             && HasCurrentRecordingConsent(settings)
                 ? NativeCapturePolicyDecision.Allow
                 : NativeCapturePolicyDecision.Block;
-        var remoteSessionAllowed = settings.CapturePrivacy.PauseInRemoteSessions
-            ? RequireInactive(signals.RemoteSession)
-            : NativeCapturePolicyDecision.Allow;
-        var presentationAllowed = settings.CapturePrivacy.PauseDuringScreenSharing
-            ? RequireInactive(signals.PresentationMode)
-            : NativeCapturePolicyDecision.Allow;
-        var allowAllApplications = settings.CapturePrivacy.ApplicationPrivacyMode
-            == CaptureApplicationPrivacyMode.AllowAllApplications;
-        var exclusion = NativeCaptureExclusionRuleMatcher.Evaluate(
-            settings.CapturePrivacy.ExclusionRules,
-            signals.CaptureIdentity);
-        var applicationAllowed = allowAllApplications
-            ? NativeCapturePolicyDecision.Allow
-            : CombineExclusionPolicies(
-                settings.CapturePrivacy.ExcludeSensitiveApplications,
-                signals.ApplicationAllowed,
-                exclusion.Application.HasEnabledRules,
-                exclusion.Application.Decision);
-        var windowAllowed = allowAllApplications
-            ? NativeCapturePolicyDecision.Allow
-            : CombineExclusionPolicies(
-                settings.CapturePrivacy.ExcludeSensitiveApplications,
-                signals.WindowAllowed,
-                exclusion.Window.HasEnabledRules,
-                exclusion.Window.Decision);
         var secureDesktopClear = IsWindowsLockScreen(signals.CaptureIdentity)
             ? NativeCapturePolicyDecision.Block
             : signals.SecureDesktopClear;
@@ -140,10 +115,10 @@ public static class NativeCapturePrivacyPolicy
             consentGranted,
             signals.SessionUnlocked,
             secureDesktopClear,
-            remoteSessionAllowed,
-            presentationAllowed,
-            applicationAllowed,
-            windowAllowed,
+            NativeCapturePolicyDecision.Allow,
+            NativeCapturePolicyDecision.Allow,
+            NativeCapturePolicyDecision.Allow,
+            NativeCapturePolicyDecision.Allow,
             signals.StorageAvailable,
             runtimePolicyRevision);
     }
@@ -162,52 +137,6 @@ public static class NativeCapturePrivacyPolicy
     private static bool HasCurrentRecordingConsent(AppSettings settings)
     {
         return settings.RecordingConsent is { } consent
-            && consent.PolicyVersion == AppSettingsService.CurrentRecordingConsentVersion
-            && consent.PrivacyRevision == settings.CapturePrivacy.Revision;
-    }
-
-    private static NativeCapturePolicyDecision RequireInactive(
-        NativeCaptureConditionState condition)
-    {
-        return condition switch
-        {
-            NativeCaptureConditionState.Inactive => NativeCapturePolicyDecision.Allow,
-            NativeCaptureConditionState.Active => NativeCapturePolicyDecision.Block,
-            _ => NativeCapturePolicyDecision.Unknown,
-        };
-    }
-
-    private static NativeCapturePolicyDecision CombineExclusionPolicies(
-        bool includeBuiltInPolicy,
-        NativeCapturePolicyDecision builtInDecision,
-        bool includeUserRules,
-        NativeCapturePolicyDecision userRuleDecision)
-    {
-        var effectiveBuiltInDecision = includeBuiltInPolicy
-            ? builtInDecision
-            : NativeCapturePolicyDecision.Allow;
-        var effectiveUserRuleDecision = includeUserRules
-            ? userRuleDecision
-            : NativeCapturePolicyDecision.Allow;
-
-        return MostRestrictive(
-            effectiveBuiltInDecision,
-            effectiveUserRuleDecision);
-    }
-
-    private static NativeCapturePolicyDecision MostRestrictive(
-        NativeCapturePolicyDecision left,
-        NativeCapturePolicyDecision right)
-    {
-        if (left == NativeCapturePolicyDecision.Block
-            || right == NativeCapturePolicyDecision.Block)
-        {
-            return NativeCapturePolicyDecision.Block;
-        }
-
-        return left == NativeCapturePolicyDecision.Unknown
-            || right == NativeCapturePolicyDecision.Unknown
-                ? NativeCapturePolicyDecision.Unknown
-                : NativeCapturePolicyDecision.Allow;
+            && consent.PolicyVersion == AppSettingsService.CurrentRecordingConsentVersion;
     }
 }

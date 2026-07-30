@@ -63,6 +63,23 @@ boundaries. Sparse frames may consequently be a deduplication result rather than
 a recording gap. The response must still cover the requested interval
 continuously, using unknown labels when evidence is insufficient.
 
+## Provider-routing boundary
+
+[ADR 0015](adr/0015-user-controlled-capture-and-provider-routing.md) separates
+this aggregation contract from provider trust and privacy-processing choices.
+The user may disable provider analysis, route the original bounded evidence
+directly to a timeline provider, enable a privacy-inspection stage first, or use
+the same or different provider profiles for those stages. WinDayFlow does not
+infer whether a profile is trusted from its endpoint or deployment location.
+
+When privacy inspection is enabled, its normalized result and the selected user
+policy determine whether original evidence, a separate redacted derivative, or
+no image continues into the timeline request. The 45-minute window membership,
+source fingerprints, evidence references, locked-card baseline, and transactional
+rewrite rules remain unchanged. A route or screening revision becomes part of
+the analysis input identity so stale results cannot commit across a user policy
+change.
+
 ## Rewrite and provenance contract
 
 An analyzed `TimelineEntry` can reference multiple ordered

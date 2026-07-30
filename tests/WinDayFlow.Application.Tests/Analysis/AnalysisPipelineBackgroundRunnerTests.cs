@@ -1,8 +1,6 @@
 using System.Threading.Channels;
-using WinDayFlow.Application.Ai;
 using WinDayFlow.Application.Analysis;
 using WinDayFlow.Application.Capture;
-using WinDayFlow.Application.Settings;
 using Xunit;
 
 namespace WinDayFlow.Application.Tests.Analysis;
@@ -12,7 +10,7 @@ public sealed class AnalysisPipelineBackgroundRunnerTests
     private static readonly TimeSpan TestTimeout = TimeSpan.FromSeconds(5);
 
     [Fact]
-    public async Task StartRunsImmediatelyAndRelevantEventsWakeThePipeline()
+    public async Task StartRunsImmediatelyAndChunkEventsWakeThePipeline()
     {
         var recorder = new RunRecorder();
         await using var harness = await CreateHarnessAsync(recorder.RunAsync);
@@ -22,20 +20,7 @@ public sealed class AnalysisPipelineBackgroundRunnerTests
 
         harness.ChunkNotifier.RaiseCommitted();
         Assert.Equal(2, await recorder.ReadCallAsync());
-
-        await harness.ProviderConfiguration.SaveAsync(
-            "Local test provider",
-            "http://localhost:11434/v1/",
-            "vision-test",
-            requestTimeoutSeconds: 30,
-            replacementApiKey: null);
-        Assert.Equal(3, await recorder.ReadCallAsync());
-
-        await harness.Settings.SetCloudAnalysisEnabledAsync(enabled: true);
-        Assert.Equal(4, await recorder.ReadCallAsync());
-
-        await harness.Settings.SetThemeAsync(AppThemePreference.Dark);
-        Assert.Equal(4, recorder.CallCount);
+        Assert.Equal(2, recorder.CallCount);
     }
 
     [Fact]
@@ -442,13 +427,6 @@ public sealed class AnalysisPipelineBackgroundRunnerTests
         await runCancelled.Task.WaitAsync(TestTimeout);
         Assert.Equal(0, harness.ChunkNotifier.SubscriberCount);
         harness.ChunkNotifier.RaiseCommitted();
-        await harness.Settings.SetCloudAnalysisEnabledAsync(enabled: true);
-        await harness.ProviderConfiguration.SaveAsync(
-            "Provider after stop",
-            "http://localhost:11434/v1/",
-            "vision-after-stop",
-            requestTimeoutSeconds: 30,
-            replacementApiKey: null);
         Assert.Equal(1, Volatile.Read(ref callCount));
         var stopped = await statuses.ReadAsync();
         Assert.Equal(AnalysisPipelineActivityState.Idle, stopped.State);
@@ -498,29 +476,18 @@ public sealed class AnalysisPipelineBackgroundRunnerTests
         AnalysisPipelineBackgroundRunnerOptions? options = null,
         Func<TimeSpan, CancellationToken, Task>? delayAsync = null)
     {
-        var settings = new AppSettingsService(new TestSettingsRepository());
-        await settings.InitializeAsync();
-        var providerStore = new TestProviderProfileStore();
-        var providerConfiguration = new AiProviderConfigurationService(
-            providerStore,
-            new UnusedProviderFactory(),
-            settings);
-        await providerConfiguration.InitializeAsync();
+        await Task.CompletedTask;
         var chunkNotifier = new TestChunkCommitNotifier();
         var statusSource = new AnalysisPipelineStatusSource();
         var runner = new AnalysisPipelineBackgroundRunner(
             runOnceAsync,
             chunkNotifier,
-            settings,
-            providerConfiguration,
             options,
             delayAsync ?? WaitForeverAsync,
             statusSource);
         return new TestHarness(
             runner,
             chunkNotifier,
-            settings,
-            providerConfiguration,
             statusSource);
     }
 
@@ -550,8 +517,6 @@ public sealed class AnalysisPipelineBackgroundRunnerTests
     private sealed class TestHarness(
         AnalysisPipelineBackgroundRunner runner,
         TestChunkCommitNotifier chunkNotifier,
-        AppSettingsService settings,
-        AiProviderConfigurationService providerConfiguration,
         AnalysisPipelineStatusSource statusSource)
         : IAsyncDisposable
     {
@@ -560,11 +525,6 @@ public sealed class AnalysisPipelineBackgroundRunnerTests
         public AnalysisPipelineBackgroundRunner Runner { get; } = runner;
 
         public TestChunkCommitNotifier ChunkNotifier { get; } = chunkNotifier;
-
-        public AppSettingsService Settings { get; } = settings;
-
-        public AiProviderConfigurationService ProviderConfiguration { get; } =
-            providerConfiguration;
 
         public AnalysisPipelineStatusSource StatusSource { get; } = statusSource;
 
@@ -578,8 +538,6 @@ public sealed class AnalysisPipelineBackgroundRunnerTests
         {
             if (Interlocked.Exchange(ref _dependenciesDisposed, 1) == 0)
             {
-                ProviderConfiguration.Dispose();
-                Settings.Dispose();
             }
 
             return Task.CompletedTask;
@@ -753,86 +711,4 @@ public sealed class AnalysisPipelineBackgroundRunnerTests
         }
     }
 
-    private sealed class TestSettingsRepository : IAppSettingsRepository
-    {
-        private AppSettings _current = AppSettings.Default;
-
-        public Task<AppSettings> GetAsync(
-            CancellationToken cancellationToken = default)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            return Task.FromResult(_current);
-        }
-
-        public Task SaveAsync(
-            AppSettings expected,
-            AppSettings proposed,
-            CancellationToken cancellationToken = default)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            Assert.Equal(_current, expected);
-            _current = proposed;
-            return Task.CompletedTask;
-        }
-    }
-
-    private sealed class TestProviderProfileStore : IAiProviderProfileStore
-    {
-        private AiProviderProfileSnapshot? _current;
-
-        public Task<AiProviderProfileSnapshot?> GetActiveAsync(
-            CancellationToken cancellationToken = default)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            return Task.FromResult(_current);
-        }
-
-        public Task<AiProviderProfileSnapshot> SaveActiveAsync(
-            AiProviderProfile profile,
-            long? expectedRevision,
-            AiProviderCredentialUpdate credentialUpdate,
-            DateTimeOffset changedAtUtc,
-            CancellationToken cancellationToken = default)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            Assert.Equal(_current?.Revision, expectedRevision);
-            _ = changedAtUtc;
-            var revision = checked((_current?.Revision ?? 0) + 1);
-            var hasApiKey = credentialUpdate.Kind switch
-            {
-                AiProviderCredentialUpdateKind.Preserve =>
-                    _current?.HasApiKey == true,
-                AiProviderCredentialUpdateKind.Replace => true,
-                AiProviderCredentialUpdateKind.Clear => false,
-                _ => throw new ArgumentOutOfRangeException(
-                    nameof(credentialUpdate)),
-            };
-            _current = new AiProviderProfileSnapshot(
-                profile,
-                revision,
-                hasApiKey,
-                validatedRevision: null,
-                validatedAtUtc: null);
-            return Task.FromResult(_current);
-        }
-
-        public Task<AiProviderProfileSnapshot?> MarkValidatedAsync(
-            Guid profileId,
-            long expectedRevision,
-            DateTimeOffset validatedAtUtc,
-            CancellationToken cancellationToken = default)
-        {
-            throw new NotSupportedException();
-        }
-    }
-
-    private sealed class UnusedProviderFactory : IAiAnalysisProviderFactory
-    {
-        public Task<IAiAnalysisProvider> CreateAsync(
-            AiProviderProfileSnapshot snapshot,
-            CancellationToken cancellationToken = default)
-        {
-            throw new NotSupportedException();
-        }
-    }
 }

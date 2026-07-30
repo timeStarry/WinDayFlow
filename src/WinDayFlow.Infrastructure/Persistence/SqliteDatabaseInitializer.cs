@@ -5,7 +5,7 @@ namespace WinDayFlow.Infrastructure.Persistence;
 
 public sealed class SqliteDatabaseInitializer
 {
-    private const int LatestSchemaVersion = 12;
+    private const int LatestSchemaVersion = 13;
 
     private const string CreateMigrationTableSql = """
         CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -753,6 +753,514 @@ public sealed class SqliteDatabaseInitializer
         );
         """;
 
+    private const string MigrationVersion13Sql = """
+        DELETE FROM timeline_entry_evidence;
+        DELETE FROM timeline_entry_apps;
+        DELETE FROM timeline_entry_tags;
+        DELETE FROM timeline_entries;
+        DELETE FROM analysis_job_window_members;
+        DELETE FROM analysis_jobs;
+        DELETE FROM capture_chunks;
+
+        DROP TABLE analysis_job_window_members;
+        DROP TABLE analysis_jobs;
+
+        DROP INDEX IF EXISTS ux_ai_provider_profiles_single_active;
+
+        ALTER TABLE app_settings
+        ADD COLUMN capture_intent INTEGER NOT NULL DEFAULT 0 CHECK (
+            capture_intent IN (0, 1, 2)
+        );
+
+        UPDATE app_settings
+        SET capture_intent = CASE capture_enabled WHEN 1 THEN 2 ELSE 0 END
+        WHERE id = 1;
+
+        DROP TABLE capture_chunks;
+
+        CREATE TABLE capture_chunks (
+            id TEXT NOT NULL PRIMARY KEY CHECK (
+                length(id) BETWEEN 1 AND 80
+                AND id = lower(id)
+                AND id NOT GLOB '*[^a-z0-9_-]*'
+            ),
+            manifest_relative_path TEXT NOT NULL UNIQUE COLLATE NOCASE CHECK (
+                manifest_relative_path = 'chunks/' || id || '/manifest.json'
+            ),
+            start_utc_ticks INTEGER NOT NULL CHECK (start_utc_ticks >= 0),
+            start_offset_minutes INTEGER NOT NULL CHECK (
+                start_offset_minutes BETWEEN -840 AND 840
+            ),
+            end_utc_ticks INTEGER NOT NULL CHECK (end_utc_ticks > start_utc_ticks),
+            end_offset_minutes INTEGER NOT NULL CHECK (
+                end_offset_minutes BETWEEN -840 AND 840
+            ),
+            captured_frame_count INTEGER NOT NULL CHECK (captured_frame_count > 0),
+            frame_count INTEGER NOT NULL CHECK (
+                frame_count BETWEEN 0 AND 720
+                AND frame_count <= captured_frame_count
+            ),
+            frame_width INTEGER NOT NULL CHECK (
+                frame_width >= 2 AND frame_width % 2 = 0
+            ),
+            frame_height INTEGER NOT NULL CHECK (
+                frame_height >= 2 AND frame_height % 2 = 0
+            ),
+            frame_byte_count INTEGER NOT NULL CHECK (
+                frame_byte_count BETWEEN 0 AND 67108864
+                AND ((frame_count = 0 AND frame_byte_count = 0)
+                    OR (frame_count > 0 AND frame_byte_count > 0))
+            ),
+            persistence_generation_hex TEXT NOT NULL CHECK (
+                length(persistence_generation_hex) = 16
+                AND persistence_generation_hex NOT GLOB '*[^0-9A-F]*'
+                AND persistence_generation_hex <> '0000000000000000'
+            ),
+            target_epoch_hex TEXT NOT NULL CHECK (
+                length(target_epoch_hex) = 16
+                AND target_epoch_hex NOT GLOB '*[^0-9A-F]*'
+                AND target_epoch_hex <> '0000000000000000'
+            ),
+            committed_at_utc_ticks INTEGER NOT NULL CHECK (committed_at_utc_ticks >= 0),
+            ingested_at_utc_ticks INTEGER NOT NULL CHECK (ingested_at_utc_ticks >= 0),
+            availability INTEGER NOT NULL CHECK (availability BETWEEN 0 AND 2),
+            process_name TEXT NULL CHECK (
+                process_name IS NULL
+                OR (
+                    length(process_name) BETWEEN 1 AND 260
+                    AND process_name = trim(process_name)
+                    AND instr(process_name, char(0)) = 0
+                )
+            ),
+            process_id INTEGER NULL CHECK (
+                process_id IS NULL OR process_id BETWEEN 1 AND 4294967295
+            ),
+            cpu_usage_basis_points INTEGER NULL CHECK (
+                cpu_usage_basis_points IS NULL
+                OR cpu_usage_basis_points BETWEEN 0 AND 10000
+            ),
+            working_set_bytes INTEGER NULL CHECK (
+                working_set_bytes IS NULL OR working_set_bytes >= 0
+            ),
+            private_memory_bytes INTEGER NULL CHECK (
+                private_memory_bytes IS NULL OR private_memory_bytes >= 0
+            ),
+            black_frame_count INTEGER NOT NULL CHECK (
+                black_frame_count >= 0
+                AND black_frame_count <= captured_frame_count
+            ),
+            duplicate_frame_count INTEGER NOT NULL CHECK (
+                duplicate_frame_count >= 0
+                AND duplicate_frame_count <= captured_frame_count
+                AND black_frame_count + duplicate_frame_count + frame_count
+                    = captured_frame_count
+            )
+        );
+
+        CREATE INDEX ix_capture_chunks_range
+            ON capture_chunks(start_utc_ticks, end_utc_ticks, id);
+
+        CREATE TABLE analysis_jobs (
+            id TEXT NOT NULL PRIMARY KEY CHECK (
+                length(id) = 36 AND id = lower(id)
+            ),
+            capture_chunk_id TEXT NOT NULL,
+            provider_profile_id TEXT NOT NULL CHECK (
+                length(provider_profile_id) = 36
+                AND provider_profile_id = lower(provider_profile_id)
+            ),
+            provider_profile_revision INTEGER NOT NULL CHECK (
+                provider_profile_revision > 0
+            ),
+            analysis_version TEXT NOT NULL CHECK (
+                length(analysis_version) BETWEEN 1 AND 128
+                AND analysis_version = trim(analysis_version)
+            ),
+            input_fingerprint TEXT NOT NULL CHECK (
+                length(input_fingerprint) = 64
+                AND input_fingerprint NOT GLOB '*[^0-9A-F]*'
+            ),
+            state INTEGER NOT NULL CHECK (state BETWEEN 0 AND 9),
+            attempt INTEGER NOT NULL CHECK (attempt >= 0),
+            max_attempts INTEGER NOT NULL CHECK (max_attempts BETWEEN 1 AND 100),
+            not_before_utc_ticks INTEGER NULL CHECK (
+                not_before_utc_ticks IS NULL OR not_before_utc_ticks >= 0
+            ),
+            lease_owner TEXT NULL CHECK (
+                lease_owner IS NULL
+                OR (
+                    length(lease_owner) BETWEEN 1 AND 128
+                    AND lease_owner = trim(lease_owner)
+                    AND instr(lease_owner, char(0)) = 0
+                )
+            ),
+            lease_token TEXT NULL CHECK (
+                lease_token IS NULL
+                OR (
+                    length(lease_token) = 32
+                    AND lease_token NOT GLOB '*[^0-9a-f]*'
+                )
+            ),
+            lease_expires_at_utc_ticks INTEGER NULL CHECK (
+                lease_expires_at_utc_ticks IS NULL OR lease_expires_at_utc_ticks >= 0
+            ),
+            error_code INTEGER NOT NULL CHECK (
+                error_code IN (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 255)
+            ),
+            error_detail TEXT NULL CHECK (
+                error_detail IS NULL
+                OR (
+                    length(error_detail) <= 1000
+                    AND instr(error_detail, char(0)) = 0
+                )
+            ),
+            created_at_utc_ticks INTEGER NOT NULL CHECK (created_at_utc_ticks >= 0),
+            updated_at_utc_ticks INTEGER NOT NULL CHECK (
+                updated_at_utc_ticks >= created_at_utc_ticks
+            ),
+            completed_at_utc_ticks INTEGER NULL CHECK (
+                completed_at_utc_ticks IS NULL
+                OR completed_at_utc_ticks >= created_at_utc_ticks
+            ),
+            FOREIGN KEY (capture_chunk_id) REFERENCES capture_chunks(id) ON DELETE RESTRICT,
+            UNIQUE (
+                capture_chunk_id,
+                provider_profile_id,
+                provider_profile_revision,
+                analysis_version,
+                input_fingerprint
+            ),
+            CHECK (attempt <= max_attempts),
+            CHECK (
+                (state = 0 AND attempt = 0)
+                OR state = 9
+                OR (state NOT IN (0, 9) AND attempt > 0)
+            ),
+            CHECK (state <> 7 OR attempt < max_attempts),
+            CHECK (
+                (state IN (0, 7) AND not_before_utc_ticks IS NOT NULL)
+                OR (state NOT IN (0, 7) AND not_before_utc_ticks IS NULL)
+            ),
+            CHECK (
+                (state BETWEEN 1 AND 5
+                    AND lease_owner IS NOT NULL
+                    AND lease_token IS NOT NULL
+                    AND lease_expires_at_utc_ticks IS NOT NULL
+                    AND lease_expires_at_utc_ticks > updated_at_utc_ticks)
+                OR
+                (state NOT BETWEEN 1 AND 5
+                    AND lease_owner IS NULL
+                    AND lease_token IS NULL
+                    AND lease_expires_at_utc_ticks IS NULL)
+            ),
+            CHECK (
+                (state IN (7, 8) AND error_code <> 0)
+                OR
+                (state NOT IN (7, 8) AND error_code = 0 AND error_detail IS NULL)
+            ),
+            CHECK (
+                (state IN (6, 8, 9) AND completed_at_utc_ticks IS NOT NULL)
+                OR (state NOT IN (6, 8, 9) AND completed_at_utc_ticks IS NULL)
+            )
+        );
+
+        CREATE INDEX ix_analysis_jobs_eligible
+            ON analysis_jobs(state, not_before_utc_ticks, created_at_utc_ticks, id);
+
+        CREATE INDEX ix_analysis_jobs_expired_lease
+            ON analysis_jobs(state, lease_expires_at_utc_ticks, id);
+
+        CREATE INDEX ix_analysis_jobs_provider_revision_state
+            ON analysis_jobs(provider_profile_id, provider_profile_revision, state);
+
+        CREATE TABLE analysis_job_window_members (
+            analysis_job_id TEXT NOT NULL,
+            ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+            capture_chunk_id TEXT NOT NULL,
+            source_fingerprint TEXT NOT NULL CHECK (
+                length(source_fingerprint) = 64
+                AND source_fingerprint NOT GLOB '*[^0-9A-F]*'
+            ),
+            contribution_start_utc_ticks INTEGER NOT NULL,
+            contribution_start_offset_minutes INTEGER NOT NULL,
+            contribution_end_utc_ticks INTEGER NOT NULL,
+            contribution_end_offset_minutes INTEGER NOT NULL,
+            PRIMARY KEY (analysis_job_id, ordinal),
+            UNIQUE (analysis_job_id, capture_chunk_id),
+            FOREIGN KEY (analysis_job_id)
+                REFERENCES analysis_jobs(id) ON DELETE CASCADE,
+            FOREIGN KEY (capture_chunk_id)
+                REFERENCES capture_chunks(id) ON DELETE RESTRICT,
+            CHECK (contribution_end_utc_ticks > contribution_start_utc_ticks)
+        );
+
+        CREATE INDEX ix_analysis_job_window_members_chunk
+            ON analysis_job_window_members(capture_chunk_id, analysis_job_id);
+
+        CREATE TABLE analysis_stage_bindings (
+            stage INTEGER NOT NULL PRIMARY KEY CHECK (stage IN (0, 1)),
+            provider_profile_id TEXT NULL CHECK (
+                provider_profile_id IS NULL
+                OR (length(provider_profile_id) = 36 AND provider_profile_id = lower(provider_profile_id))
+            ),
+            enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+            route_revision INTEGER NOT NULL CHECK (route_revision > 0),
+            options_json TEXT NOT NULL CHECK (
+                length(options_json) BETWEEN 2 AND 4096
+                AND json_valid(options_json)
+            ),
+            updated_at_utc_ticks INTEGER NOT NULL CHECK (updated_at_utc_ticks >= 0),
+            FOREIGN KEY (provider_profile_id)
+                REFERENCES ai_provider_profiles(id) ON DELETE RESTRICT,
+            CHECK (enabled = 0 OR provider_profile_id IS NOT NULL)
+        );
+
+        INSERT INTO analysis_stage_bindings(
+            stage,
+            provider_profile_id,
+            enabled,
+            route_revision,
+            options_json,
+            updated_at_utc_ticks)
+        VALUES (
+            0,
+            NULL,
+            0,
+            1,
+            '{"onMatch":1,"onError":0}',
+            (CAST(strftime('%s', 'now') AS INTEGER) * 10000000) + 621355968000000000
+        );
+
+        INSERT INTO analysis_stage_bindings(
+            stage,
+            provider_profile_id,
+            enabled,
+            route_revision,
+            options_json,
+            updated_at_utc_ticks)
+        SELECT
+            1,
+            (SELECT id FROM ai_provider_profiles WHERE is_active = 1 LIMIT 1),
+            CASE
+                WHEN cloud_analysis_enabled = 1
+                    AND EXISTS (SELECT 1 FROM ai_provider_profiles WHERE is_active = 1)
+                THEN 1
+                ELSE 0
+            END,
+            1,
+            '{}',
+            (CAST(strftime('%s', 'now') AS INTEGER) * 10000000) + 621355968000000000
+        FROM app_settings
+        WHERE id = 1;
+
+        UPDATE ai_provider_profiles SET is_active = 0;
+        UPDATE app_settings SET cloud_analysis_enabled = 0 WHERE id = 1;
+
+        CREATE TABLE provider_profile_validations (
+            provider_profile_id TEXT NOT NULL,
+            provider_profile_revision INTEGER NOT NULL CHECK (provider_profile_revision > 0),
+            stage INTEGER NOT NULL CHECK (stage IN (0, 1)),
+            validated_at_utc_ticks INTEGER NOT NULL CHECK (validated_at_utc_ticks >= 0),
+            PRIMARY KEY (provider_profile_id, provider_profile_revision, stage),
+            FOREIGN KEY (provider_profile_id)
+                REFERENCES ai_provider_profiles(id) ON DELETE CASCADE
+        );
+
+        INSERT INTO provider_profile_validations(
+            provider_profile_id,
+            provider_profile_revision,
+            stage,
+            validated_at_utc_ticks)
+        SELECT
+            id,
+            revision,
+            1,
+            validated_at_utc_ticks
+        FROM ai_provider_profiles
+        WHERE validated_revision = revision
+            AND validated_at_utc_ticks IS NOT NULL;
+
+        CREATE TABLE privacy_screenings (
+            id TEXT NOT NULL PRIMARY KEY CHECK (length(id) = 36 AND id = lower(id)),
+            capture_chunk_id TEXT NOT NULL,
+            provider_profile_id TEXT NOT NULL,
+            provider_profile_revision INTEGER NOT NULL CHECK (provider_profile_revision > 0),
+            route_revision INTEGER NOT NULL CHECK (route_revision > 0),
+            input_fingerprint TEXT NOT NULL CHECK (
+                length(input_fingerprint) = 64
+                AND input_fingerprint NOT GLOB '*[^0-9A-F]*'
+            ),
+            state INTEGER NOT NULL CHECK (state BETWEEN 0 AND 7),
+            verdict INTEGER NULL CHECK (verdict IS NULL OR verdict BETWEEN 0 AND 2),
+            result_json TEXT NULL CHECK (result_json IS NULL OR json_valid(result_json)),
+            derivative_manifest_relative_path TEXT NULL CHECK (
+                derivative_manifest_relative_path IS NULL
+                OR derivative_manifest_relative_path LIKE 'screenings/%/manifest.json'
+            ),
+            output_fingerprint TEXT NULL CHECK (
+                output_fingerprint IS NULL
+                OR (
+                    length(output_fingerprint) = 64
+                    AND output_fingerprint NOT GLOB '*[^0-9A-F]*'
+                )
+            ),
+            attempt INTEGER NOT NULL DEFAULT 0 CHECK (attempt BETWEEN 0 AND 100),
+            error_code INTEGER NULL,
+            revision INTEGER NOT NULL CHECK (revision > 0),
+            created_at_utc_ticks INTEGER NOT NULL CHECK (created_at_utc_ticks >= 0),
+            updated_at_utc_ticks INTEGER NOT NULL CHECK (updated_at_utc_ticks >= created_at_utc_ticks),
+            FOREIGN KEY (capture_chunk_id) REFERENCES capture_chunks(id) ON DELETE CASCADE,
+            FOREIGN KEY (provider_profile_id) REFERENCES ai_provider_profiles(id) ON DELETE RESTRICT,
+            UNIQUE (
+                capture_chunk_id,
+                provider_profile_id,
+                provider_profile_revision,
+                route_revision,
+                input_fingerprint
+            )
+        );
+
+        CREATE INDEX ix_privacy_screenings_state
+            ON privacy_screenings(state, updated_at_utc_ticks, id);
+
+        CREATE INDEX ix_privacy_screenings_output
+            ON privacy_screenings(capture_chunk_id, output_fingerprint)
+            WHERE output_fingerprint IS NOT NULL;
+
+        CREATE TABLE provider_invocations (
+            id TEXT NOT NULL PRIMARY KEY CHECK (length(id) = 36 AND id = lower(id)),
+            stage INTEGER NOT NULL CHECK (stage IN (0, 1)),
+            provider_profile_id TEXT NOT NULL,
+            provider_profile_revision INTEGER NOT NULL CHECK (provider_profile_revision > 0),
+            route_revision INTEGER NOT NULL CHECK (route_revision > 0),
+            endpoint_origin TEXT NOT NULL CHECK (
+                length(endpoint_origin) BETWEEN 1 AND 512
+                AND endpoint_origin = trim(endpoint_origin)
+            ),
+            evidence_fingerprint TEXT NOT NULL CHECK (
+                length(evidence_fingerprint) = 64
+                AND evidence_fingerprint NOT GLOB '*[^0-9A-F]*'
+            ),
+            item_count INTEGER NOT NULL CHECK (item_count BETWEEN 0 AND 256),
+            byte_count INTEGER NOT NULL CHECK (byte_count >= 0),
+            outcome INTEGER NOT NULL CHECK (outcome BETWEEN 0 AND 4),
+            correlation_id TEXT NOT NULL CHECK (length(correlation_id) = 36),
+            started_at_utc_ticks INTEGER NOT NULL CHECK (started_at_utc_ticks >= 0),
+            completed_at_utc_ticks INTEGER NULL CHECK (
+                completed_at_utc_ticks IS NULL OR completed_at_utc_ticks >= started_at_utc_ticks
+            ),
+            input_tokens INTEGER NULL CHECK (input_tokens IS NULL OR input_tokens >= 0),
+            output_tokens INTEGER NULL CHECK (output_tokens IS NULL OR output_tokens >= 0),
+            FOREIGN KEY (provider_profile_id) REFERENCES ai_provider_profiles(id) ON DELETE RESTRICT
+        );
+
+        CREATE INDEX ix_provider_invocations_started
+            ON provider_invocations(started_at_utc_ticks, stage, outcome);
+
+        CREATE TABLE evidence_send_overrides (
+            id TEXT NOT NULL PRIMARY KEY CHECK (length(id) = 36 AND id = lower(id)),
+            capture_chunk_id TEXT NOT NULL,
+            stage INTEGER NOT NULL CHECK (stage IN (0, 1)),
+            provider_profile_id TEXT NOT NULL,
+            provider_profile_revision INTEGER NOT NULL CHECK (provider_profile_revision > 0),
+            route_revision INTEGER NOT NULL CHECK (route_revision > 0),
+            evidence_fingerprint TEXT NOT NULL CHECK (length(evidence_fingerprint) = 64),
+            logical_operation_id TEXT NOT NULL CHECK (length(logical_operation_id) = 36),
+            remaining_uses INTEGER NOT NULL CHECK (remaining_uses BETWEEN 0 AND 20),
+            created_at_utc_ticks INTEGER NOT NULL CHECK (created_at_utc_ticks >= 0),
+            expires_at_utc_ticks INTEGER NOT NULL CHECK (
+                expires_at_utc_ticks > created_at_utc_ticks
+            ),
+            last_consumed_at_utc_ticks INTEGER NULL CHECK (
+                last_consumed_at_utc_ticks IS NULL
+                OR last_consumed_at_utc_ticks >= created_at_utc_ticks
+            ),
+            FOREIGN KEY (capture_chunk_id) REFERENCES capture_chunks(id) ON DELETE CASCADE,
+            FOREIGN KEY (provider_profile_id) REFERENCES ai_provider_profiles(id) ON DELETE RESTRICT
+        );
+
+        CREATE TABLE application_catalog (
+            application_id TEXT NOT NULL PRIMARY KEY CHECK (
+                length(application_id) BETWEEN 1 AND 320
+                AND application_id = trim(application_id)
+            ),
+            identity_kind INTEGER NOT NULL CHECK (identity_kind BETWEEN 0 AND 2),
+            identity_value TEXT NOT NULL CHECK (
+                length(identity_value) BETWEEN 1 AND 260
+                AND identity_value = trim(identity_value)
+            ),
+            display_name TEXT NOT NULL CHECK (
+                length(display_name) BETWEEN 1 AND 160
+                AND display_name = trim(display_name)
+            ),
+            icon_cache_key TEXT NULL CHECK (
+                icon_cache_key IS NULL
+                OR (length(icon_cache_key) = 64 AND icon_cache_key NOT GLOB '*[^0-9A-F]*')
+            ),
+            first_seen_utc_ticks INTEGER NOT NULL CHECK (first_seen_utc_ticks >= 0),
+            last_seen_utc_ticks INTEGER NOT NULL CHECK (last_seen_utc_ticks >= first_seen_utc_ticks)
+        );
+
+        CREATE TABLE capture_context_samples (
+            capture_chunk_id TEXT NOT NULL,
+            ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+            sampled_at_utc_ticks INTEGER NOT NULL CHECK (sampled_at_utc_ticks >= 0),
+            application_id TEXT NULL,
+            process_id INTEGER NULL CHECK (process_id IS NULL OR process_id BETWEEN 1 AND 4294967295),
+            cpu_usage_basis_points INTEGER NULL CHECK (
+                cpu_usage_basis_points IS NULL OR cpu_usage_basis_points BETWEEN 0 AND 10000
+            ),
+            working_set_bytes INTEGER NULL CHECK (working_set_bytes IS NULL OR working_set_bytes >= 0),
+            private_memory_bytes INTEGER NULL CHECK (private_memory_bytes IS NULL OR private_memory_bytes >= 0),
+            evaluated_rule_set_revision INTEGER NULL CHECK (
+                evaluated_rule_set_revision IS NULL OR evaluated_rule_set_revision > 0
+            ),
+            application_context_available INTEGER NOT NULL DEFAULT 0 CHECK (
+                application_context_available IN (0, 1)
+            ),
+            window_context_available INTEGER NOT NULL DEFAULT 0 CHECK (
+                window_context_available IN (0, 1)
+            ),
+            CHECK (
+                evaluated_rule_set_revision IS NOT NULL
+                OR (application_context_available = 0 AND window_context_available = 0)
+            ),
+            PRIMARY KEY (capture_chunk_id, ordinal),
+            FOREIGN KEY (capture_chunk_id) REFERENCES capture_chunks(id) ON DELETE CASCADE,
+            FOREIGN KEY (application_id) REFERENCES application_catalog(application_id) ON DELETE SET NULL
+        );
+
+        CREATE TABLE capture_context_rule_matches (
+            capture_chunk_id TEXT NOT NULL,
+            sample_ordinal INTEGER NOT NULL,
+            rule_id TEXT NOT NULL CHECK (length(rule_id) = 36 AND rule_id = lower(rule_id)),
+            rule_revision INTEGER NOT NULL CHECK (rule_revision > 0),
+            PRIMARY KEY (capture_chunk_id, sample_ordinal, rule_id),
+            FOREIGN KEY (capture_chunk_id, sample_ordinal)
+                REFERENCES capture_context_samples(capture_chunk_id, ordinal) ON DELETE CASCADE
+        );
+
+        CREATE TABLE app_installation (
+            id INTEGER NOT NULL PRIMARY KEY CHECK (id = 1),
+            first_started_at_utc_ticks INTEGER NOT NULL CHECK (first_started_at_utc_ticks >= 0)
+        );
+
+        INSERT INTO app_installation(id, first_started_at_utc_ticks)
+        VALUES (
+            1,
+            (CAST(strftime('%s', 'now') AS INTEGER) * 10000000) + 621355968000000000
+        );
+
+        CREATE TABLE development_data_resets (
+            schema_version INTEGER NOT NULL PRIMARY KEY,
+            cleanup_completed INTEGER NOT NULL CHECK (cleanup_completed IN (0, 1)),
+            completed_at_utc_ticks INTEGER NULL CHECK (completed_at_utc_ticks IS NULL OR completed_at_utc_ticks >= 0)
+        );
+
+        INSERT INTO development_data_resets(schema_version, cleanup_completed, completed_at_utc_ticks)
+        VALUES (13, 0, NULL);
+        """;
+
     private static readonly IReadOnlyList<Migration> Migrations =
     [
         new(1, MigrationVersion1Sql),
@@ -767,6 +1275,7 @@ public sealed class SqliteDatabaseInitializer
         new(10, MigrationVersion10Sql),
         new(11, MigrationVersion11Sql),
         new(12, MigrationVersion12Sql),
+        new(13, MigrationVersion13Sql),
     ];
 
     private readonly SqliteConnectionFactory _connectionFactory;
@@ -836,6 +1345,112 @@ public sealed class SqliteDatabaseInitializer
         }
 
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        await EnsureSchema13CaptureContextShapeAsync(connection, cancellationToken)
+            .ConfigureAwait(false);
+        await CompletePendingDevelopmentResetAsync(connection, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private static async Task EnsureSchema13CaptureContextShapeAsync(
+        SqliteConnection connection,
+        CancellationToken cancellationToken)
+    {
+        await using var transaction = connection.BeginTransaction(deferred: false);
+        var columns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        await using (var read = connection.CreateCommand())
+        {
+            read.Transaction = transaction;
+            read.CommandText = "PRAGMA table_info(capture_context_samples);";
+            await using var reader = await read.ExecuteReaderAsync(cancellationToken)
+                .ConfigureAwait(false);
+            while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+            {
+                columns.Add(reader.GetString(1));
+            }
+        }
+
+        var additions = new[]
+        {
+            (
+                Name: "evaluated_rule_set_revision",
+                Sql: "ALTER TABLE capture_context_samples ADD COLUMN evaluated_rule_set_revision INTEGER NULL CHECK (evaluated_rule_set_revision IS NULL OR evaluated_rule_set_revision > 0);"),
+            (
+                Name: "application_context_available",
+                Sql: "ALTER TABLE capture_context_samples ADD COLUMN application_context_available INTEGER NOT NULL DEFAULT 0 CHECK (application_context_available IN (0, 1));"),
+            (
+                Name: "window_context_available",
+                Sql: "ALTER TABLE capture_context_samples ADD COLUMN window_context_available INTEGER NOT NULL DEFAULT 0 CHECK (window_context_available IN (0, 1));"),
+        };
+        foreach (var addition in additions)
+        {
+            if (!columns.Contains(addition.Name))
+            {
+                await ExecuteAsync(
+                        connection,
+                        transaction,
+                        addition.Sql,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+        }
+
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task CompletePendingDevelopmentResetAsync(
+        SqliteConnection connection,
+        CancellationToken cancellationToken)
+    {
+        await using var read = connection.CreateCommand();
+        read.CommandText = """
+            SELECT cleanup_completed
+            FROM development_data_resets
+            WHERE schema_version = 13;
+            """;
+        var result = await read.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+        if (result is null or DBNull || Convert.ToInt32(result, CultureInfo.InvariantCulture) != 0)
+        {
+            return;
+        }
+
+        var dataRoot = Path.GetDirectoryName(_connectionFactory.DatabasePath)
+            ?? throw new InvalidOperationException("The database path has no data root.");
+        foreach (var directoryName in new[] { ".staging", "chunks", "screenings", "cache", "exports" })
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var candidate = Path.GetFullPath(Path.Combine(dataRoot, directoryName));
+            var expected = Path.Combine(
+                Path.TrimEndingDirectorySeparator(Path.GetFullPath(dataRoot)),
+                directoryName);
+            if (!string.Equals(candidate, expected, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException("The development reset target escaped the data root.");
+            }
+
+            try
+            {
+                if (Directory.Exists(candidate))
+                {
+                    Directory.Delete(candidate, recursive: true);
+                }
+            }
+            catch (DirectoryNotFoundException)
+            {
+                // Another initializer completed the same one-time reset.
+            }
+        }
+
+        await using var update = connection.CreateCommand();
+        update.CommandText = """
+            UPDATE development_data_resets
+            SET cleanup_completed = 1,
+                completed_at_utc_ticks = $completed_at_utc_ticks
+            WHERE schema_version = 13 AND cleanup_completed = 0;
+            """;
+        update.Parameters.AddWithValue(
+            "$completed_at_utc_ticks",
+            _timeProvider.GetUtcNow().ToUniversalTime().Ticks);
+        _ = await update.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
     private static async Task<HashSet<int>> ReadAppliedVersionsAsync(

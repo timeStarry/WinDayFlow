@@ -35,6 +35,14 @@ struct ChunkApplicationManifest {
   bool operator==(const ChunkApplicationManifest&) const = default;
 };
 
+struct ChunkContextSampleManifest {
+  uint32_t sample_index = 0;
+  uint64_t offset_milliseconds = 0;
+  std::optional<ChunkApplicationManifest> application;
+
+  bool operator==(const ChunkContextSampleManifest&) const = default;
+};
+
 struct ChunkManifest {
   std::string chunk_id;
   int64_t start_time_unix_ms = 0;
@@ -48,6 +56,9 @@ struct ChunkManifest {
   bool display_wide_scope = false;
   std::vector<ChunkFrameManifest> frames;
   std::optional<ChunkApplicationManifest> application;
+  uint32_t black_frame_count = 0;
+  uint32_t duplicate_frame_count = 0;
+  std::vector<ChunkContextSampleManifest> context_samples;
 };
 
 bool IsValidChunkManifest(const ChunkManifest& manifest) noexcept;

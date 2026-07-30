@@ -13,5 +13,6 @@ public enum AnalysisJobErrorCode
     OperationTimedOut = 8,
     PersistenceFailure = 9,
     LeaseExpired = 10,
+    EvidenceSendBlocked = 11,
     Unknown = 255,
 }

@@ -73,14 +73,23 @@ bool IsValidChunkManifest(const ChunkManifest& manifest) noexcept {
   if (!IsValidChunkArtifactId(manifest.chunk_id) ||
       manifest.start_time_unix_ms < 0 ||
       manifest.end_time_unix_ms <= manifest.start_time_unix_ms ||
-      manifest.captured_frame_count == 0 || manifest.frames.empty() ||
+      manifest.captured_frame_count == 0 ||
       manifest.frames.size() > kMaximumFramesPerChunk ||
       manifest.captured_frame_count < manifest.frames.size() ||
+      manifest.context_samples.size() > manifest.captured_frame_count ||
       manifest.frame_width < 2 || manifest.frame_height < 2 ||
       (manifest.frame_width & 1U) != 0 ||
-      (manifest.frame_height & 1U) != 0 || manifest.frame_byte_count == 0 ||
+      (manifest.frame_height & 1U) != 0 ||
       manifest.frame_byte_count > kManifestMaximumChunkFrameBytes ||
       manifest.persistence_generation == 0 || manifest.target_epoch == 0) {
+    return false;
+  }
+  const uint64_t classified_frame_count =
+      static_cast<uint64_t>(manifest.black_frame_count) +
+      manifest.duplicate_frame_count + manifest.frames.size();
+  if (classified_frame_count != manifest.captured_frame_count ||
+      (manifest.frames.empty() && manifest.frame_byte_count != 0) ||
+      (!manifest.frames.empty() && manifest.frame_byte_count == 0)) {
     return false;
   }
   if (manifest.application.has_value() &&
@@ -106,7 +115,27 @@ bool IsValidChunkManifest(const ChunkManifest& manifest) noexcept {
     total_bytes += frame.byte_count;
     previous_offset = frame.offset_milliseconds;
   }
-  return total_bytes == manifest.frame_byte_count;
+  if (total_bytes != manifest.frame_byte_count) {
+    return false;
+  }
+
+  uint32_t previous_sample_index = 0;
+  uint64_t previous_context_offset = 0;
+  for (size_t ordinal = 0; ordinal < manifest.context_samples.size(); ++ordinal) {
+    const ChunkContextSampleManifest& sample = manifest.context_samples[ordinal];
+    if (sample.sample_index >= manifest.captured_frame_count ||
+        sample.offset_milliseconds >= duration ||
+        (ordinal != 0 &&
+         (sample.sample_index <= previous_sample_index ||
+          sample.offset_milliseconds <= previous_context_offset)) ||
+        (sample.application.has_value() &&
+         !IsValidApplication(*sample.application))) {
+      return false;
+    }
+    previous_sample_index = sample.sample_index;
+    previous_context_offset = sample.offset_milliseconds;
+  }
+  return true;
 }
 
 bool BuildChunkManifestJson(const ChunkManifest& manifest,
@@ -123,7 +152,7 @@ bool BuildChunkManifestJson(const ChunkManifest& manifest,
     std::ostringstream output;
     output.imbue(std::locale::classic());
     output << "{\n"
-           << "  \"schemaVersion\": 3,\n"
+           << "  \"schemaVersion\": 4,\n"
            << "  \"captureScope\": \""
            << (manifest.display_wide_scope
                    ? "authorized-display-continuous"
@@ -150,10 +179,40 @@ bool BuildChunkManifestJson(const ChunkManifest& manifest,
     } else {
       output << "null,\n";
     }
+    output << "  \"contextSamples\": [";
+    for (size_t ordinal = 0; ordinal < manifest.context_samples.size(); ++ordinal) {
+      if (ordinal != 0) {
+        output << ',';
+      }
+      const ChunkContextSampleManifest& sample = manifest.context_samples[ordinal];
+      output << "{\"sampleIndex\":" << sample.sample_index
+             << ",\"offsetMilliseconds\":" << sample.offset_milliseconds
+             << ",\"application\":";
+      if (sample.application.has_value()) {
+        const ChunkApplicationManifest& application = *sample.application;
+        output << "{\"applicationId\":\"process:"
+               << EscapeJsonString(application.process_name_utf8)
+               << "\",\"displayName\":\""
+               << EscapeJsonString(application.process_name_utf8)
+               << "\",\"processId\":" << application.process_id
+               << ",\"cpuUsageBasisPoints\":"
+               << application.cpu_usage_basis_points
+               << ",\"workingSetBytes\":"
+               << application.working_set_bytes
+               << ",\"privateMemoryBytes\":"
+               << application.private_memory_bytes << '}';
+      } else {
+        output << "null";
+      }
+      output << '}';
+    }
+    output << "],\n";
     output
            << "  \"frames\": {\"format\": \"jpeg\", \"quality\": "
-           << kCanonicalJpegQuality << ", \"capturedFrameCount\": "
-           << manifest.captured_frame_count << ", \"retainedFrameCount\": "
+           << kCanonicalJpegQuality << ", \"sampledFrameCount\": "
+           << manifest.captured_frame_count << ", \"blackFrameCount\": "
+           << manifest.black_frame_count << ", \"duplicateFrameCount\": "
+           << manifest.duplicate_frame_count << ", \"retainedFrameCount\": "
            << manifest.frames.size() << ", \"width\": "
            << manifest.frame_width << ", \"height\": "
            << manifest.frame_height << ", \"totalByteCount\": "

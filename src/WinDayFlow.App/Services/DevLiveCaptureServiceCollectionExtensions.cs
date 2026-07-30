@@ -27,22 +27,29 @@ internal static class DevLiveCaptureServiceCollectionExtensions
 
         var dataRoot = Path.TrimEndingDirectorySeparator(
             Path.GetFullPath(dataDirectoryPath));
+        var diagnosticLog = CaptureDiagnosticLog.CreateForDataDirectory(dataRoot);
+        var ruleObservations = new CaptureRuleObservationBuffer();
         var owner = new NativeCaptureRuntimeOwner(
             new NativeCaptureConfiguration(dataRoot),
             NativeCapturePrivacyContext.FailClosed(runtimePolicyRevision: 1),
             AppSettings.Default,
-            NativeCapturePrivacySignals.FailClosed);
+            NativeCapturePrivacySignals.FailClosed,
+            diagnosticLog,
+            ruleObservations);
 
         try
         {
             var monitor = DevLiveCapturePrivacy.CreateMonitor(
                 owner,
                 dataRoot,
-                MinimumStorageHeadroomBytes);
+                MinimumStorageHeadroomBytes,
+                diagnosticLog);
             var lifetime = new DevLiveCaptureHostedService(monitor, owner);
 
             // Implementation-instance registrations are intentionally not owned by DI.
             // The hosted lifetime is the only component that disposes monitor then owner.
+            services.AddSingleton(ruleObservations);
+            services.AddSingleton<ICaptureRuleObservationSource>(ruleObservations);
             services.AddSingleton(owner);
             services.AddSingleton<ICaptureBackend>(owner);
             services.AddSingleton<ICaptureChunkCommitNotifier>(owner);

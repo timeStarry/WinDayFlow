@@ -216,12 +216,12 @@ public sealed class AiAnalysisRequest
         ArgumentNullException.ThrowIfNull(context);
         ArgumentNullException.ThrowIfNull(existingEntries);
 
-        if (images.Count is 0 or > AiAnalysisContract.MaximumImages)
+        if (images.Count > AiAnalysisContract.MaximumImages)
         {
             throw new ArgumentOutOfRangeException(
                 nameof(images),
                 images.Count,
-                $"An AI analysis request must contain between 1 and {AiAnalysisContract.MaximumImages} evidence images.");
+                $"An AI analysis request cannot contain more than {AiAnalysisContract.MaximumImages} evidence images.");
         }
 
         var imageCopy = images.ToArray();

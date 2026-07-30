@@ -2,48 +2,33 @@ namespace WinDayFlow.Application.Settings;
 
 public sealed record AppSettings(
     AppThemePreference Theme,
-    bool CaptureEnabled,
-    bool CloudAnalysisEnabled,
     RecordingConsent? RecordingConsent,
-    CapturePrivacySettings CapturePrivacy,
-    int CaptureIntervalSeconds = 10)
+    EvidenceSettings Evidence,
+    int CaptureIntervalSeconds = 10,
+    CaptureIntent CaptureIntent = CaptureIntent.Stopped)
 {
-    public AppSettings(
-        AppThemePreference Theme,
-        bool CaptureEnabled,
-        bool CloudAnalysisEnabled,
-        RecordingConsent? RecordingConsent)
-        : this(
-            Theme,
-            CaptureEnabled,
-            CloudAnalysisEnabled,
-            RecordingConsent,
-            CapturePrivacySettings.Default)
-    {
-    }
-
     public static AppSettings Default { get; } = new(
         AppThemePreference.System,
-        CaptureEnabled: false,
-        CloudAnalysisEnabled: false,
         RecordingConsent: null,
-        CapturePrivacySettings.Default);
+        EvidenceSettings.Default,
+        CaptureIntervalSeconds: 10,
+        CaptureIntent.Stopped);
 
     public AppThemePreference Theme { get; } = ValidateTheme(Theme);
 
-    public bool CaptureEnabled { get; } = ValidateCaptureEnabled(
-        CaptureEnabled,
-        RecordingConsent);
-
-    public bool CloudAnalysisEnabled { get; } = CloudAnalysisEnabled;
-
     public RecordingConsent? RecordingConsent { get; } = RecordingConsent;
 
-    public CapturePrivacySettings CapturePrivacy { get; } = CapturePrivacy
-        ?? throw new ArgumentNullException(nameof(CapturePrivacy));
+    public EvidenceSettings Evidence { get; } = Evidence
+        ?? throw new ArgumentNullException(nameof(Evidence));
 
     public int CaptureIntervalSeconds { get; } =
         ValidateCaptureIntervalSeconds(CaptureIntervalSeconds);
+
+    public CaptureIntent CaptureIntent { get; } = ValidateCaptureIntent(
+        CaptureIntent,
+        RecordingConsent);
+
+    public bool CaptureEnabled => CaptureIntent == CaptureIntent.Recording;
 
     private static AppThemePreference ValidateTheme(AppThemePreference theme)
     {
@@ -58,18 +43,28 @@ public sealed record AppSettings(
         return theme;
     }
 
-    private static bool ValidateCaptureEnabled(
-        bool captureEnabled,
+    private static CaptureIntent ValidateCaptureIntent(
+        CaptureIntent captureIntent,
         RecordingConsent? recordingConsent)
     {
-        if (captureEnabled && recordingConsent is null)
+        if (captureIntent is not (CaptureIntent.Stopped
+            or CaptureIntent.Paused
+            or CaptureIntent.Recording))
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(captureIntent),
+                captureIntent,
+                "The capture intent is not supported.");
+        }
+
+        if (captureIntent != CaptureIntent.Stopped && recordingConsent is null)
         {
             throw new ArgumentException(
-                "Capture cannot be enabled without recorded consent.",
+                "Capture cannot be armed without recorded consent.",
                 nameof(recordingConsent));
         }
 
-        return captureEnabled;
+        return captureIntent;
     }
 
     private static int ValidateCaptureIntervalSeconds(int value)

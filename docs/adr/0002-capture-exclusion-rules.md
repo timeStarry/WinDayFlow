@@ -1,7 +1,15 @@
 # ADR 0002: Typed, Ordered Capture Exclusion Rules
 
-Status: Accepted
+Status: Accepted for typed rule representation; capture-blocking semantics
+superseded by [ADR 0015](0015-user-controlled-capture-and-provider-routing.md)
 Date: 2026-07-16
+
+ADR 0015 moves these rules from the local capture authorization gate to the
+provider-request boundary. Stable IDs, typed matching, bounded title operators,
+ordering, normalization, and value-redacted logging remain valid. Requirements
+below that disable capture, advance recording-consent privacy revision, or treat
+Unknown as a reason to stop local persistence are retained as historical context
+only.
 
 ## Context
 

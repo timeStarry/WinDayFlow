@@ -5,6 +5,22 @@
     xmlns:controls="using:WinDayFlow.App.Controls"
     xmlns:presentation="using:WinDayFlow.Presentation.Settings">
     <Grid>
+        <NavigationView
+            x:Name="SettingsNavigation"
+            Background="Transparent"
+            IsBackButtonVisible="Collapsed"
+            IsPaneToggleButtonVisible="False"
+            IsSettingsVisible="False"
+            PaneDisplayMode="Top"
+            SelectionChanged="OnSettingsSectionChanged">
+            <NavigationView.MenuItems>
+                <NavigationViewItem x:Name="RecordingSettingsNavigationItem" Content="录制" Tag="capture" />
+                <NavigationViewItem Content="存储" Tag="storage" />
+                <NavigationViewItem Content="隐私与处理" Tag="privacy" />
+                <NavigationViewItem Content="供应商" Tag="providers" />
+                <NavigationViewItem Content="外观" Tag="appearance" />
+                <NavigationViewItem Content="关于" Tag="about" />
+            </NavigationView.MenuItems>
         <ScrollViewer
             Padding="{StaticResource PagePadding}"
             HorizontalScrollBarVisibility="Disabled"
@@ -21,7 +37,7 @@
                     Severity="Error"
                     Title="无法完成设置操作" />
 
-                <StackPanel Spacing="12">
+                <StackPanel x:Name="AppearanceSection" Spacing="12" Visibility="Collapsed">
                     <TextBlock Style="{StaticResource SectionTitleTextStyle}" Text="外观" />
                     <Border Style="{StaticResource SettingsGroupBorderStyle}">
                         <Grid
@@ -60,7 +76,7 @@
                     </Border>
                 </StackPanel>
 
-                <StackPanel Spacing="12">
+                <StackPanel x:Name="CaptureSection" Spacing="12">
                     <TextBlock Style="{StaticResource SectionTitleTextStyle}" Text="录制" />
                     <InfoBar
                         x:Name="CaptureInfoBar"
@@ -197,7 +213,7 @@
                     </Border>
                 </StackPanel>
 
-                <StackPanel Spacing="12">
+                <StackPanel x:Name="StorageSection" Spacing="12" Visibility="Collapsed">
                     <TextBlock Style="{StaticResource SectionTitleTextStyle}" Text="存储" />
                     <Border Style="{StaticResource SettingsGroupBorderStyle}">
                         <Grid
@@ -219,13 +235,29 @@
                                     Text="时间线、授权记录和设置保存在当前用户目录。"
                                     TextWrapping="Wrap" />
                             </StackPanel>
-                            <TextBox
-                                x:Name="DataFolderTextBox"
+                            <Grid
                                 Grid.Column="1"
-                                VerticalAlignment="Center"
-                                AutomationProperties.AutomationId="DataFolderPath"
-                                AutomationProperties.Name="本地数据目录"
-                                IsReadOnly="True" />
+                                ColumnSpacing="8">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBox
+                                    x:Name="DataFolderTextBox"
+                                    VerticalAlignment="Center"
+                                    AutomationProperties.AutomationId="DataFolderPath"
+                                    AutomationProperties.Name="本地数据目录"
+                                    IsReadOnly="True" />
+                                <Button
+                                    Grid.Column="1"
+                                    Width="40"
+                                    Height="40"
+                                    Click="OnOpenDataFolder"
+                                    AutomationProperties.Name="打开本地数据目录"
+                                    ToolTipService.ToolTip="打开文件夹">
+                                    <SymbolIcon Symbol="Folder" />
+                                </Button>
+                            </Grid>
                         </Grid>
                     </Border>
 
@@ -268,85 +300,121 @@
                     </Border>
                 </StackPanel>
 
-                <StackPanel Spacing="12">
-                    <TextBlock Style="{StaticResource SectionTitleTextStyle}" Text="隐私" />
-                    <Border Style="{StaticResource SettingsGroupBorderStyle}">
-                        <Grid
-                            x:Name="ApplicationPrivacyModeSettingLayout"
-                            Padding="20"
-                            ColumnSpacing="24">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="2*" />
-                                <ColumnDefinition Width="3*" />
-                            </Grid.ColumnDefinitions>
-                            <Grid.RowDefinitions>
-                                <RowDefinition Height="Auto" />
-                                <RowDefinition Height="Auto" />
-                            </Grid.RowDefinitions>
-                            <StackPanel VerticalAlignment="Center" Spacing="2">
-                                <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}" Text="应用录制范围" />
-                                <TextBlock
-                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                    Text="{x:Bind ViewModel.ApplicationPrivacyModeDetailText, Mode=OneWay}"
-                                    TextWrapping="Wrap" />
-                            </StackPanel>
-                            <RadioButtons
-                                x:Name="ApplicationPrivacyModePicker"
-                                Grid.Column="1"
-                                MaxWidth="420"
-                                HorizontalAlignment="Stretch"
-                                VerticalAlignment="Center"
-                                AutomationProperties.AutomationId="ApplicationPrivacyModePicker"
-                                AutomationProperties.Name="应用录制范围"
-                                IsEnabled="{x:Bind ViewModel.CanChangeApplicationPrivacyMode, Mode=OneWay}"
-                                SelectionChanged="OnApplicationPrivacyModeChanged">
-                                <x:String>按前台应用保护（隐私优先）</x:String>
-                                <x:String>固定一个显示器，允许其中全部应用（连续性优先）</x:String>
-                            </RadioButtons>
-                        </Grid>
-                    </Border>
+                <StackPanel x:Name="PrivacySection" Spacing="12" Visibility="Collapsed">
+                    <TextBlock Style="{StaticResource SectionTitleTextStyle}" Text="隐私与处理" />
 
                     <InfoBar
+                        x:Name="RoutingInfoBar"
                         AutomationProperties.LiveSetting="Polite"
                         IsClosable="False"
-                        IsOpen="{x:Bind ViewModel.IsAllowAllApplicationsMode, Mode=OneWay}"
-                        Message="{x:Bind ViewModel.ContinuousCaptureDisclosureText, Mode=OneWay}"
-                        Severity="Warning"
-                        Title="固定显示器连续录制会扩大采集范围" />
+                        IsOpen="False" />
 
                     <Border Style="{StaticResource SettingsGroupBorderStyle}">
-                        <Grid
-                            x:Name="SensitiveApplicationSettingLayout"
-                            Padding="20"
-                            ColumnSpacing="24">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="3*" />
-                                <ColumnDefinition Width="2*" />
-                            </Grid.ColumnDefinitions>
-                            <Grid.RowDefinitions>
-                                <RowDefinition Height="Auto" />
-                                <RowDefinition Height="Auto" />
-                            </Grid.RowDefinitions>
-                            <StackPanel VerticalAlignment="Center" Spacing="2">
-                                <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}" Text="敏感应用保护" />
-                                <TextBlock
-                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                    Text="{x:Bind ViewModel.SensitiveApplicationProtectionDetailText, Mode=OneWay}"
-                                    TextWrapping="Wrap" />
-                            </StackPanel>
-                            <ToggleSwitch
-                                x:Name="SensitiveApplicationToggle"
-                                Grid.Column="1"
-                                HorizontalAlignment="Right"
-                                VerticalAlignment="Center"
-                                AutomationProperties.AutomationId="SensitiveApplicationProtectionToggle"
-                                AutomationProperties.Name="敏感应用保护"
-                                IsEnabled="{x:Bind ViewModel.CanChangeApplicationProtection, Mode=OneWay}"
-                                IsOn="{x:Bind ViewModel.ExcludeSensitiveApplications, Mode=OneWay}"
-                                OffContent="关闭"
-                                OnContent="排除"
-                                Toggled="OnPrivacyToggleChanged" />
-                        </Grid>
+                        <StackPanel Padding="20" Spacing="16">
+                            <Grid ColumnSpacing="20">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Spacing="3">
+                                    <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}" Text="隐私检查" />
+                                    <TextBlock
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Text="可选检查明文密码、密钥和令牌；关闭时直接使用原始截图。"
+                                        TextWrapping="Wrap" />
+                                </StackPanel>
+                                <ToggleSwitch
+                                    Grid.Column="1"
+                                    AutomationProperties.Name="启用隐私检查"
+                                    IsEnabled="{x:Bind RoutingViewModel.CanMutate, Mode=OneWay}"
+                                    IsOn="{x:Bind RoutingViewModel.PrivacyEnabled, Mode=TwoWay}"
+                                    OffContent="关闭"
+                                    OnContent="启用" />
+                            </Grid>
+                            <ComboBox
+                                HorizontalAlignment="Stretch"
+                                Header="供应商"
+                                DisplayMemberPath="DisplayName"
+                                ItemsSource="{x:Bind RoutingViewModel.Profiles, Mode=OneWay}"
+                                PlaceholderText="选择供应商"
+                                SelectedItem="{x:Bind RoutingViewModel.PrivacyProvider, Mode=TwoWay}" />
+                            <Grid ColumnSpacing="12">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <ComboBox
+                                    HorizontalAlignment="Stretch"
+                                    Header="检测到敏感内容"
+                                    SelectedIndex="{x:Bind RoutingViewModel.PrivacyOnMatchIndex, Mode=TwoWay}">
+                                    <x:String>仅记录审计</x:String>
+                                    <x:String>打码后继续</x:String>
+                                    <x:String>本地暂缓</x:String>
+                                    <x:String>需要复核</x:String>
+                                </ComboBox>
+                                <ComboBox
+                                    Grid.Column="1"
+                                    HorizontalAlignment="Stretch"
+                                    Header="检查失败"
+                                    SelectedIndex="{x:Bind RoutingViewModel.PrivacyOnErrorIndex, Mode=TwoWay}">
+                                    <x:String>本地暂缓</x:String>
+                                    <x:String>直接继续</x:String>
+                                    <x:String>需要复核</x:String>
+                                </ComboBox>
+                            </Grid>
+                            <Button
+                                HorizontalAlignment="Left"
+                                Click="OnSavePrivacyRoute"
+                                IsEnabled="{x:Bind RoutingViewModel.CanMutate, Mode=OneWay}"
+                                Style="{StaticResource AccentButtonStyle}">
+                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                    <SymbolIcon Symbol="Save" />
+                                    <TextBlock Text="保存隐私设置" />
+                                </StackPanel>
+                            </Button>
+                        </StackPanel>
+                    </Border>
+
+                    <Border Style="{StaticResource SettingsGroupBorderStyle}">
+                        <StackPanel Padding="20" Spacing="16">
+                            <Grid ColumnSpacing="20">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Spacing="3">
+                                    <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}" Text="时间线分析" />
+                                    <TextBlock
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Text="分析可发送的证据并重写最近 45 分钟时间线；关闭不影响本地录制。"
+                                        TextWrapping="Wrap" />
+                                </StackPanel>
+                                <ToggleSwitch
+                                    Grid.Column="1"
+                                    AutomationProperties.Name="启用时间线分析"
+                                    IsEnabled="{x:Bind RoutingViewModel.CanMutate, Mode=OneWay}"
+                                    IsOn="{x:Bind RoutingViewModel.TimelineEnabled, Mode=TwoWay}"
+                                    OffContent="关闭"
+                                    OnContent="启用" />
+                            </Grid>
+                            <ComboBox
+                                HorizontalAlignment="Stretch"
+                                Header="供应商"
+                                DisplayMemberPath="DisplayName"
+                                ItemsSource="{x:Bind RoutingViewModel.Profiles, Mode=OneWay}"
+                                PlaceholderText="选择供应商"
+                                SelectedItem="{x:Bind RoutingViewModel.TimelineProvider, Mode=TwoWay}" />
+                            <Button
+                                HorizontalAlignment="Left"
+                                Click="OnSaveTimelineRoute"
+                                IsEnabled="{x:Bind RoutingViewModel.CanMutate, Mode=OneWay}"
+                                Style="{StaticResource AccentButtonStyle}">
+                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                    <SymbolIcon Symbol="Save" />
+                                    <TextBlock Text="保存分析设置" />
+                                </StackPanel>
+                            </Button>
+                        </StackPanel>
                     </Border>
 
                     <Border Style="{StaticResource SettingsGroupBorderStyle}">
@@ -372,7 +440,7 @@
                                 <StackPanel VerticalAlignment="Center" Spacing="3">
                                     <TextBlock
                                         Style="{StaticResource BodyStrongTextBlockStyle}"
-                                        Text="应用和窗口排除" />
+                                        Text="不发送规则" />
                                     <TextBlock
                                         x:Name="ExclusionRuleSummaryTextBlock"
                                         AutomationProperties.LiveSetting="Polite"
@@ -382,7 +450,7 @@
                                     <TextBlock
                                         x:Name="ExclusionRuleAvailabilityTextBlock"
                                         Style="{StaticResource MetadataTextStyle}"
-                                        Text="规则已保存到本机，尚未接入录制监视器；当前不会用于录制。"
+                                        Text="规则在每次实际请求前检查，只阻止联网发送，不影响本地录制。"
                                         TextWrapping="Wrap" />
                                 </StackPanel>
                                 <Button
@@ -390,7 +458,7 @@
                                     Grid.Column="1"
                                     Click="OnAddExclusionRule"
                                     AutomationProperties.AutomationId="AddExclusionRuleButton"
-                                    AutomationProperties.Name="添加应用或窗口排除规则"
+                                    AutomationProperties.Name="添加不发送规则"
                                     IsEnabled="{x:Bind ViewModel.CanAddExclusionRule, Mode=OneWay}"
                                     Style="{StaticResource AccentButtonStyle}"
                                     ToolTipService.ToolTip="添加排除规则">
@@ -419,14 +487,14 @@
                                     <controls:EmptyStateControl
                                         x:Name="ExclusionRuleEmptyState"
                                         Margin="20,32"
-                                        Description="添加规则不会开启录制；录制组件接入后，启用的规则才会阻止匹配内容。"
+                                        Description="启用的规则会阻止匹配证据发送给供应商，本地截图仍会继续保存。"
                                         Icon="BlockContact"
-                                        Title="尚未添加自定义排除规则" />
+                                        Title="尚未添加不发送规则" />
 
                                     <ListView
                                         x:Name="ExclusionRuleList"
                                         AutomationProperties.AutomationId="ExclusionRuleList"
-                                        AutomationProperties.Name="应用和窗口排除规则"
+                                        AutomationProperties.Name="不发送规则"
                                         IsItemClickEnabled="False"
                                         IsEnabled="{x:Bind ViewModel.CanChangeExclusionRules, Mode=OneWay}"
                                         ItemsSource="{x:Bind ViewModel.ExclusionRules, Mode=OneWay}"
@@ -562,242 +630,214 @@
                         </Grid>
                     </Border>
 
-                    <Border Style="{StaticResource SettingsGroupBorderStyle}">
-                        <Grid
-                            x:Name="RemoteSessionSettingLayout"
-                            Padding="20"
-                            ColumnSpacing="24">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="3*" />
-                                <ColumnDefinition Width="2*" />
-                            </Grid.ColumnDefinitions>
-                            <Grid.RowDefinitions>
-                                <RowDefinition Height="Auto" />
-                                <RowDefinition Height="Auto" />
-                            </Grid.RowDefinitions>
-                            <StackPanel VerticalAlignment="Center" Spacing="2">
-                                <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}" Text="远程会话" />
-                                <TextBlock
-                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                    Text="录制组件接入后，连接远程桌面或进入远程会话时将使用保守暂停策略。"
-                                    TextWrapping="Wrap" />
-                            </StackPanel>
-                            <ToggleSwitch
-                                x:Name="RemoteSessionToggle"
-                                Grid.Column="1"
-                                HorizontalAlignment="Right"
-                                VerticalAlignment="Center"
-                                AutomationProperties.AutomationId="RemoteSessionPauseToggle"
-                                AutomationProperties.Name="远程会话期间暂停"
-                                IsEnabled="{x:Bind ViewModel.CanChangePrivacy, Mode=OneWay}"
-                                IsOn="{x:Bind ViewModel.PauseInRemoteSessions, Mode=OneWay}"
-                                OffContent="继续"
-                                OnContent="暂停"
-                                Toggled="OnPrivacyToggleChanged" />
-                        </Grid>
-                    </Border>
+                </StackPanel>
+
+                <StackPanel x:Name="ProviderSection" Spacing="12" Visibility="Collapsed">
+                    <TextBlock Style="{StaticResource SectionTitleTextStyle}" Text="供应商" />
+
+                    <InfoBar
+                        x:Name="ProviderRoutingInfoBar"
+                        AutomationProperties.LiveSetting="Polite"
+                        IsClosable="False"
+                        IsOpen="False" />
 
                     <Border Style="{StaticResource SettingsGroupBorderStyle}">
-                        <Grid
-                            x:Name="ScreenSharingSettingLayout"
-                            Padding="20"
-                            ColumnSpacing="24">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="3*" />
-                                <ColumnDefinition Width="2*" />
-                            </Grid.ColumnDefinitions>
+                        <Grid>
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto" />
                                 <RowDefinition Height="Auto" />
                             </Grid.RowDefinitions>
-                            <StackPanel VerticalAlignment="Center" Spacing="2">
-                                <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}" Text="Windows 演示模式" />
-                                <TextBlock
-                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                    Text="录制组件接入后，进入 Windows 演示模式时将暂停；其他屏幕共享应用尚不能通用检测。"
-                                    TextWrapping="Wrap" />
-                            </StackPanel>
-                            <ToggleSwitch
-                                x:Name="ScreenSharingToggle"
-                                Grid.Column="1"
-                                HorizontalAlignment="Right"
-                                VerticalAlignment="Center"
-                                AutomationProperties.AutomationId="ScreenSharingPauseToggle"
-                                AutomationProperties.Name="Windows 演示模式期间暂停"
-                                IsEnabled="{x:Bind ViewModel.CanChangePrivacy, Mode=OneWay}"
-                                IsOn="{x:Bind ViewModel.PauseDuringScreenSharing, Mode=OneWay}"
-                                OffContent="继续"
-                                OnContent="暂停"
-                                Toggled="OnPrivacyToggleChanged" />
+                            <Grid Padding="20" ColumnSpacing="20">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel Spacing="3">
+                                    <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}" Text="OpenAI-compatible 供应商" />
+                                    <TextBlock
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Text="每个处理阶段可独立选择供应商；创建配置不会自动启用联网。"
+                                        TextWrapping="Wrap" />
+                                </StackPanel>
+                                <Button
+                                    Grid.Column="1"
+                                    Height="40"
+                                    Click="OnAddProvider"
+                                    IsEnabled="{x:Bind RoutingViewModel.CanMutate, Mode=OneWay}"
+                                    Style="{StaticResource AccentButtonStyle}">
+                                    <StackPanel Orientation="Horizontal" Spacing="8">
+                                        <SymbolIcon Symbol="Add" />
+                                        <TextBlock Text="新增" />
+                                    </StackPanel>
+                                </Button>
+                            </Grid>
+                            <Grid
+                                Grid.Row="1"
+                                BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}"
+                                BorderThickness="0,1,0,0">
+                                <controls:EmptyStateControl
+                                    x:Name="ProviderEmptyState"
+                                    Margin="20,32"
+                                    Description="新增一个标准 API 配置后，再到“隐私与处理”分配阶段。"
+                                    Icon="Globe"
+                                    Title="尚未配置供应商" />
+                                <ListView
+                                    x:Name="ProviderList"
+                                    ItemsSource="{x:Bind RoutingViewModel.Profiles, Mode=OneWay}"
+                                    ScrollViewer.VerticalScrollBarVisibility="Disabled"
+                                    ScrollViewer.VerticalScrollMode="Disabled"
+                                    SelectionMode="None">
+                                    <ListView.ItemContainerStyle>
+                                        <Style BasedOn="{StaticResource DefaultListViewItemStyle}" TargetType="ListViewItem">
+                                            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                                            <Setter Property="IsTabStop" Value="False" />
+                                            <Setter Property="Padding" Value="0" />
+                                        </Style>
+                                    </ListView.ItemContainerStyle>
+                                    <ListView.ItemTemplate>
+                                        <DataTemplate x:DataType="presentation:AiProviderProfileItemViewModel">
+                                            <Grid Padding="16" ColumnSpacing="16">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="Auto" />
+                                                    <ColumnDefinition Width="*" />
+                                                    <ColumnDefinition Width="Auto" />
+                                                </Grid.ColumnDefinitions>
+                                                <Border
+                                                    Width="40"
+                                                    Height="40"
+                                                    Background="{ThemeResource SubtleFillColorSecondaryBrush}"
+                                                    CornerRadius="4">
+                                                    <FontIcon FontSize="18" Glyph="&#xE774;" />
+                                                </Border>
+                                                <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="2">
+                                                    <TextBlock FontWeight="SemiBold" Text="{x:Bind DisplayName}" TextTrimming="CharacterEllipsis" />
+                                                    <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="{x:Bind EndpointSummary}" TextTrimming="CharacterEllipsis" />
+                                                    <TextBlock Style="{StaticResource MetadataTextStyle}" Text="{x:Bind ValidationSummary}" TextWrapping="Wrap" />
+                                                </StackPanel>
+                                                <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="4">
+                                                    <Button
+                                                        Width="40"
+                                                        Height="40"
+                                                        Click="OnValidateProviderPrivacy"
+                                                        ToolTipService.ToolTip="验证隐私检查">
+                                                        <FontIcon FontSize="16" Glyph="&#xE72E;" />
+                                                    </Button>
+                                                    <Button
+                                                        Width="40"
+                                                        Height="40"
+                                                        Click="OnValidateProviderTimeline"
+                                                        ToolTipService.ToolTip="验证时间线分析">
+                                                        <SymbolIcon Symbol="Sync" />
+                                                    </Button>
+                                                    <Button
+                                                        Width="40"
+                                                        Height="40"
+                                                        Click="OnEditProvider"
+                                                        ToolTipService.ToolTip="编辑供应商">
+                                                        <SymbolIcon Symbol="Edit" />
+                                                    </Button>
+                                                    <Button
+                                                        Width="40"
+                                                        Height="40"
+                                                        Click="OnDeleteProvider"
+                                                        ToolTipService.ToolTip="删除供应商">
+                                                        <SymbolIcon Symbol="Delete" />
+                                                    </Button>
+                                                </StackPanel>
+                                            </Grid>
+                                        </DataTemplate>
+                                    </ListView.ItemTemplate>
+                                </ListView>
+                            </Grid>
                         </Grid>
                     </Border>
 
                 </StackPanel>
 
-                <StackPanel Spacing="12">
-                    <TextBlock Style="{StaticResource SectionTitleTextStyle}" Text="AI 分析" />
-
-                    <InfoBar
-                        x:Name="AiProviderInfoBar"
-                        AutomationProperties.LiveSetting="Polite"
-                        IsClosable="False"
-                        IsOpen="True"
-                        Severity="Informational"
-                        Title="分析提供方" />
-
+                <StackPanel x:Name="AboutSection" Spacing="12" Visibility="Collapsed">
+                    <TextBlock Style="{StaticResource SectionTitleTextStyle}" Text="关于" />
                     <Border Style="{StaticResource SettingsGroupBorderStyle}">
-                        <StackPanel Padding="20" Spacing="16">
-                            <StackPanel Spacing="2">
-                                <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}" Text="OpenAI-compatible 提供方" />
-                                <TextBlock
-                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                    Text="配置保存到本机；远程地址只允许 HTTPS，本机回环地址可以使用 HTTP。"
-                                    TextWrapping="Wrap" />
-                            </StackPanel>
-
-                            <TextBox
-                                x:Name="AiProviderNameTextBox"
-                                AutomationProperties.AutomationId="AiProviderDisplayName"
-                                AutomationProperties.Name="分析提供方名称"
-                                Header="名称"
-                                MaxLength="80"
-                                PlaceholderText="例如：OpenAI 或本机 LM Studio" />
-
-                            <TextBox
-                                x:Name="AiProviderEndpointTextBox"
-                                AutomationProperties.AutomationId="AiProviderEndpoint"
-                                AutomationProperties.Name="API 基础地址"
-                                Header="API 基础地址"
-                                MaxLength="2048"
-                                PlaceholderText="https://api.openai.com/v1/" />
-
-                            <TextBox
-                                x:Name="AiProviderModelTextBox"
-                                AutomationProperties.AutomationId="AiProviderModel"
-                                AutomationProperties.Name="视觉模型"
-                                Header="视觉模型"
-                                MaxLength="200"
-                                PlaceholderText="输入支持图像与结构化输出的模型名称" />
-
-                            <NumberBox
-                                x:Name="AiProviderTimeoutNumberBox"
-                                MaxWidth="240"
-                                HorizontalAlignment="Left"
-                                AutomationProperties.AutomationId="AiProviderTimeout"
-                                AutomationProperties.Name="请求超时秒数"
-                                Header="请求超时（秒）"
-                                LargeChange="30"
-                                Maximum="600"
-                                Minimum="10"
-                                SmallChange="10"
-                                SpinButtonPlacementMode="Compact"
-                                Value="60" />
-
-                            <PasswordBox
-                                x:Name="AiProviderApiKeyPasswordBox"
-                                AutomationProperties.AutomationId="AiProviderApiKey"
-                                AutomationProperties.HelpText="保存后不会再次显示；留空将保留已保存密钥"
-                                AutomationProperties.Name="API 密钥"
-                                Header="API 密钥"
-                                MaxLength="8192"
-                                PasswordRevealMode="Peek"
-                                PlaceholderText="留空以保留已保存密钥" />
-
-                            <CheckBox
-                                x:Name="ClearAiProviderApiKeyCheckBox"
-                                AutomationProperties.AutomationId="ClearAiProviderApiKey"
-                                AutomationProperties.Name="清除已保存的 API 密钥"
-                                Content="清除已保存的 API 密钥" />
-
-                            <StackPanel Spacing="4">
-                                <TextBlock
-                                    x:Name="AiCredentialStatusText"
-                                    Style="{StaticResource MetadataTextStyle}"
-                                    TextWrapping="Wrap" />
-                                <TextBlock
-                                    x:Name="AiValidationStatusText"
-                                    Style="{StaticResource MetadataTextStyle}"
-                                    TextWrapping="Wrap" />
-                            </StackPanel>
-
-                            <StackPanel Orientation="Horizontal" Spacing="8">
-                                <Button
-                                    x:Name="SaveAiProviderButton"
-                                    Click="OnSaveAiProvider"
-                                    AutomationProperties.AutomationId="SaveAiProviderButton"
-                                    AutomationProperties.Name="保存分析提供方配置"
-                                    IsEnabled="{x:Bind AiViewModel.CanSave, Mode=OneWay}"
-                                    Style="{StaticResource AccentButtonStyle}">
-                                    <StackPanel Orientation="Horizontal" Spacing="8">
-                                        <SymbolIcon Symbol="Save" />
-                                        <TextBlock Text="保存配置" />
-                                    </StackPanel>
-                                </Button>
-                                <Button
-                                    x:Name="TestAiProviderButton"
-                                    Click="OnTestAiProvider"
-                                    AutomationProperties.AutomationId="TestAiProviderButton"
-                                    AutomationProperties.HelpText="只发送应用生成的合成图像，不发送录制证据"
-                                    AutomationProperties.Name="测试分析提供方连接"
-                                    IsEnabled="{x:Bind AiViewModel.CanTestConnection, Mode=OneWay}">
-                                    <StackPanel Orientation="Horizontal" Spacing="8">
-                                        <SymbolIcon Symbol="Sync" />
-                                        <TextBlock Text="测试连接" />
-                                    </StackPanel>
-                                </Button>
-                            </StackPanel>
-
-                            <ProgressBar
-                                x:Name="AiProviderProgressBar"
-                                AutomationProperties.LiveSetting="Polite"
-                                AutomationProperties.Name="正在更新分析提供方"
-                                IsIndeterminate="True"
-                                Visibility="Collapsed" />
+                        <StackPanel Padding="20" Spacing="6">
+                            <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}" Text="WinDayFlow" />
+                            <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="本地优先的屏幕活动记录与时间线工具。" />
+                            <TextBlock Style="{StaticResource MetadataTextStyle}" Text="原始证据保存在本机；是否发送、如何处理以及使用哪个供应商由你决定。" TextWrapping="Wrap" />
                         </StackPanel>
-                    </Border>
-
-                    <Border Style="{StaticResource SettingsGroupBorderStyle}">
-                        <Grid
-                            x:Name="CloudSettingLayout"
-                            Padding="20"
-                            ColumnSpacing="24">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="3*" />
-                                <ColumnDefinition Width="2*" />
-                            </Grid.ColumnDefinitions>
-                            <Grid.RowDefinitions>
-                                <RowDefinition Height="Auto" />
-                                <RowDefinition Height="Auto" />
-                            </Grid.RowDefinitions>
-                            <StackPanel VerticalAlignment="Center" Spacing="2">
-                                <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}" Text="允许云端分析" />
-                                <TextBlock
-                                    x:Name="CloudAnalysisStatusText"
-                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                    TextWrapping="Wrap" />
-                            </StackPanel>
-                            <ToggleSwitch
-                                x:Name="CloudAnalysisToggle"
-                                Grid.Column="1"
-                                HorizontalAlignment="Right"
-                                VerticalAlignment="Center"
-                                AutomationProperties.AutomationId="CloudAnalysisToggle"
-                                AutomationProperties.HelpText="启用前必须保存并验证当前分析提供方"
-                                AutomationProperties.Name="允许云端分析"
-                                IsEnabled="{x:Bind AiViewModel.CanChangeCloudAnalysis, Mode=OneWay}"
-                                IsOn="{x:Bind AiViewModel.CloudAnalysisEnabled, Mode=OneWay}"
-                                OffContent="仅本地"
-                                OnContent="已启用"
-                                Toggled="OnCloudAnalysisToggled" />
-                        </Grid>
                     </Border>
                 </StackPanel>
             </StackPanel>
         </ScrollViewer>
+        </NavigationView>
+
+        <ContentDialog
+            x:Name="ProviderEditorDialog"
+            AutomationProperties.Name="供应商配置编辑器"
+            DefaultButton="Primary"
+            PrimaryButtonClick="OnProviderEditorPrimaryButtonClick"
+            PrimaryButtonText="保存"
+            SecondaryButtonText="取消">
+            <ScrollViewer
+                MaxHeight="620"
+                HorizontalScrollBarVisibility="Disabled"
+                HorizontalScrollMode="Disabled"
+                VerticalScrollBarVisibility="Auto">
+                <StackPanel MaxWidth="520" Spacing="16">
+                    <InfoBar
+                        x:Name="ProviderEditorErrorInfoBar"
+                        AutomationProperties.LiveSetting="Assertive"
+                        IsClosable="False"
+                        IsOpen="False"
+                        Severity="Error"
+                        Title="请检查供应商配置" />
+                    <TextBox
+                        x:Name="ProviderEditorNameTextBox"
+                        Header="名称"
+                        MaxLength="80"
+                        PlaceholderText="例如：OpenAI 或本机 LM Studio" />
+                    <TextBox
+                        x:Name="ProviderEditorEndpointTextBox"
+                        Header="API 基础地址"
+                        MaxLength="4096"
+                        PlaceholderText="https://api.openai.com/v1/" />
+                    <TextBox
+                        x:Name="ProviderEditorModelTextBox"
+                        Header="视觉模型"
+                        MaxLength="200"
+                        PlaceholderText="输入支持图像与结构化输出的模型名称" />
+                    <NumberBox
+                        x:Name="ProviderEditorTimeoutNumberBox"
+                        MaxWidth="240"
+                        HorizontalAlignment="Left"
+                        Header="请求超时（秒）"
+                        LargeChange="30"
+                        Maximum="600"
+                        Minimum="10"
+                        SmallChange="10"
+                        SpinButtonPlacementMode="Compact"
+                        Value="60" />
+                    <PasswordBox
+                        x:Name="ProviderEditorApiKeyPasswordBox"
+                        Header="API 密钥"
+                        MaxLength="8192"
+                        PasswordRevealMode="Peek"
+                        PlaceholderText="编辑时留空可保留已保存密钥" />
+                    <CheckBox
+                        x:Name="ProviderEditorClearApiKeyCheckBox"
+                        Content="清除已保存的 API 密钥" />
+                    <TextBlock
+                        Style="{StaticResource MetadataTextStyle}"
+                        Text="远程地址仅允许 HTTPS；本机回环地址可使用 HTTP。密钥使用当前 Windows 用户的 DPAPI 加密。"
+                        TextWrapping="Wrap" />
+                    <ProgressBar
+                        x:Name="ProviderEditorProgressBar"
+                        IsIndeterminate="True"
+                        Visibility="Collapsed" />
+                </StackPanel>
+            </ScrollViewer>
+        </ContentDialog>
 
         <ContentDialog
             x:Name="ExclusionRuleEditorDialog"
-            AutomationProperties.Name="排除规则编辑器"
+            AutomationProperties.Name="不发送规则编辑器"
             DefaultButton="Primary"
             PrimaryButtonClick="OnExclusionRuleEditorPrimaryButtonClick"
             PrimaryButtonText="保存"
@@ -896,7 +936,7 @@
 
                     <TextBlock
                         Style="{StaticResource MetadataTextStyle}"
-                        Text="启用规则只会配置排除边界，不会开启录制。"
+                        Text="启用规则只会阻止匹配证据联网发送，不会停止或暂停本地录制。"
                         TextWrapping="Wrap" />
 
                     <ProgressBar

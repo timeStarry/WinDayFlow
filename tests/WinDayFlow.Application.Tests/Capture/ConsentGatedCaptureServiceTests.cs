@@ -28,7 +28,7 @@ public sealed class ConsentGatedCaptureServiceTests
     }
 
     [Fact]
-    public async Task CurrentConsentStillRequiresCaptureToBeEnabled()
+    public async Task CurrentConsentLetsStartPersistRecordingIntent()
     {
         using var settings = await CreateSettingsAsync();
         await settings.GrantRecordingConsentAsync();
@@ -37,12 +37,10 @@ public sealed class ConsentGatedCaptureServiceTests
 
         Assert.Equal(CaptureState.Stopped, service.CurrentStatus.State);
 
-        await Assert.ThrowsAsync<RecordingConsentRequiredException>(
-            () => service.StartAsync());
-        await Assert.ThrowsAsync<RecordingConsentRequiredException>(
-            () => service.ResumeAsync());
+        await service.StartAsync();
 
-        Assert.Equal(0, backend.StartCount);
+        Assert.Equal(CaptureIntent.Recording, settings.Current.CaptureIntent);
+        Assert.Equal(1, backend.StartCount);
         Assert.Equal(0, backend.ResumeCount);
     }
 
@@ -413,8 +411,11 @@ public sealed class ConsentGatedCaptureServiceTests
         Assert.Equal(CaptureState.Stopped, service.CurrentStatus.State);
     }
 
-    [Fact]
-    public async Task InitialAutomaticPauseResumesWhenRuntimeAuthorizationRecovers()
+    [Theory]
+    [InlineData(CaptureReasonCode.SessionLocked)]
+    [InlineData(CaptureReasonCode.PolicyBlocked)]
+    public async Task InitialAutomaticPauseResumesWhenRuntimeAuthorizationRecovers(
+        CaptureReasonCode reason)
     {
         using var settings = await CreateConsentedSettingsAsync();
         var authorization = new ControlledRuntimeAuthorization(
@@ -422,7 +423,7 @@ public sealed class ConsentGatedCaptureServiceTests
         authorization.SetCaptureAuthorized(authorized: false);
         var backend = new StubCaptureBackend(
             CaptureState.Paused,
-            CaptureReasonCode.ExcludedApplication);
+            reason);
         using var service = new ConsentGatedCaptureService(
             backend,
             settings,
@@ -451,7 +452,7 @@ public sealed class ConsentGatedCaptureServiceTests
         authorization.SetCaptureAuthorized(authorized: false);
         backend.TransitionTo(
             CaptureState.Stopped,
-            reason: CaptureReasonCode.PolicyBlocked);
+            reason: CaptureReasonCode.AccessLost);
 
         authorization.SetCaptureAuthorized(authorized: true);
         await backend.StartCompleted.WaitAsync(TimeSpan.FromSeconds(5));
@@ -495,7 +496,7 @@ public sealed class ConsentGatedCaptureServiceTests
         authorization.SetCaptureAuthorized(authorized: true);
         var backend = new StubCaptureBackend(
             CaptureState.Paused,
-            CaptureReasonCode.ExcludedApplication);
+            CaptureReasonCode.SessionLocked);
 
         using var service = new ConsentGatedCaptureService(
             backend,
@@ -678,7 +679,7 @@ public sealed class ConsentGatedCaptureServiceTests
     }
 
     [Fact]
-    public async Task DisablingCaptureStopsBackendAndBlocksResumeWithoutRevokingConsent()
+    public async Task ExplicitResumeAfterStopRearmsCaptureWithoutNewConsent()
     {
         using var settings = await CreateConsentedSettingsAsync();
         var backend = new StubCaptureBackend(CaptureState.Recording);
@@ -691,13 +692,13 @@ public sealed class ConsentGatedCaptureServiceTests
         Assert.True(settings.HasValidRecordingConsent);
         Assert.Equal(1, backend.StopCount);
         Assert.Equal(CaptureState.Stopped, service.CurrentStatus.State);
-        await Assert.ThrowsAsync<RecordingConsentRequiredException>(
-            () => service.ResumeAsync());
-        Assert.Equal(0, backend.ResumeCount);
+        await service.ResumeAsync();
+        Assert.Equal(CaptureIntent.Recording, settings.Current.CaptureIntent);
+        Assert.Equal(1, backend.ResumeCount);
     }
 
     [Fact]
-    public async Task DisableStopFailureKeepsActualRecordingVisibleAndBlocksResume()
+    public async Task DisableStopFailureKeepsActualRecordingVisibleUntilExplicitResume()
     {
         using var settings = await CreateConsentedSettingsAsync();
         var backend = new StubCaptureBackend(CaptureState.Recording)
@@ -715,9 +716,9 @@ public sealed class ConsentGatedCaptureServiceTests
         Assert.Equal(
             "录制已关闭或授权已失效，但自动停止失败。请立即使用停止操作。",
             service.CurrentStatus.Detail);
-        await Assert.ThrowsAsync<RecordingConsentRequiredException>(
-            () => service.ResumeAsync());
-        Assert.Equal(0, backend.ResumeCount);
+        await service.ResumeAsync();
+        Assert.Equal(CaptureIntent.Recording, settings.Current.CaptureIntent);
+        Assert.Equal(1, backend.ResumeCount);
     }
 
     [Fact]
@@ -926,22 +927,21 @@ public sealed class ConsentGatedCaptureServiceTests
     [Fact]
     public async Task RevocationLatchBlocksAQueuedStartBeforeSettingsArePersisted()
     {
-        var privacy = CapturePrivacySettings.Default;
         var consent = new RecordingConsent(
             AppSettingsService.CurrentRecordingConsentVersion,
-            new DateTimeOffset(2026, 7, 16, 0, 0, 0, TimeSpan.Zero),
-            privacy.Revision);
+            new DateTimeOffset(2026, 7, 16, 0, 0, 0, TimeSpan.Zero));
         var initial = new AppSettings(
             AppThemePreference.System,
-            CaptureEnabled: true,
-            CloudAnalysisEnabled: false,
             consent,
-            privacy);
+            EvidenceSettings.Default,
+            CaptureIntervalSeconds: 10,
+            CaptureIntent.Recording);
         var runtimeAuthorization = new LatchingRuntimeAuthorization();
         using var settings = new AppSettingsService(
             new InMemorySettingsRepository(initial),
             commitBarrier: runtimeAuthorization);
         await settings.InitializeAsync();
+        await settings.SetCaptureIntentAsync(CaptureIntent.Paused);
         runtimeAuthorization.BlockNextRestrictivePrepare();
         var releasePause = new TaskCompletionSource(
             TaskCreationOptions.RunContinuationsAsynchronously);
@@ -965,7 +965,7 @@ public sealed class ConsentGatedCaptureServiceTests
         await pause;
         await Assert.ThrowsAsync<RecordingConsentRequiredException>(() => start);
 
-        Assert.True(settings.Current.CaptureEnabled);
+        Assert.Equal(CaptureIntent.Recording, settings.Current.CaptureIntent);
         Assert.True(settings.HasValidRecordingConsent);
         Assert.Equal(0, backend.StartCount);
 
@@ -1583,14 +1583,14 @@ public sealed class ConsentGatedCaptureServiceTests
         RecordingConsent? consent = useOutdatedConsent
             ? new RecordingConsent(
                 AppSettingsService.CurrentRecordingConsentVersion + 1,
-                new DateTimeOffset(2026, 7, 16, 0, 0, 0, TimeSpan.Zero),
-                CapturePrivacySettings.Default.Revision)
+                new DateTimeOffset(2026, 7, 16, 0, 0, 0, TimeSpan.Zero))
             : null;
         var initial = new AppSettings(
             AppThemePreference.System,
-            CaptureEnabled: false,
-            CloudAnalysisEnabled: false,
-            consent);
+            consent,
+            EvidenceSettings.Default,
+            CaptureIntervalSeconds: 10,
+            CaptureIntent.Stopped);
         var settings = new AppSettingsService(new InMemorySettingsRepository(initial));
         await settings.InitializeAsync();
         return settings;
@@ -1958,9 +1958,9 @@ public sealed class ConsentGatedCaptureServiceTests
             AppSettings proposed,
             CancellationToken cancellationToken = default)
         {
-            if (Interlocked.Exchange(ref _blockNextRestrictivePrepare, 0) == 0
-                || !previous.CaptureEnabled
-                || proposed.CaptureEnabled)
+            if (!previous.CaptureEnabled
+                || proposed.CaptureEnabled
+                || Interlocked.Exchange(ref _blockNextRestrictivePrepare, 0) == 0)
             {
                 return;
             }

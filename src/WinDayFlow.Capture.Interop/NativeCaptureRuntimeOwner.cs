@@ -15,22 +15,35 @@ public sealed class NativeCaptureRuntimeOwner
 {
     private const uint AnalysisChunkDurationMilliseconds = 15 * 60 * 1_000;
     private readonly object _terminationSync = new();
+    private readonly SemaphoreSlim _stopReconciliationGate = new(1, 1);
     private readonly INativeCaptureRuntimeBackend _backend;
     private readonly NativeCapturePrivacyCoordinator _coordinator;
+    private readonly CaptureDiagnosticLog? _diagnosticLog;
+    private readonly CaptureRuleObservationBuffer? _ruleObservations;
+    private readonly TimeProvider _timeProvider;
+    private AppSettings _currentSettings;
+    private NativeCapturePrivacySignals _latestSignals;
     private EventHandler<CaptureChunkCommittedEventArgs>? _chunkCommitted;
     private Task? _terminationTask;
+    private ulong _lastReconciledStoppedSequence;
     private int _terminating;
 
     public NativeCaptureRuntimeOwner(
         NativeCaptureConfiguration configuration,
         NativeCapturePrivacyContext initialPrivacyContext,
         AppSettings? initialSettings = null,
-        NativeCapturePrivacySignals? initialSignals = null)
+        NativeCapturePrivacySignals? initialSignals = null,
+        CaptureDiagnosticLog? diagnosticLog = null,
+        CaptureRuleObservationBuffer? ruleObservations = null,
+        TimeProvider? timeProvider = null)
         : this(
             new NativeCaptureBackend(configuration, initialPrivacyContext),
             initialPrivacyContext,
             initialSettings,
-            initialSignals)
+            initialSignals,
+            diagnosticLog,
+            ruleObservations,
+            timeProvider)
     {
     }
 
@@ -38,9 +51,17 @@ public sealed class NativeCaptureRuntimeOwner
         INativeCaptureRuntimeBackend backend,
         NativeCapturePrivacyContext initialPrivacyContext,
         AppSettings? initialSettings = null,
-        NativeCapturePrivacySignals? initialSignals = null)
+        NativeCapturePrivacySignals? initialSignals = null,
+        CaptureDiagnosticLog? diagnosticLog = null,
+        CaptureRuleObservationBuffer? ruleObservations = null,
+        TimeProvider? timeProvider = null)
     {
         _backend = backend ?? throw new ArgumentNullException(nameof(backend));
+        _diagnosticLog = diagnosticLog;
+        _ruleObservations = ruleObservations;
+        _timeProvider = timeProvider ?? TimeProvider.System;
+        _currentSettings = initialSettings ?? AppSettings.Default;
+        _latestSignals = initialSignals ?? NativeCapturePrivacySignals.FailClosed;
         ArgumentNullException.ThrowIfNull(initialPrivacyContext);
         if ((_backend.Capabilities
                 & NativeCaptureAbiContract.DisplayWideContinuousCapabilities)
@@ -242,7 +263,9 @@ public sealed class NativeCaptureRuntimeOwner
     {
         ThrowIfTerminating();
         await _backend.StopAsync(cancellationToken).ConfigureAwait(false);
-        await InvokeCoordinatorAsync(_coordinator.ReconcileAfterStopAsync)
+        await ReconcileAfterStopAsync(
+                _backend.CurrentStatus.Sequence,
+                requireAutomaticProtectionStop: false)
             .ConfigureAwait(false);
     }
 
@@ -268,14 +291,20 @@ public sealed class NativeCaptureRuntimeOwner
         }
     }
 
-    public Task CommittedAsync(
+    public async Task CommittedAsync(
         AppSettings previous,
         AppSettings current,
         CancellationToken cancellationToken = default)
     {
         ThrowIfTerminating();
-        return InvokeCoordinatorAsync(
-            () => _coordinator.CommittedAsync(previous, current, cancellationToken));
+        await InvokeCoordinatorAsync(
+                () => _coordinator.CommittedAsync(
+                    previous,
+                    current,
+                    cancellationToken))
+            .ConfigureAwait(false);
+        Volatile.Write(ref _currentSettings, current);
+        ObserveRules(Volatile.Read(ref _latestSignals));
     }
 
     public async Task AbortedAsync(
@@ -328,13 +357,16 @@ public sealed class NativeCaptureRuntimeOwner
         }
     }
 
-    public Task UpdateSignalsAsync(
+    public async Task UpdateSignalsAsync(
         NativeCapturePrivacySignals signals,
         CancellationToken cancellationToken = default)
     {
         ThrowIfTerminating();
-        return InvokeCoordinatorAsync(
-            () => _coordinator.UpdateSignalsAsync(signals, cancellationToken));
+        await InvokeCoordinatorAsync(
+                () => _coordinator.UpdateSignalsAsync(signals, cancellationToken))
+            .ConfigureAwait(false);
+        Volatile.Write(ref _latestSignals, signals);
+        ObserveRules(signals);
     }
 
     public long InvalidatePrivacyObservation()
@@ -342,7 +374,14 @@ public sealed class NativeCaptureRuntimeOwner
         ThrowIfTerminating();
         try
         {
-            return _coordinator.InvalidatePrivacyObservation();
+            var generation = _coordinator.InvalidatePrivacyObservation();
+            Volatile.Write(
+                ref _latestSignals,
+                NativeCapturePrivacySignals.FailClosed);
+            _ruleObservations?.Invalidate(
+                _timeProvider.GetUtcNow(),
+                Volatile.Read(ref _currentSettings));
+            return generation;
         }
         catch
         {
@@ -366,17 +405,33 @@ public sealed class NativeCaptureRuntimeOwner
                 cancellationToken));
     }
 
-    public Task<bool> TryUpdateSignalsAsync(
+    public async Task<bool> TryUpdateSignalsAsync(
         long privacyObservationGeneration,
         NativeCapturePrivacySignals signals,
         CancellationToken cancellationToken = default)
     {
         ThrowIfTerminating();
-        return InvokeCoordinatorAsync(
-            () => _coordinator.TryUpdateSignalsAsync(
-                privacyObservationGeneration,
-                signals,
-                cancellationToken));
+        var applied = await InvokeCoordinatorAsync(
+                () => _coordinator.TryUpdateSignalsAsync(
+                    privacyObservationGeneration,
+                    signals,
+                    cancellationToken))
+            .ConfigureAwait(false);
+        if (applied)
+        {
+            Volatile.Write(ref _latestSignals, signals);
+            ObserveRules(signals);
+        }
+
+        return applied;
+    }
+
+    private void ObserveRules(NativeCapturePrivacySignals signals)
+    {
+        _ruleObservations?.Observe(
+            _timeProvider.GetUtcNow(),
+            Volatile.Read(ref _currentSettings),
+            signals);
     }
 
     public ValueTask DisposeAsync()
@@ -663,10 +718,157 @@ public sealed class NativeCaptureRuntimeOwner
         CaptureStatusChangedEventArgs eventArgs)
     {
         _ = sender;
+        _diagnosticLog?.Write(
+            CaptureDiagnosticEvent.BackendStatusChanged,
+            new(CaptureDiagnosticField.State, (long)eventArgs.Current.State),
+            new(CaptureDiagnosticField.Reason, (long)eventArgs.Current.Reason),
+            new(
+                CaptureDiagnosticField.Sequence,
+                ToDiagnosticInt64(eventArgs.Current.Sequence)),
+            new(
+                CaptureDiagnosticField.ErrorCode,
+                (long)eventArgs.Current.ErrorCode));
         if (eventArgs.Current.State == CaptureState.Faulted)
         {
             _ = BeginTermination();
+            return;
         }
+
+        if (eventArgs.Current.State == CaptureState.Stopped
+            && IsAutomaticProtectionReason(eventArgs.Current.Reason)
+            && Volatile.Read(ref _terminating) == 0)
+        {
+            _ = Task.Run(
+                () => ObserveAutomaticStopReconciliationAsync(eventArgs.Current));
+        }
+    }
+
+    private async Task ObserveAutomaticStopReconciliationAsync(
+        CaptureStatus stoppedStatus)
+    {
+        try
+        {
+            await ReconcileAfterStopAsync(
+                    stoppedStatus.Sequence,
+                    requireAutomaticProtectionStop: true)
+                .ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            System.Diagnostics.Debug.WriteLine(
+                $"Automatic capture stop reconciliation failed: {exception.GetType().Name}");
+        }
+    }
+
+    private async Task ReconcileAfterStopAsync(
+        ulong stoppedSequence,
+        bool requireAutomaticProtectionStop)
+    {
+        await _stopReconciliationGate.WaitAsync(CancellationToken.None)
+            .ConfigureAwait(false);
+        try
+        {
+            _diagnosticLog?.Write(
+                CaptureDiagnosticEvent.StopReconciliationStarted,
+                new(
+                    CaptureDiagnosticField.Sequence,
+                    ToDiagnosticInt64(stoppedSequence)),
+                new(
+                    CaptureDiagnosticField.Automatic,
+                    requireAutomaticProtectionStop ? 1 : 0));
+            if (Volatile.Read(ref _terminating) != 0)
+            {
+                LogStopReconciliationCompleted(
+                    stoppedSequence,
+                    requireAutomaticProtectionStop,
+                    CaptureDiagnosticOutcome.Skipped);
+                return;
+            }
+
+            if (stoppedSequence != 0
+                && stoppedSequence <= _lastReconciledStoppedSequence)
+            {
+                LogStopReconciliationCompleted(
+                    stoppedSequence,
+                    requireAutomaticProtectionStop,
+                    CaptureDiagnosticOutcome.Skipped);
+                return;
+            }
+
+            if (requireAutomaticProtectionStop)
+            {
+                var current = _backend.CurrentStatus;
+                if (current.State != CaptureState.Stopped
+                    || !IsAutomaticProtectionReason(current.Reason)
+                    || current.Sequence < stoppedSequence)
+                {
+                    LogStopReconciliationCompleted(
+                        stoppedSequence,
+                        requireAutomaticProtectionStop,
+                        CaptureDiagnosticOutcome.Skipped);
+                    return;
+                }
+
+                stoppedSequence = current.Sequence;
+            }
+
+            try
+            {
+                await InvokeCoordinatorAsync(_coordinator.ReconcileAfterStopAsync)
+                    .ConfigureAwait(false);
+            }
+            catch
+            {
+                LogStopReconciliationCompleted(
+                    stoppedSequence,
+                    requireAutomaticProtectionStop,
+                    CaptureDiagnosticOutcome.Failed);
+                throw;
+            }
+
+            if (stoppedSequence > _lastReconciledStoppedSequence)
+            {
+                _lastReconciledStoppedSequence = stoppedSequence;
+            }
+
+            LogStopReconciliationCompleted(
+                stoppedSequence,
+                requireAutomaticProtectionStop,
+                CaptureDiagnosticOutcome.Succeeded);
+        }
+        finally
+        {
+            _stopReconciliationGate.Release();
+        }
+    }
+
+    private void LogStopReconciliationCompleted(
+        ulong stoppedSequence,
+        bool automatic,
+        CaptureDiagnosticOutcome outcome)
+    {
+        _diagnosticLog?.Write(
+            CaptureDiagnosticEvent.StopReconciliationCompleted,
+            new(
+                CaptureDiagnosticField.Sequence,
+                ToDiagnosticInt64(stoppedSequence)),
+            new(CaptureDiagnosticField.Automatic, automatic ? 1 : 0),
+            new(CaptureDiagnosticField.Outcome, (long)outcome));
+    }
+
+    private static long ToDiagnosticInt64(ulong value) =>
+        value > long.MaxValue ? long.MaxValue : (long)value;
+
+    private static bool IsAutomaticProtectionReason(CaptureReasonCode reason)
+    {
+        return reason is
+            CaptureReasonCode.SessionLocked or
+            CaptureReasonCode.SecureDesktop or
+            CaptureReasonCode.SystemSleep or
+            CaptureReasonCode.DisplayUnavailable or
+            CaptureReasonCode.AccessLost or
+            CaptureReasonCode.StorageConstrained or
+            CaptureReasonCode.PolicyBlocked;
     }
 
     private void OnBackendChunkCommitted(

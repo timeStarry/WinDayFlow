@@ -191,6 +191,12 @@ class TestBackend final
     state_->called.store(true);
     return CaptureWorkerBackendResult::kInternalFailure;
   }
+  std::optional<windayflow::capture::ProcessTelemetrySample>
+  ObserveApplicationContext(
+      const windayflow::capture::CaptureTargetIdentity&) noexcept override {
+    state_->called.store(true);
+    return std::nullopt;
+  }
   windayflow::capture::CaptureWorkerBackendResult BeginChunk(
       std::string_view,
       const windayflow::capture::JpegFrameChunkWriterConfig&) noexcept
@@ -199,7 +205,8 @@ class TestBackend final
     return CaptureWorkerBackendResult::kInternalFailure;
   }
   windayflow::capture::CaptureWorkerBackendResult EncodeFrame(
-      std::span<const uint8_t>, uint64_t) noexcept override {
+      std::span<const uint8_t>, uint64_t,
+      windayflow::capture::CaptureFrameWriteDisposition*) noexcept override {
     state_->called.store(true);
     return CaptureWorkerBackendResult::kInternalFailure;
   }

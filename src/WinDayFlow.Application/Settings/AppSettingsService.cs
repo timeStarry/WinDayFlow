@@ -25,8 +25,7 @@ public sealed class AppSettingsService : IDisposable
 
     public AppSettings Current { get; private set; } = AppSettings.Default;
 
-    public bool HasValidRecordingConsent =>
-        IsValidRecordingConsent(Current);
+    public bool HasValidRecordingConsent => IsValidRecordingConsent(Current);
 
     public event EventHandler<AppSettingsChangedEventArgs>? SettingsChanged;
 
@@ -78,158 +77,106 @@ public sealed class AppSettingsService : IDisposable
 
     public Task SetThemeAsync(
         AppThemePreference theme,
-        CancellationToken cancellationToken = default)
-    {
-        return UpdateAsync(
+        CancellationToken cancellationToken = default) =>
+        UpdateAsync(
             current => new AppSettings(
                 theme,
-                current.CaptureEnabled,
-                current.CloudAnalysisEnabled,
                 current.RecordingConsent,
-                current.CapturePrivacy,
-                current.CaptureIntervalSeconds),
+                current.Evidence,
+                current.CaptureIntervalSeconds,
+                current.CaptureIntent),
             cancellationToken);
-    }
-
-    public Task SetCloudAnalysisEnabledAsync(
-        bool enabled,
-        CancellationToken cancellationToken = default)
-    {
-        return UpdateAsync(
-            current => new AppSettings(
-                current.Theme,
-                current.CaptureEnabled,
-                enabled,
-                current.RecordingConsent,
-                current.CapturePrivacy,
-                current.CaptureIntervalSeconds),
-            cancellationToken);
-    }
 
     public Task GrantRecordingConsentAsync(
-        CancellationToken cancellationToken = default)
-    {
-        return UpdateAsync(
+        CancellationToken cancellationToken = default) =>
+        UpdateAsync(
             current => new AppSettings(
                 current.Theme,
-                current.CaptureEnabled,
-                current.CloudAnalysisEnabled,
                 new RecordingConsent(
                     CurrentRecordingConsentVersion,
-                    _timeProvider.GetUtcNow().ToUniversalTime(),
-                    current.CapturePrivacy.Revision),
-                current.CapturePrivacy,
-                current.CaptureIntervalSeconds),
+                    _timeProvider.GetUtcNow().ToUniversalTime()),
+                current.Evidence,
+                current.CaptureIntervalSeconds,
+                current.CaptureIntent),
             cancellationToken);
-    }
 
     public Task RevokeRecordingConsentAsync(
-        CancellationToken cancellationToken = default)
-    {
-        return UpdateAsync(
+        CancellationToken cancellationToken = default) =>
+        UpdateAsync(
             current => new AppSettings(
                 current.Theme,
-                CaptureEnabled: false,
-                current.CloudAnalysisEnabled,
                 RecordingConsent: null,
-                current.CapturePrivacy,
-                current.CaptureIntervalSeconds),
+                current.Evidence,
+                current.CaptureIntervalSeconds,
+                CaptureIntent.Stopped),
             cancellationToken);
-    }
 
     public Task SetCaptureEnabledAsync(
         bool enabled,
+        CancellationToken cancellationToken = default) =>
+        SetCaptureIntentAsync(
+            enabled ? CaptureIntent.Recording : CaptureIntent.Stopped,
+            cancellationToken);
+
+    public Task SetCaptureIntentAsync(
+        CaptureIntent intent,
         CancellationToken cancellationToken = default)
     {
+        if (intent is not (CaptureIntent.Recording
+            or CaptureIntent.Paused
+            or CaptureIntent.Stopped))
+        {
+            throw new ArgumentOutOfRangeException(nameof(intent));
+        }
+
         return UpdateAsync(
             current =>
             {
-                if (enabled && !IsValidRecordingConsent(current))
+                if (intent != CaptureIntent.Stopped
+                    && !IsValidRecordingConsent(current))
                 {
                     throw new RecordingConsentRequiredException();
                 }
 
                 return new AppSettings(
                     current.Theme,
-                    enabled,
-                    current.CloudAnalysisEnabled,
                     current.RecordingConsent,
-                    current.CapturePrivacy,
-                    current.CaptureIntervalSeconds);
+                    current.Evidence,
+                    current.CaptureIntervalSeconds,
+                    intent);
             },
             cancellationToken);
     }
 
     public Task SetCaptureIntervalSecondsAsync(
         int captureIntervalSeconds,
-        CancellationToken cancellationToken = default)
-    {
-        return UpdateAsync(
+        CancellationToken cancellationToken = default) =>
+        UpdateAsync(
             current => new AppSettings(
                 current.Theme,
-                current.CaptureEnabled,
-                current.CloudAnalysisEnabled,
                 current.RecordingConsent,
-                current.CapturePrivacy,
-                captureIntervalSeconds),
+                current.Evidence,
+                captureIntervalSeconds,
+                current.CaptureIntent),
             cancellationToken);
-    }
 
-    public Task SetCapturePrivacyAsync(
+    public Task SetEvidenceRetentionDaysAsync(
         int evidenceRetentionDays,
-        bool excludeSensitiveApplications,
-        bool pauseInRemoteSessions,
-        bool pauseDuringScreenSharing,
-        CancellationToken cancellationToken = default)
-    {
-        return UpdateAsync(
+        CancellationToken cancellationToken = default) =>
+        UpdateAsync(
             current =>
             {
-                var privacy = current.CapturePrivacy.Change(
-                    evidenceRetentionDays,
-                    excludeSensitiveApplications,
-                    pauseInRemoteSessions,
-                    pauseDuringScreenSharing);
-                if (privacy == current.CapturePrivacy)
-                {
-                    return current;
-                }
-
-                return new AppSettings(
-                    current.Theme,
-                    CaptureEnabled: false,
-                    current.CloudAnalysisEnabled,
-                    current.RecordingConsent,
-                    privacy,
-                    current.CaptureIntervalSeconds);
+                var evidence = current.Evidence.ChangeRetentionDays(evidenceRetentionDays);
+                return evidence == current.Evidence
+                    ? current
+                    : new AppSettings(
+                        current.Theme,
+                        current.RecordingConsent,
+                        evidence,
+                        current.CaptureIntervalSeconds,
+                        current.CaptureIntent);
             },
             cancellationToken);
-    }
-
-    public Task SetCaptureApplicationPrivacyModeAsync(
-        CaptureApplicationPrivacyMode applicationPrivacyMode,
-        CancellationToken cancellationToken = default)
-    {
-        return UpdateAsync(
-            current =>
-            {
-                var privacy = current.CapturePrivacy.ChangeApplicationPrivacyMode(
-                    applicationPrivacyMode);
-                if (privacy == current.CapturePrivacy)
-                {
-                    return current;
-                }
-
-                return new AppSettings(
-                    current.Theme,
-                    CaptureEnabled: false,
-                    current.CloudAnalysisEnabled,
-                    current.RecordingConsent,
-                    privacy,
-                    current.CaptureIntervalSeconds);
-            },
-            cancellationToken);
-    }
 
     public async Task<CaptureExclusionRule> AddCaptureExclusionRuleAsync(
         CaptureExclusionRule rule,
@@ -239,22 +186,17 @@ public sealed class AppSettingsService : IDisposable
         if (rule.Revision != 1)
         {
             throw new ArgumentException(
-                "A new capture exclusion rule must start at revision one.",
+                "A new evidence send rule must start at revision one.",
                 nameof(rule));
         }
 
-        CaptureExclusionRule? added = null;
         await UpdateAsync(
-                current =>
-                {
-                    added = rule;
-                    return ChangeExclusionRules(
-                        current,
-                        current.CapturePrivacy.ExclusionRules.Add(rule));
-                },
+                current => ChangeSendRules(
+                    current,
+                    current.Evidence.SendRules.Add(rule)),
                 cancellationToken)
             .ConfigureAwait(false);
-        return added!;
+        return rule;
     }
 
     public async Task<CaptureExclusionRule> UpdateCaptureExclusionRuleAsync(
@@ -273,7 +215,7 @@ public sealed class AppSettingsService : IDisposable
                 current =>
                 {
                     var (index, rule) = FindRule(
-                        current.CapturePrivacy.ExclusionRules,
+                        current.Evidence.SendRules,
                         id,
                         expectedRevision);
                     updated = rule.Change(
@@ -283,14 +225,11 @@ public sealed class AppSettingsService : IDisposable
                         identityValue,
                         windowTitleMatchKind,
                         pattern);
-                    if (updated == rule)
-                    {
-                        return current;
-                    }
-
-                    return ChangeExclusionRules(
-                        current,
-                        current.CapturePrivacy.ExclusionRules.Replace(index, updated));
+                    return updated == rule
+                        ? current
+                        : ChangeSendRules(
+                            current,
+                            current.Evidence.SendRules.Replace(index, updated));
                 },
                 cancellationToken)
             .ConfigureAwait(false);
@@ -308,18 +247,15 @@ public sealed class AppSettingsService : IDisposable
                 current =>
                 {
                     var (index, rule) = FindRule(
-                        current.CapturePrivacy.ExclusionRules,
+                        current.Evidence.SendRules,
                         id,
                         expectedRevision);
                     updated = rule.ChangeEnabled(enabled);
-                    if (updated == rule)
-                    {
-                        return current;
-                    }
-
-                    return ChangeExclusionRules(
-                        current,
-                        current.CapturePrivacy.ExclusionRules.Replace(index, updated));
+                    return updated == rule
+                        ? current
+                        : ChangeSendRules(
+                            current,
+                            current.Evidence.SendRules.Replace(index, updated));
                 },
                 cancellationToken)
             .ConfigureAwait(false);
@@ -336,13 +272,13 @@ public sealed class AppSettingsService : IDisposable
         await UpdateAsync(
                 current =>
                 {
-                    var rules = current.CapturePrivacy.ExclusionRules;
+                    var rules = current.Evidence.SendRules;
                     if (newIndex < 0 || newIndex >= rules.Count)
                     {
                         throw new ArgumentOutOfRangeException(
                             nameof(newIndex),
                             newIndex,
-                            "The capture exclusion rule position is outside the rule set.");
+                            "The evidence send-rule position is outside the rule set.");
                     }
 
                     var (oldIndex, rule) = FindRule(rules, id, expectedRevision);
@@ -353,30 +289,25 @@ public sealed class AppSettingsService : IDisposable
                     }
 
                     moved = rule.AdvanceRevision();
-                    return ChangeExclusionRules(
-                        current,
-                        rules.Move(oldIndex, newIndex, moved));
+                    return ChangeSendRules(current, rules.Move(oldIndex, newIndex, moved));
                 },
                 cancellationToken)
             .ConfigureAwait(false);
         return moved!;
     }
 
-    public async Task DeleteCaptureExclusionRuleAsync(
+    public Task DeleteCaptureExclusionRuleAsync(
         Guid id,
         long expectedRevision,
-        CancellationToken cancellationToken = default)
-    {
-        await UpdateAsync(
-                current =>
-                {
-                    var rules = current.CapturePrivacy.ExclusionRules;
-                    var (index, _) = FindRule(rules, id, expectedRevision);
-                    return ChangeExclusionRules(current, rules.RemoveAt(index));
-                },
-                cancellationToken)
-            .ConfigureAwait(false);
-    }
+        CancellationToken cancellationToken = default) =>
+        UpdateAsync(
+            current =>
+            {
+                var rules = current.Evidence.SendRules;
+                var (index, _) = FindRule(rules, id, expectedRevision);
+                return ChangeSendRules(current, rules.RemoveAt(index));
+            },
+            cancellationToken);
 
     public void Dispose()
     {
@@ -408,7 +339,6 @@ public sealed class AppSettingsService : IDisposable
             current = update(previous)
                 ?? throw new InvalidOperationException(
                     "The settings update produced no settings snapshot.");
-
             if (current == previous)
             {
                 return;
@@ -435,7 +365,7 @@ public sealed class AppSettingsService : IDisposable
             _writeGate.Release();
         }
 
-        NotifyAppliedChange(previous, current, settingsApplied, operationFailure);
+        NotifyAppliedChange(previous!, current!, settingsApplied, operationFailure);
         operationFailure?.Throw();
     }
 
@@ -453,7 +383,6 @@ public sealed class AppSettingsService : IDisposable
             await _commitBarrier
                 .PrepareAsync(previous, current, cancellationToken)
                 .ConfigureAwait(false);
-
             if (saveRequired)
             {
                 await _repository
@@ -464,7 +393,6 @@ public sealed class AppSettingsService : IDisposable
             Current = current;
             settingsApplied = true;
             markSettingsApplied();
-
             await _commitBarrier
                 .CommittedAsync(previous, current, cancellationToken)
                 .ConfigureAwait(false);
@@ -518,7 +446,7 @@ public sealed class AppSettingsService : IDisposable
 
         try
         {
-            OnSettingsChanged(previous, current);
+            SettingsChanged?.Invoke(this, new AppSettingsChangedEventArgs(previous, current));
         }
         catch (Exception notificationFailure) when (operationFailure is not null)
         {
@@ -529,7 +457,7 @@ public sealed class AppSettingsService : IDisposable
 
     private static AppSettings EnsureCaptureConsentIsCurrent(AppSettings settings)
     {
-        if (!settings.CaptureEnabled
+        if (settings.CaptureIntent == CaptureIntent.Stopped
             || IsValidRecordingConsent(settings))
         {
             return settings;
@@ -537,38 +465,29 @@ public sealed class AppSettingsService : IDisposable
 
         return new AppSettings(
             settings.Theme,
-            CaptureEnabled: false,
-            settings.CloudAnalysisEnabled,
             settings.RecordingConsent,
-            settings.CapturePrivacy,
-            settings.CaptureIntervalSeconds);
+            settings.Evidence,
+            settings.CaptureIntervalSeconds,
+            CaptureIntent.Stopped);
     }
 
-    private static bool IsValidRecordingConsent(AppSettings settings)
-    {
-        return settings.RecordingConsent is { } consent
-            && consent.PolicyVersion == CurrentRecordingConsentVersion
-            && consent.PrivacyRevision == settings.CapturePrivacy.Revision;
-    }
+    private static bool IsValidRecordingConsent(AppSettings settings) =>
+        settings.RecordingConsent is { } consent
+        && consent.PolicyVersion == CurrentRecordingConsentVersion;
 
-    private static AppSettings ChangeExclusionRules(
+    private static AppSettings ChangeSendRules(
         AppSettings current,
         CaptureExclusionRuleSet rules)
     {
-        var privacy = current.CapturePrivacy.ChangeRules(rules);
-        if (privacy == current.CapturePrivacy)
-        {
-            return current;
-        }
-
-        return new AppSettings(
-            current.Theme,
-            CaptureEnabled: privacy.Revision == current.CapturePrivacy.Revision
-                && current.CaptureEnabled,
-            current.CloudAnalysisEnabled,
-            current.RecordingConsent,
-            privacy,
-            current.CaptureIntervalSeconds);
+        var evidence = current.Evidence.ChangeSendRules(rules);
+        return evidence == current.Evidence
+            ? current
+            : new AppSettings(
+                current.Theme,
+                current.RecordingConsent,
+                evidence,
+                current.CaptureIntervalSeconds,
+                current.CaptureIntent);
     }
 
     private static (int Index, CaptureExclusionRule Rule) FindRule(
@@ -579,17 +498,10 @@ public sealed class AppSettingsService : IDisposable
         if (id == Guid.Empty)
         {
             throw new ArgumentException(
-                "A capture exclusion rule identifier cannot be empty.",
+                "An evidence send-rule identifier cannot be empty.",
                 nameof(id));
         }
-
-        if (expectedRevision <= 0)
-        {
-            throw new ArgumentOutOfRangeException(
-                nameof(expectedRevision),
-                expectedRevision,
-                "The expected capture exclusion rule revision must be positive.");
-        }
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(expectedRevision);
 
         var index = rules.IndexOf(id);
         if (index < 0)
@@ -609,15 +521,5 @@ public sealed class AppSettingsService : IDisposable
         return (index, rule);
     }
 
-    private void OnSettingsChanged(AppSettings previous, AppSettings current)
-    {
-        SettingsChanged?.Invoke(
-            this,
-            new AppSettingsChangedEventArgs(previous, current));
-    }
-
-    private void ThrowIfDisposed()
-    {
-        ObjectDisposedException.ThrowIf(_disposed, this);
-    }
+    private void ThrowIfDisposed() => ObjectDisposedException.ThrowIf(_disposed, this);
 }

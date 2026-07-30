@@ -46,10 +46,18 @@ struct ChunkState {
   int64_t start_steady_ms = 0;
   int64_t start_unix_ms = 0;
   int64_t latest_frame_offset_ms = 0;
+  int64_t latest_sample_unix_ms = 0;
+  uint32_t sampled_count = 0;
+  uint32_t black_count = 0;
   uint32_t frame_count = 0;
+  uint32_t retained_counted = 0;
+  uint32_t duplicate_counted = 0;
   uint32_t width = 0;
   uint32_t height = 0;
   std::optional<ProcessTelemetrySample> process_telemetry_start;
+  std::optional<ProcessTelemetrySample> previous_context_sample;
+  int64_t previous_context_steady_ms = 0;
+  std::vector<ChunkContextSampleManifest> context_samples;
 };
 
 struct PermitValidationContext {
@@ -310,6 +318,17 @@ CaptureWorkerRunResult CaptureWorker::last_result() const {
   return last_result_;
 }
 
+CaptureWorkerHealthSnapshot CaptureWorker::health_snapshot() const noexcept {
+  return CaptureWorkerHealthSnapshot{
+      last_successful_sample_unix_ms_.load(std::memory_order_acquire),
+      last_retained_frame_unix_ms_.load(std::memory_order_acquire),
+      sampled_frame_count_.load(std::memory_order_acquire),
+      black_frame_count_.load(std::memory_order_acquire),
+      duplicate_frame_count_.load(std::memory_order_acquire),
+      retained_frame_count_.load(std::memory_order_acquire),
+      health_revision_.load(std::memory_order_acquire)};
+}
+
 bool CaptureWorker::RetryPendingCompensation(uint32_t attempts) noexcept {
   if (attempts == 0) {
     return false;
@@ -448,7 +467,7 @@ void CaptureWorker::Run(CaptureRuntimeOwner& runtime,
         return AuthorizedStageResult{true, backend_result};
       };
 
-      if (!chunk.writer_started || chunk.frame_count == 0) {
+      if (!chunk.writer_started || chunk.sampled_count == 0) {
         discard_chunk();
         return WorkerStepResult::kOk;
       }
@@ -463,14 +482,14 @@ void CaptureWorker::Run(CaptureRuntimeOwner& runtime,
       const int64_t elapsed_ms =
           std::max<int64_t>(0, finalization_steady_ms - chunk.start_steady_ms);
       const int64_t encoded_duration_ms = CalculateEncodedDurationMs(
-          chunk.frame_count, configuration_.policy.capture_interval_ms);
+          chunk.sampled_count, configuration_.policy.capture_interval_ms);
       const int64_t duration_ms = CalculateChunkDurationMs(
           elapsed_ms, encoded_duration_ms, chunk.latest_frame_offset_ms);
       ChunkManifest manifest{
           chunk.artifact_id,
           chunk.start_unix_ms,
           SaturatingAddMilliseconds(chunk.start_unix_ms, duration_ms),
-          chunk.frame_count,
+          chunk.sampled_count,
           chunk.width,
           chunk.height,
           0,
@@ -479,6 +498,8 @@ void CaptureWorker::Run(CaptureRuntimeOwner& runtime,
           token.target.scope == CaptureAuthorizationScope::kDisplayWide,
           {},
       };
+      manifest.black_frame_count = chunk.black_count;
+      manifest.context_samples = chunk.context_samples;
       if (chunk.process_telemetry_start.has_value() &&
           token.target.scope == CaptureAuthorizationScope::kForegroundTarget) {
         const std::optional<ProcessTelemetrySample> end_sample =
@@ -517,6 +538,26 @@ void CaptureWorker::Run(CaptureRuntimeOwner& runtime,
                : finalize.backend_result == CaptureWorkerBackendResult::kOk
                    ? WorkerStepResult::kInternalFailure
                    : MapBackendFailure(finalize.backend_result);
+      }
+
+      const uint32_t actual_retained =
+          static_cast<uint32_t>(manifest.frames.size());
+      const uint32_t actual_duplicate = manifest.duplicate_frame_count;
+      if (actual_retained > chunk.retained_counted) {
+        retained_frame_count_.fetch_add(
+            actual_retained - chunk.retained_counted,
+            std::memory_order_acq_rel);
+        last_retained_frame_unix_ms_.store(
+            chunk.latest_sample_unix_ms, std::memory_order_release);
+      }
+      if (chunk.duplicate_counted > actual_duplicate) {
+        duplicate_frame_count_.fetch_sub(
+            chunk.duplicate_counted - actual_duplicate,
+            std::memory_order_acq_rel);
+      }
+      if (actual_retained != chunk.retained_counted ||
+          actual_duplicate != chunk.duplicate_counted) {
+        health_revision_.fetch_add(1, std::memory_order_acq_rel);
       }
 
       std::string artifact_identifier;
@@ -715,7 +756,7 @@ void CaptureWorker::Run(CaptureRuntimeOwner& runtime,
       CaptureRuntimeControlSnapshot latest = runtime.ReadControlSnapshot();
       observed_control_sequence = latest.sequence;
       bool sealed_prefix = safety_.HasSealedPrefix(token);
-      if (sealed_prefix && !latest.stop_requested &&
+      if (!latest.stop_requested &&
           latest.pause_epoch == handled_pause_epoch) {
         const std::optional<CaptureRuntimeControlSnapshot> coordinated =
             runtime.WaitForControlChange(
@@ -954,14 +995,12 @@ void CaptureWorker::Run(CaptureRuntimeOwner& runtime,
         return;
       }
 
-      // A newly created capture surface can yield an empty black buffer before
-      // the compositor has published real content. It has no archival or LLM
-      // value, so reject it before opening a chunk or encoding a JPEG.
-      if (!HasMeaningfulVisualContent(transformed_frame)) {
-        SecureClear(&transformed_frame);
-        consecutive_topology_retries = 0;
-        continue;
-      }
+      const int64_t frame_steady_ms = backend_.SteadyNowMilliseconds();
+      const int64_t sample_unix_ms = backend_.UnixNowMilliseconds();
+      last_successful_sample_unix_ms_.store(sample_unix_ms,
+                                            std::memory_order_release);
+      sampled_frame_count_.fetch_add(1, std::memory_order_acq_rel);
+      health_revision_.fetch_add(1, std::memory_order_acq_rel);
 
       if (chunk.writer_started && (chunk.width != transformed_frame.width ||
                                    chunk.height != transformed_frame.height)) {
@@ -982,8 +1021,6 @@ void CaptureWorker::Run(CaptureRuntimeOwner& runtime,
         }
       }
 
-      const int64_t frame_steady_ms = backend_.SteadyNowMilliseconds();
-      const int64_t frame_unix_ms = backend_.UnixNowMilliseconds();
       if (chunk.writer_started &&
           frame_steady_ms - chunk.start_steady_ms >=
               static_cast<int64_t>(configuration_.policy.chunk_duration_ms)) {
@@ -1004,17 +1041,6 @@ void CaptureWorker::Run(CaptureRuntimeOwner& runtime,
         }
       }
 
-      int64_t frame_offset_ms = 0;
-      bool begin_writer = !chunk.writer_started;
-      if (!begin_writer) {
-        frame_offset_ms =
-            std::max<int64_t>(0, frame_steady_ms - chunk.start_steady_ms);
-        if (frame_offset_ms <= chunk.latest_frame_offset_ms) {
-          frame_offset_ms = SaturatingAddMilliseconds(
-              chunk.latest_frame_offset_ms, 1);
-        }
-      }
-
       const JpegFrameChunkWriterConfig writer_configuration{
           transformed_frame.width,
           transformed_frame.height,
@@ -1022,7 +1048,7 @@ void CaptureWorker::Run(CaptureRuntimeOwner& runtime,
           configuration_.maximum_frame_bytes,
           configuration_.maximum_chunk_bytes,
       };
-      if (begin_writer) {
+      if (!chunk.writer_started) {
         if (token.target.scope == CaptureAuthorizationScope::kForegroundTarget) {
           chunk.process_telemetry_start = ReadProcessTelemetrySample(
               token.target.process_id,
@@ -1050,11 +1076,92 @@ void CaptureWorker::Run(CaptureRuntimeOwner& runtime,
           fail(MapBackendFailure(begun.backend_result));
           return;
         }
+        chunk.writer_started = true;
+        chunk.start_steady_ms = frame_steady_ms;
+        chunk.start_unix_ms = sample_unix_ms;
+        chunk.width = writer_configuration.width;
+        chunk.height = writer_configuration.height;
+        schedule.ReanchorFrame(frame_steady_ms);
       }
+
+      int64_t frame_offset_ms =
+          std::max<int64_t>(0, frame_steady_ms - chunk.start_steady_ms);
+      if (chunk.sampled_count != 0 &&
+          frame_offset_ms <= chunk.latest_frame_offset_ms) {
+        frame_offset_ms = SaturatingAddMilliseconds(
+            chunk.latest_frame_offset_ms, 1);
+      }
+      chunk.latest_frame_offset_ms =
+          std::max(chunk.latest_frame_offset_ms, frame_offset_ms);
+      chunk.latest_sample_unix_ms = sample_unix_ms;
+      const uint32_t sample_index = chunk.sampled_count;
+      if (chunk.sampled_count < std::numeric_limits<uint32_t>::max()) {
+        ++chunk.sampled_count;
+      }
+
+      try {
+        ChunkContextSampleManifest context_sample;
+        context_sample.sample_index = sample_index;
+        context_sample.offset_milliseconds =
+            static_cast<uint64_t>(frame_offset_ms);
+        const std::optional<ProcessTelemetrySample> observed_context =
+            backend_.ObserveApplicationContext(token.target);
+        if (observed_context.has_value()) {
+          uint32_t cpu_usage_basis_points = 0;
+          if (chunk.previous_context_sample.has_value()) {
+            const int64_t elapsed_context_ms = std::max<int64_t>(
+                1, frame_steady_ms - chunk.previous_context_steady_ms);
+            const std::optional<ProcessTelemetryInterval> interval =
+                BuildProcessTelemetryInterval(
+                    *chunk.previous_context_sample,
+                    *observed_context,
+                    static_cast<uint64_t>(elapsed_context_ms));
+            if (interval.has_value()) {
+              cpu_usage_basis_points = interval->cpu_usage_basis_points;
+            }
+          }
+          context_sample.application = ChunkApplicationManifest{
+              observed_context->process_name_utf8,
+              observed_context->process_id,
+              cpu_usage_basis_points,
+              observed_context->working_set_bytes,
+              observed_context->private_memory_bytes};
+          chunk.previous_context_sample = observed_context;
+          chunk.previous_context_steady_ms = frame_steady_ms;
+        } else {
+          chunk.previous_context_sample.reset();
+          chunk.previous_context_steady_ms = 0;
+        }
+        chunk.context_samples.push_back(std::move(context_sample));
+      } catch (...) {
+        // Context telemetry is observational and must never interrupt capture.
+      }
+
+      // Reject only compositor-empty frames. The context chunk remains so the
+      // sampled interval and filter count are not lost.
+      if (!HasMeaningfulVisualContent(transformed_frame)) {
+        black_frame_count_.fetch_add(1, std::memory_order_acq_rel);
+        health_revision_.fetch_add(1, std::memory_order_acq_rel);
+        ++chunk.black_count;
+        SecureClear(&transformed_frame);
+        consecutive_topology_retries = 0;
+        if (!ready_for_token) {
+          if (!publish_checkpoint(CaptureWorkerCheckpointKind::kReady, 0)) {
+            fail(WorkerStepResult::kEventFailure);
+            return;
+          }
+          ready_for_token = true;
+        }
+        continue;
+      }
+
+      CaptureFrameWriteDisposition disposition =
+          CaptureFrameWriteDisposition::kDuplicate;
       const AuthorizedStageResult encoded =
           ExecuteAuthorizedStage(token, [&]() noexcept {
             return backend_.EncodeFrame(transformed_frame.pixels,
-                                        static_cast<uint64_t>(frame_offset_ms));
+                                        static_cast<uint64_t>(frame_offset_ms),
+                                        &disposition);
           });
       SecureClear(&transformed_frame);
       if (!encoded.authorized) {
@@ -1068,16 +1175,17 @@ void CaptureWorker::Run(CaptureRuntimeOwner& runtime,
         return;
       }
 
-      if (begin_writer) {
-        chunk.writer_started = true;
-        chunk.start_steady_ms = frame_steady_ms;
-        chunk.start_unix_ms = frame_unix_ms;
-        chunk.width = writer_configuration.width;
-        chunk.height = writer_configuration.height;
-        schedule.ReanchorFrame(frame_steady_ms);
+      if (disposition == CaptureFrameWriteDisposition::kRetained) {
+        retained_frame_count_.fetch_add(1, std::memory_order_acq_rel);
+        last_retained_frame_unix_ms_.store(sample_unix_ms,
+                                           std::memory_order_release);
+        ++chunk.retained_counted;
+      } else {
+        duplicate_frame_count_.fetch_add(1, std::memory_order_acq_rel);
+        ++chunk.duplicate_counted;
       }
-      chunk.latest_frame_offset_ms =
-          std::max(chunk.latest_frame_offset_ms, frame_offset_ms);
+      health_revision_.fetch_add(1, std::memory_order_acq_rel);
+
       if (chunk.frame_count < std::numeric_limits<uint32_t>::max()) {
         ++chunk.frame_count;
       }

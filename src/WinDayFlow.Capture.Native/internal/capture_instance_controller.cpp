@@ -380,6 +380,8 @@ wdf_capture_result CaptureInstanceController::StartOrResumeAuthorized(
     run->error_reservation.emplace(std::move(error));
     active_run_ = run;
     state_ = WDF_CAPTURE_STATE_STARTING;
+    reason_ = WDF_CAPTURE_REASON_NONE;
+    state_revision_.fetch_add(1, std::memory_order_acq_rel);
     bool started = false;
     try {
       started = runtime_.Start(
@@ -415,6 +417,8 @@ wdf_capture_result CaptureInstanceController::StartOrResumeAuthorized(
     } catch (...) {
       active_run_.reset();
       state_ = WDF_CAPTURE_STATE_STOPPED;
+      reason_ = WDF_CAPTURE_REASON_BACKEND_FAULT;
+      state_revision_.fetch_add(1, std::memory_order_acq_rel);
       lock.unlock();
       CancelRunReservations(run);
       return WDF_CAPTURE_RESULT_INTERNAL_ERROR;
@@ -422,6 +426,8 @@ wdf_capture_result CaptureInstanceController::StartOrResumeAuthorized(
     if (!started) {
       active_run_.reset();
       state_ = WDF_CAPTURE_STATE_STOPPED;
+      reason_ = WDF_CAPTURE_REASON_BACKEND_FAULT;
+      state_revision_.fetch_add(1, std::memory_order_acq_rel);
       lock.unlock();
       CancelRunReservations(run);
       return WDF_CAPTURE_RESULT_INVALID_STATE;
@@ -535,6 +541,8 @@ wdf_capture_result CaptureInstanceController::RequestStopCore(
       run->stop_requested = true;
       run->stop_reason = reason;
       state_ = WDF_CAPTURE_STATE_STOPPING;
+      reason_ = reason;
+      state_revision_.fetch_add(1, std::memory_order_acq_rel);
       if (!run->stopping_reservation.has_value() ||
           !PublishReservedStateUnderLock(&*run->stopping_reservation,
                                          WDF_CAPTURE_STATE_STOPPING, reason,
@@ -645,6 +653,8 @@ wdf_capture_result CaptureInstanceController::WaitStopped(
         owns_wait_leadership = false;
         last_stop_result_ = final_result;
         state_ = WDF_CAPTURE_STATE_STOPPED;
+        reason_ = run->stop_reason;
+        state_revision_.fetch_add(1, std::memory_order_acq_rel);
         active_run_.reset();
       }
     }
@@ -670,6 +680,48 @@ CaptureEventReadResult CaptureInstanceController::Poll(
     uint32_t detail_utf8_capacity, uint32_t* detail_utf8_required) {
   return events_.Read(timeout_ms, event, detail_utf8, detail_utf8_capacity,
                       detail_utf8_required);
+}
+
+wdf_capture_result CaptureInstanceController::GetHealthSnapshot(
+    wdf_capture_health_snapshot_v2* snapshot) const noexcept {
+  if (snapshot == nullptr) {
+    return WDF_CAPTURE_RESULT_INVALID_ARGUMENT;
+  }
+  try {
+    const CaptureWorkerHealthSnapshot worker =
+        worker_ == nullptr ? CaptureWorkerHealthSnapshot{}
+                           : worker_->health_snapshot();
+    wdf_capture_state state;
+    wdf_capture_reason reason;
+    uint64_t state_revision;
+    {
+      std::lock_guard lock(mutex_);
+      state = state_;
+      reason = reason_;
+      state_revision = state_revision_.load(std::memory_order_acquire);
+    }
+    const uint64_t revision =
+        worker.revision > std::numeric_limits<uint64_t>::max() - state_revision
+            ? std::numeric_limits<uint64_t>::max()
+            : worker.revision + state_revision;
+    *snapshot = {};
+    snapshot->struct_size = sizeof(wdf_capture_health_snapshot_v2);
+    snapshot->abi_version = WDF_CAPTURE_ABI_VERSION;
+    snapshot->state = state;
+    snapshot->reason = reason;
+    snapshot->last_successful_sample_unix_ms =
+        worker.last_successful_sample_unix_ms;
+    snapshot->last_retained_frame_unix_ms =
+        worker.last_retained_frame_unix_ms;
+    snapshot->sampled_frame_count = worker.sampled_frame_count;
+    snapshot->black_frame_count = worker.black_frame_count;
+    snapshot->duplicate_frame_count = worker.duplicate_frame_count;
+    snapshot->retained_frame_count = worker.retained_frame_count;
+    snapshot->revision = revision;
+    return WDF_CAPTURE_RESULT_OK;
+  } catch (...) {
+    return WDF_CAPTURE_RESULT_INTERNAL_ERROR;
+  }
 }
 
 void CaptureInstanceController::Shutdown() noexcept {
@@ -806,6 +858,8 @@ void CaptureInstanceController::OnWorkerExited(
         run->stop_requested = true;
         run->stop_reason = WDF_CAPTURE_REASON_BACKEND_FAULT;
         state_ = WDF_CAPTURE_STATE_FAULTED;
+        reason_ = WDF_CAPTURE_REASON_BACKEND_FAULT;
+        state_revision_.fetch_add(1, std::memory_order_acq_rel);
         request_stop = false;
       }
     }
@@ -834,6 +888,8 @@ bool CaptureInstanceController::PublishStateUnderLock(
       return false;
     }
     state_ = state;
+    reason_ = reason;
+    state_revision_.fetch_add(1, std::memory_order_acq_rel);
     return true;
   } catch (...) {
     return false;
@@ -919,6 +975,8 @@ bool CaptureInstanceController::PauseForAuthorizationChangeUnderLock(
     }
   }
   state_ = WDF_CAPTURE_STATE_STOPPING;
+  reason_ = WDF_CAPTURE_REASON_BACKEND_FAULT;
+  state_revision_.fetch_add(1, std::memory_order_acq_rel);
   active_run_->changed.notify_all();
   return false;
 }

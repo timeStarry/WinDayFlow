@@ -153,10 +153,47 @@
                         </Grid>
 
                         <StackPanel
+                            x:Name="ApplicationContextPanel"
+                            Spacing="8"
+                            Visibility="Collapsed">
+                            <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}" Text="应用与资源" />
+                            <TextBlock
+                                x:Name="ApplicationContextUnavailableText"
+                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                Text="不可用"
+                                Visibility="Collapsed" />
+                            <ItemsControl x:Name="ApplicationContextList">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Grid Padding="0,6" ColumnSpacing="10">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="24" />
+                                                <ColumnDefinition Width="*" />
+                                            </Grid.ColumnDefinitions>
+                                            <Border
+                                                Width="24"
+                                                Height="24"
+                                                Background="{ThemeResource SubtleFillColorSecondaryBrush}"
+                                                CornerRadius="4"
+                                                ToolTipService.ToolTip="{Binding DisplayName}">
+                                                <FontIcon FontSize="14" Glyph="&#xE8A5;" />
+                                            </Border>
+                                            <StackPanel Grid.Column="1" Spacing="2">
+                                                <TextBlock FontWeight="SemiBold" Text="{Binding DisplayName}" TextTrimming="CharacterEllipsis" />
+                                                <TextBlock Style="{StaticResource MetadataTextStyle}" Text="{Binding CpuSummary}" TextWrapping="Wrap" />
+                                                <TextBlock Style="{StaticResource MetadataTextStyle}" Text="{Binding MemorySummary}" TextWrapping="Wrap" />
+                                            </StackPanel>
+                                        </Grid>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                        </StackPanel>
+
+                        <StackPanel
                             x:Name="ProcessTelemetryPanel"
                             Spacing="8"
                             Visibility="Collapsed">
-                            <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}" Text="进程资源" />
+                            <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}" Text="当前截图进程" />
                             <TextBlock
                                 x:Name="ProcessIdentityText"
                                 TextWrapping="Wrap" />
@@ -502,6 +539,7 @@
                     BorderThickness="0,0,0,1"
                     Visibility="Collapsed">
                     <Expander
+                        x:Name="UnprocessedStatusExpander"
                         AutomationProperties.Name="录制处理状态"
                         IsExpanded="False">
                         <Expander.Header>
@@ -607,9 +645,9 @@
                                             <Button
                                                 Grid.RowSpan="2"
                                                 Grid.Column="4"
-                                                Width="32"
-                                                Height="32"
-                                                Padding="6"
+                                                Width="40"
+                                                Height="40"
+                                                Padding="10"
                                                 VerticalAlignment="Center"
                                                 AutomationProperties.Name="重试分析"
                                                 Command="{Binding ViewModel.RetryAnalysisCommand, ElementName=TimelinePageRoot}"
@@ -740,21 +778,31 @@
                                                 Style="{StaticResource MetadataTextStyle}"
                                                 Text="{x:Bind PrimaryApplicationText}"
                                                 TextTrimming="CharacterEllipsis" />
+                                            <TextBlock
+                                                Style="{StaticResource MetadataTextStyle}"
+                                                Text="{x:Bind CompactTagsText}"
+                                                TextTrimming="CharacterEllipsis"
+                                                Visibility="{x:Bind HasTags}" />
                                         </StackPanel>
                                         <StackPanel
                                             x:Name="MetadataStack"
                                             Grid.Column="2"
                                             HorizontalAlignment="Right"
                                             Spacing="4">
-                                            <TextBlock
+                                            <Border
                                                 x:Name="CategoryTextBlock"
-                                                Text="{x:Bind CategoryText}"
-                                                TextAlignment="Right" />
-                                            <TextBlock
+                                                Padding="8,3"
+                                                Background="{ThemeResource SubtleFillColorSecondaryBrush}"
+                                                CornerRadius="4">
+                                                <TextBlock Text="{x:Bind CategoryText}" />
+                                            </Border>
+                                            <Border
                                                 x:Name="ProductivityTextBlock"
-                                                Style="{StaticResource MetadataTextStyle}"
-                                                Text="{x:Bind ProductivityText}"
-                                                TextAlignment="Right" />
+                                                Padding="8,3"
+                                                Background="{ThemeResource ControlFillColorSecondaryBrush}"
+                                                CornerRadius="4">
+                                                <TextBlock Style="{StaticResource MetadataTextStyle}" Text="{x:Bind ProductivityText}" />
+                                            </Border>
                                         </StackPanel>
                                     </Grid>
                                 </Border>

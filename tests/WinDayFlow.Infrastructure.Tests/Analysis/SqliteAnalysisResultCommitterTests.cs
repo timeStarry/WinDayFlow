@@ -41,7 +41,7 @@ public sealed class SqliteAnalysisResultCommitterTests
     }
 
     [Fact]
-    public async Task CloudDisableAndProviderRevisionDriftDoNotWriteResults()
+    public async Task StageDisableAndProviderRevisionDriftDoNotWriteResults()
     {
         using var disabled = await TestContext.CreateAsync(cloudEnabled: false);
         var disabledStatus = await disabled.Committer.TryCommitAsync(
@@ -50,7 +50,7 @@ public sealed class SqliteAnalysisResultCommitterTests
             providerProfileRevision: 1,
             [disabled.CreateEntry(Guid.NewGuid())],
             disabled.CommitAt);
-        Assert.Equal(AnalysisResultCommitStatus.CloudAnalysisDisabled, disabledStatus);
+        Assert.Equal(AnalysisResultCommitStatus.ProviderRevisionChanged, disabledStatus);
         Assert.Equal((0, 0, 0), await disabled.ReadCountsAsync());
         Assert.Equal(
             AnalysisJobState.Committing,
@@ -521,7 +521,7 @@ public sealed class SqliteAnalysisResultCommitterTests
                         'vision-v1',
                         $timeout_ticks,
                         1,
-                        1,
+                        0,
                         NULL,
                         NULL,
                         NULL,
@@ -538,16 +538,37 @@ public sealed class SqliteAnalysisResultCommitterTests
                 await profile.ExecuteNonQueryAsync();
             }
 
-            await using (var settings = connection.CreateCommand())
+            await using (var binding = connection.CreateCommand())
             {
-                settings.Transaction = transaction;
-                settings.CommandText = """
-                    UPDATE app_settings
-                    SET cloud_analysis_enabled = $enabled
-                    WHERE id = 1;
+                binding.Transaction = transaction;
+                binding.CommandText = """
+                    UPDATE analysis_stage_bindings
+                    SET provider_profile_id = $profile_id,
+                        enabled = $enabled,
+                        route_revision = route_revision + 1,
+                        updated_at_utc_ticks = $now_ticks
+                    WHERE stage = 1;
                     """;
-                settings.Parameters.AddWithValue("$enabled", cloudEnabled ? 1 : 0);
-                Assert.Equal(1, await settings.ExecuteNonQueryAsync());
+                binding.Parameters.AddWithValue("$profile_id", ProfileId.ToString("D"));
+                binding.Parameters.AddWithValue("$enabled", cloudEnabled ? 1 : 0);
+                binding.Parameters.AddWithValue("$now_ticks", Now.UtcDateTime.Ticks);
+                Assert.Equal(1, await binding.ExecuteNonQueryAsync());
+            }
+
+            await using (var validation = connection.CreateCommand())
+            {
+                validation.Transaction = transaction;
+                validation.CommandText = """
+                    INSERT INTO provider_profile_validations(
+                        provider_profile_id,
+                        provider_profile_revision,
+                        stage,
+                        validated_at_utc_ticks)
+                    VALUES ($profile_id, 1, 1, $now_ticks);
+                    """;
+                validation.Parameters.AddWithValue("$profile_id", ProfileId.ToString("D"));
+                validation.Parameters.AddWithValue("$now_ticks", Now.UtcDateTime.Ticks);
+                await validation.ExecuteNonQueryAsync();
             }
 
             await transaction.CommitAsync();

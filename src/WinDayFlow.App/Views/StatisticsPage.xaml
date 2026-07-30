@@ -1,0 +1,154 @@
+<Page
+    x:Class="WinDayFlow.App.Views.StatisticsPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:presentation="using:WinDayFlow.Presentation.Statistics"
+    Loaded="OnLoaded"
+    SizeChanged="OnSizeChanged"
+    Unloaded="OnUnloaded">
+    <ScrollViewer Padding="{StaticResource PagePadding}" HorizontalScrollBarVisibility="Disabled">
+        <StackPanel MaxWidth="1040" HorizontalAlignment="Center" Spacing="28">
+            <Grid ColumnSpacing="12">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <StackPanel Orientation="Horizontal" Spacing="16">
+                    <RadioButton x:Name="TodayRange" Content="今天" GroupName="StatisticsRange" Tag="Today" Click="OnRangeChanged" />
+                    <RadioButton Content="7 天" GroupName="StatisticsRange" Tag="SevenDays" Click="OnRangeChanged" />
+                    <RadioButton Content="30 天" GroupName="StatisticsRange" Tag="ThirtyDays" Click="OnRangeChanged" />
+                    <RadioButton Content="全部" GroupName="StatisticsRange" Tag="All" Click="OnRangeChanged" />
+                </StackPanel>
+                <Button Grid.Column="1" Click="OnRefresh" ToolTipService.ToolTip="刷新统计" AutomationProperties.Name="刷新统计">
+                    <SymbolIcon Symbol="Refresh" />
+                </Button>
+            </Grid>
+
+            <ProgressBar IsIndeterminate="True" Visibility="{x:Bind ViewModel.IsLoading, Mode=OneWay}" />
+            <InfoBar IsOpen="{x:Bind ViewModel.HasError, Mode=OneWay}" IsClosable="False" Severity="Error" Message="{x:Bind ViewModel.ErrorMessage, Mode=OneWay}" />
+
+            <Grid x:Name="SummaryGrid" ColumnSpacing="32" RowSpacing="20">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+                <StackPanel Spacing="4">
+                    <TextBlock Style="{StaticResource MetadataTextStyle}" Text="陪伴工作时长" />
+                    <TextBlock Style="{StaticResource SectionTitleTextStyle}" Text="{x:Bind ViewModel.RecordedDurationText, Mode=OneWay}" />
+                </StackPanel>
+                <StackPanel Grid.Column="1" Spacing="4">
+                    <TextBlock Style="{StaticResource MetadataTextStyle}" Text="活跃天数" />
+                    <TextBlock Style="{StaticResource SectionTitleTextStyle}" Text="{x:Bind ViewModel.ActiveDayCountText, Mode=OneWay}" />
+                </StackPanel>
+                <StackPanel Grid.Column="2" Spacing="4">
+                    <TextBlock Style="{StaticResource MetadataTextStyle}" Text="专注时长" />
+                    <TextBlock Style="{StaticResource SectionTitleTextStyle}" Text="{x:Bind ViewModel.FocusedDurationText, Mode=OneWay}" />
+                </StackPanel>
+                <StackPanel Grid.Column="3" Spacing="4">
+                    <TextBlock Style="{StaticResource MetadataTextStyle}" Text="截图保留率" />
+                    <TextBlock Style="{StaticResource SectionTitleTextStyle}" Text="{x:Bind ViewModel.RetentionRateText, Mode=OneWay}" />
+                </StackPanel>
+            </Grid>
+
+            <Grid x:Name="DistributionGrid" ColumnSpacing="32" RowSpacing="24">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <StackPanel Spacing="12">
+                    <TextBlock Style="{StaticResource SectionTitleTextStyle}" Text="活动类别" />
+                    <TextBlock
+                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                        Text="当前范围没有可统计的活动"
+                        Visibility="{x:Bind ViewModel.IsCategoryEmpty, Mode=OneWay}" />
+                    <ItemsControl ItemsSource="{x:Bind ViewModel.CategoryItems}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate x:DataType="presentation:StatisticsBarItem">
+                                <StackPanel Margin="0,0,0,12" Spacing="5">
+                                    <Grid>
+                                        <TextBlock Text="{x:Bind Label}" />
+                                        <TextBlock HorizontalAlignment="Right" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="{x:Bind Value}" />
+                                    </Grid>
+                                    <ProgressBar Maximum="100" Value="{x:Bind Percent}" />
+                                </StackPanel>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </StackPanel>
+                <StackPanel Grid.Column="1" Spacing="12">
+                    <TextBlock Style="{StaticResource SectionTitleTextStyle}" Text="效率分布" />
+                    <TextBlock
+                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                        Text="当前范围没有可统计的效率数据"
+                        Visibility="{x:Bind ViewModel.IsProductivityEmpty, Mode=OneWay}" />
+                    <ItemsControl ItemsSource="{x:Bind ViewModel.ProductivityItems}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate x:DataType="presentation:StatisticsBarItem">
+                                <StackPanel Margin="0,0,0,12" Spacing="5">
+                                    <Grid>
+                                        <TextBlock Text="{x:Bind Label}" />
+                                        <TextBlock HorizontalAlignment="Right" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="{x:Bind Value}" />
+                                    </Grid>
+                                    <ProgressBar Maximum="100" Value="{x:Bind Percent}" />
+                                </StackPanel>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </StackPanel>
+            </Grid>
+
+            <StackPanel Spacing="12">
+                <TextBlock Style="{StaticResource SectionTitleTextStyle}" Text="录制过滤" />
+                <ProgressBar Maximum="100" Value="{x:Bind ViewModel.RetentionRatePercent, Mode=OneWay}" />
+                <Grid x:Name="FilterStatisticsGrid" ColumnSpacing="24" RowSpacing="8">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Text="采样  {x:Bind ViewModel.SampledCountText, Mode=OneWay}" />
+                    <TextBlock Grid.Column="1" Text="黑屏过滤  {x:Bind ViewModel.BlackFrameCountText, Mode=OneWay}" />
+                    <TextBlock Grid.Column="2" Text="重复丢弃  {x:Bind ViewModel.DuplicateFrameCountText, Mode=OneWay}" />
+                    <TextBlock Grid.Column="3" Text="保留  {x:Bind ViewModel.RetainedFrameCountText, Mode=OneWay}" />
+                </Grid>
+            </StackPanel>
+
+            <Grid x:Name="OperationsGrid" ColumnSpacing="32" RowSpacing="24">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <StackPanel Spacing="12">
+                    <TextBlock Style="{StaticResource SectionTitleTextStyle}" Text="分析调用" />
+                    <TextBlock Text="调用次数  {x:Bind ViewModel.InvocationCountText, Mode=OneWay}" />
+                    <TextBlock Text="成功率  {x:Bind ViewModel.InvocationSuccessRateText, Mode=OneWay}" />
+                    <TextBlock Text="平均延迟  {x:Bind ViewModel.AverageLatencyText, Mode=OneWay}" />
+                    <TextBlock Text="Token  {x:Bind ViewModel.TokenUsageText, Mode=OneWay}" />
+                </StackPanel>
+                <StackPanel Grid.Column="1" Spacing="12">
+                    <TextBlock Style="{StaticResource SectionTitleTextStyle}" Text="本地存储" />
+                    <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}" Text="{x:Bind ViewModel.StorageTotalText, Mode=OneWay}" />
+                    <ItemsControl ItemsSource="{x:Bind ViewModel.StorageItems}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate x:DataType="presentation:StatisticsBarItem">
+                                <Grid Margin="0,0,0,8">
+                                    <TextBlock Text="{x:Bind Label}" />
+                                    <TextBlock HorizontalAlignment="Right" Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="{x:Bind Value}" />
+                                </Grid>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </StackPanel>
+            </Grid>
+
+            <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="首次使用  {x:Bind ViewModel.FirstStartedText, Mode=OneWay}" />
+        </StackPanel>
+    </ScrollViewer>
+</Page>

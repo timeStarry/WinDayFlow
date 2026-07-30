@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using System.Threading.Channels;
 using WinDayFlow.Application.Capture;
 using WinDayFlow.Application.Settings;
@@ -139,10 +140,12 @@ public sealed class NativeCapturePrivacyCoordinator
     public NativeCaptureRuntimeAuthorization LastAppliedAuthorization =>
         Volatile.Read(ref _lastApplied);
 
+    [SuppressMessage(
+        "Performance",
+        "CA1822:Mark members as static",
+        Justification = "This instance member is exposed through the runtime privacy-mode contract.")]
     public CaptureApplicationPrivacyMode ApplicationPrivacyMode =>
-        Volatile.Read(ref _committedSettings)
-            .CapturePrivacy
-            .ApplicationPrivacyMode;
+        CaptureApplicationPrivacyMode.AllowAllApplications;
 
     public ulong LastPersistenceGeneration =>
         Volatile.Read(ref _lastPersistenceGeneration);
@@ -377,9 +380,6 @@ public sealed class NativeCapturePrivacyCoordinator
 
         var authorizingTransition = !HasUserAuthorization(previous)
             && HasUserAuthorization(current);
-        var applicationPrivacyModeChanged =
-            previous.CapturePrivacy.ApplicationPrivacyMode
-                != current.CapturePrivacy.ApplicationPrivacyMode;
         EnsurePreparedSettingsCommit(previous, current);
         try
         {
@@ -429,11 +429,7 @@ public sealed class NativeCapturePrivacyCoordinator
             CompletePreparedSettingsCommit();
         }
 
-        if (applicationPrivacyModeChanged)
-        {
-            RaiseApplicationPrivacyModeChanged();
         }
-    }
 
     public async Task AbortedAsync(
         AppSettings previous,
@@ -446,9 +442,6 @@ public sealed class NativeCapturePrivacyCoordinator
         ArgumentNullException.ThrowIfNull(proposed);
         ArgumentNullException.ThrowIfNull(failure);
         _ = cancellationToken;
-        var applicationPrivacyModeChanged = settingsApplied
-            && previous.CapturePrivacy.ApplicationPrivacyMode
-                != proposed.CapturePrivacy.ApplicationPrivacyMode;
         try
         {
             if (!settingsApplied)
@@ -471,11 +464,6 @@ public sealed class NativeCapturePrivacyCoordinator
         finally
         {
             CompletePreparedSettingsCommit();
-        }
-
-        if (applicationPrivacyModeChanged)
-        {
-            RaiseApplicationPrivacyModeChanged();
         }
     }
 
@@ -1095,7 +1083,7 @@ public sealed class NativeCapturePrivacyCoordinator
             signals,
             runtimePolicyRevision);
         var target = SelectAuthorizationTarget(
-            settings.CapturePrivacy.ApplicationPrivacyMode,
+            CaptureApplicationPrivacyMode.AllowAllApplications,
             signals.Target,
             previousTarget);
         if (NativeCaptureRuntimeAuthorization.IsFullyAllowed(context)
@@ -1191,16 +1179,14 @@ public sealed class NativeCapturePrivacyCoordinator
         AppSettings previous,
         AppSettings proposed)
     {
-        return previous.CapturePrivacy.Revision != proposed.CapturePrivacy.Revision
-            || (HasUserAuthorization(previous) && !HasUserAuthorization(proposed));
+        return HasUserAuthorization(previous) && !HasUserAuthorization(proposed);
     }
 
     private static bool HasUserAuthorization(AppSettings settings)
     {
-        return settings.CaptureEnabled
+        return settings.CaptureIntent != CaptureIntent.Stopped
             && settings.RecordingConsent is { } consent
-            && consent.PolicyVersion == AppSettingsService.CurrentRecordingConsentVersion
-            && consent.PrivacyRevision == settings.CapturePrivacy.Revision;
+            && consent.PolicyVersion == AppSettingsService.CurrentRecordingConsentVersion;
     }
 
     private static bool HasSameDecisions(

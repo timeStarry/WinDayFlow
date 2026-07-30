@@ -48,12 +48,16 @@ public sealed class ConsentGatedCaptureService : ICaptureService, IDisposable
         var initialBackendStatus = _backend.CurrentStatus;
         _status = ProjectStatus(initialBackendStatus, current: null);
         _startupStartPending =
-            HasPersistentCaptureAuthorization()
+            _settings.Current.CaptureIntent == CaptureIntent.Recording
+            && HasPersistentCaptureAuthorization()
             && initialBackendStatus.State is
                 CaptureState.Unavailable or CaptureState.Stopped;
-        _userIntent = _startupStartPending
-            ? CaptureUserIntent.Recording
-            : InferInitialUserIntent(initialBackendStatus);
+        _userIntent = _settings.Current.CaptureIntent switch
+        {
+            CaptureIntent.Recording => CaptureUserIntent.Recording,
+            CaptureIntent.Paused => CaptureUserIntent.Paused,
+            _ => InferInitialUserIntent(initialBackendStatus),
+        };
         var initialInvalidationGeneration =
             _runtimeAuthorization.InvalidationGeneration;
         _pendingRuntimeInvalidationGeneration = initialInvalidationGeneration;
@@ -102,34 +106,55 @@ public sealed class ConsentGatedCaptureService : ICaptureService, IDisposable
         }
     }
 
-    public Task StartAsync(CancellationToken cancellationToken = default) =>
-        InvokeAuthorizedBackendAsync(
-            CaptureAdmissionOperation.Start,
-            _backend.StartAsync,
-            cancellationToken);
+    public async Task StartAsync(CancellationToken cancellationToken = default)
+    {
+        await _settings
+            .SetCaptureIntentAsync(CaptureIntent.Recording, cancellationToken)
+            .ConfigureAwait(false);
+        await InvokeAuthorizedBackendAsync(
+                CaptureAdmissionOperation.Start,
+                _backend.StartAsync,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
 
     public async Task PauseAsync(CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
         ThrowIfDisposed();
         SetStickyUserIntent(CaptureUserIntent.Paused);
+        if (_settings.HasValidRecordingConsent)
+        {
+            await _settings
+                .SetCaptureIntentAsync(CaptureIntent.Paused, cancellationToken)
+                .ConfigureAwait(false);
+        }
         await InvokeBackendAsync(
                 _backend.PauseAsync,
                 cancellationToken)
             .ConfigureAwait(false);
     }
 
-    public Task ResumeAsync(CancellationToken cancellationToken = default) =>
-        InvokeAuthorizedBackendAsync(
-            CaptureAdmissionOperation.Resume,
-            _backend.ResumeAsync,
-            cancellationToken);
+    public async Task ResumeAsync(CancellationToken cancellationToken = default)
+    {
+        await _settings
+            .SetCaptureIntentAsync(CaptureIntent.Recording, cancellationToken)
+            .ConfigureAwait(false);
+        await InvokeAuthorizedBackendAsync(
+                CaptureAdmissionOperation.Resume,
+                _backend.ResumeAsync,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
 
     public async Task StopAsync(CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
         ThrowIfDisposed();
         SetStickyUserIntent(CaptureUserIntent.Stopped);
+        await _settings
+            .SetCaptureIntentAsync(CaptureIntent.Stopped, cancellationToken)
+            .ConfigureAwait(false);
         await InvokeBackendAsync(
                 token => ShouldInitiateConsentStop(_backend.CurrentStatus.State)
                     ? _backend.StopAsync(token)
@@ -202,7 +227,9 @@ public sealed class ConsentGatedCaptureService : ICaptureService, IDisposable
             ThrowIfDisposed();
             if (!HasPersistentCaptureAuthorization())
             {
-                throw new RecordingConsentRequiredException();
+                throw _settings.HasValidRecordingConsent
+                    ? new CaptureRuntimeAdmissionRejectedException()
+                    : new RecordingConsentRequiredException();
             }
 
             if (admissionOperation == CaptureAdmissionOperation.Start
@@ -1210,12 +1237,15 @@ public sealed class ConsentGatedCaptureService : ICaptureService, IDisposable
             or CaptureState.Pausing
             or CaptureState.Paused
             or CaptureState.Resuming
+            or CaptureState.NeedsAttention
             or CaptureState.Faulted;
     }
 
     private static bool IsStartAlreadySatisfied(CaptureState state)
     {
-        return state is CaptureState.Starting or CaptureState.Recording;
+        return state is CaptureState.Starting
+            or CaptureState.Recording
+            or CaptureState.NeedsAttention;
     }
 
     private static bool IsRuntimeRecoveryConfirmed(
@@ -1225,7 +1255,9 @@ public sealed class ConsentGatedCaptureService : ICaptureService, IDisposable
         return operation switch
         {
             CaptureAdmissionOperation.Start =>
-                state is CaptureState.Starting or CaptureState.Recording,
+                state is CaptureState.Starting
+                    or CaptureState.Recording
+                    or CaptureState.NeedsAttention,
             CaptureAdmissionOperation.Resume =>
                 state is CaptureState.Resuming or CaptureState.Recording,
             _ => false,
@@ -1266,6 +1298,7 @@ public sealed class ConsentGatedCaptureService : ICaptureService, IDisposable
         {
             CaptureState.Starting or
             CaptureState.Recording or
+            CaptureState.NeedsAttention or
             CaptureState.Pausing or
             CaptureState.Resuming => CaptureUserIntent.Recording,
             CaptureState.Paused when IsAutomaticProtectionReason(
@@ -1278,12 +1311,8 @@ public sealed class ConsentGatedCaptureService : ICaptureService, IDisposable
     private static bool IsAutomaticProtectionReason(CaptureReasonCode reason)
     {
         return reason is
-            CaptureReasonCode.ExcludedApplication or
-            CaptureReasonCode.ExcludedWindow or
             CaptureReasonCode.SessionLocked or
             CaptureReasonCode.SecureDesktop or
-            CaptureReasonCode.RemoteSession or
-            CaptureReasonCode.PresentationMode or
             CaptureReasonCode.SystemSleep or
             CaptureReasonCode.DisplayUnavailable or
             CaptureReasonCode.AccessLost or
@@ -1299,7 +1328,7 @@ public sealed class ConsentGatedCaptureService : ICaptureService, IDisposable
 
     private bool HasPersistentCaptureAuthorization()
     {
-        return _settings.Current.CaptureEnabled
+        return _settings.Current.CaptureIntent != CaptureIntent.Stopped
             && _settings.HasValidRecordingConsent;
     }
 

@@ -1,7 +1,5 @@
 using System.Diagnostics;
-using WinDayFlow.Application.Ai;
 using WinDayFlow.Application.Capture;
-using WinDayFlow.Application.Settings;
 
 namespace WinDayFlow.Application.Analysis;
 
@@ -36,8 +34,6 @@ public sealed class AnalysisPipelineBackgroundRunner :
     private readonly Func<CancellationToken, Task<AnalysisPipelineRunSummary>>
         _runOnceAsync;
     private readonly ICaptureChunkCommitNotifier _chunkCommitNotifier;
-    private readonly AppSettingsService _settings;
-    private readonly AiProviderConfigurationService _providerConfiguration;
     private readonly AnalysisPipelineBackgroundRunnerOptions _options;
     private readonly Func<TimeSpan, CancellationToken, Task> _delayAsync;
     private readonly AnalysisPipelineStatusSource _statusSource;
@@ -50,27 +46,22 @@ public sealed class AnalysisPipelineBackgroundRunner :
     public AnalysisPipelineBackgroundRunner(
         AnalysisPipelineSupervisor supervisor,
         ICaptureChunkCommitNotifier chunkCommitNotifier,
-        AppSettingsService settings,
-        AiProviderConfigurationService providerConfiguration,
         AnalysisPipelineBackgroundRunnerOptions? options = null,
         TimeProvider? timeProvider = null,
         AnalysisPipelineStatusSource? statusSource = null)
-        : this(
-            CreateRunOnceDelegate(supervisor),
-            chunkCommitNotifier,
-            settings,
-            providerConfiguration,
-            options,
-            CreateDelayDelegate(timeProvider),
-            statusSource ?? new AnalysisPipelineStatusSource(timeProvider))
     {
+        _runOnceAsync = CreateRunOnceDelegate(supervisor);
+        _chunkCommitNotifier = chunkCommitNotifier
+            ?? throw new ArgumentNullException(nameof(chunkCommitNotifier));
+        _options = options ?? AnalysisPipelineBackgroundRunnerOptions.Default;
+        _delayAsync = CreateDelayDelegate(timeProvider);
+        _statusSource = statusSource
+            ?? new AnalysisPipelineStatusSource(timeProvider);
     }
 
     internal AnalysisPipelineBackgroundRunner(
         Func<CancellationToken, Task<AnalysisPipelineRunSummary>> runOnceAsync,
         ICaptureChunkCommitNotifier chunkCommitNotifier,
-        AppSettingsService settings,
-        AiProviderConfigurationService providerConfiguration,
         AnalysisPipelineBackgroundRunnerOptions? options,
         Func<TimeSpan, CancellationToken, Task> delayAsync,
         AnalysisPipelineStatusSource statusSource)
@@ -79,9 +70,6 @@ public sealed class AnalysisPipelineBackgroundRunner :
             ?? throw new ArgumentNullException(nameof(runOnceAsync));
         _chunkCommitNotifier = chunkCommitNotifier
             ?? throw new ArgumentNullException(nameof(chunkCommitNotifier));
-        _settings = settings ?? throw new ArgumentNullException(nameof(settings));
-        _providerConfiguration = providerConfiguration
-            ?? throw new ArgumentNullException(nameof(providerConfiguration));
         _options = options ?? AnalysisPipelineBackgroundRunnerOptions.Default;
         _delayAsync = delayAsync ?? throw new ArgumentNullException(nameof(delayAsync));
         _statusSource = statusSource
@@ -323,15 +311,11 @@ public sealed class AnalysisPipelineBackgroundRunner :
     private void SubscribeEvents()
     {
         _chunkCommitNotifier.ChunkCommitted += OnChunkCommitted;
-        _providerConfiguration.ConfigurationChanged += OnProviderConfigurationChanged;
-        _settings.SettingsChanged += OnSettingsChanged;
     }
 
     private void UnsubscribeEvents()
     {
         _chunkCommitNotifier.ChunkCommitted -= OnChunkCommitted;
-        _providerConfiguration.ConfigurationChanged -= OnProviderConfigurationChanged;
-        _settings.SettingsChanged -= OnSettingsChanged;
     }
 
     private void OnChunkCommitted(
@@ -341,27 +325,6 @@ public sealed class AnalysisPipelineBackgroundRunner :
         _ = sender;
         _ = eventArgs;
         SignalWake();
-    }
-
-    private void OnProviderConfigurationChanged(
-        object? sender,
-        AiProviderConfigurationChangedEventArgs eventArgs)
-    {
-        _ = sender;
-        _ = eventArgs;
-        SignalWake();
-    }
-
-    private void OnSettingsChanged(
-        object? sender,
-        AppSettingsChangedEventArgs eventArgs)
-    {
-        _ = sender;
-        if (eventArgs.Previous.CloudAnalysisEnabled
-            != eventArgs.Current.CloudAnalysisEnabled)
-        {
-            SignalWake();
-        }
     }
 
     private void SignalWake()

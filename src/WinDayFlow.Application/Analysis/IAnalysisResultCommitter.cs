@@ -25,6 +25,33 @@ public interface IAnalysisWindowResultCommitter : IAnalysisResultCommitter
         CancellationToken cancellationToken = default);
 }
 
+public interface IAnalysisStageAwareResultCommitter : IAnalysisResultCommitter
+{
+    Task<AnalysisResultCommitStatus> TryCommitAsync(
+        AnalysisJobLease lease,
+        Guid providerProfileId,
+        long providerProfileRevision,
+        long routeRevision,
+        IReadOnlyList<TimelineEntry> entries,
+        DateTimeOffset committedAtUtc,
+        CancellationToken cancellationToken = default);
+}
+
+public interface IAnalysisStageAwareWindowResultCommitter :
+    IAnalysisStageAwareResultCommitter,
+    IAnalysisWindowResultCommitter
+{
+    Task<AnalysisResultCommitStatus> TryCommitWindowAsync(
+        AnalysisJobLease lease,
+        Guid providerProfileId,
+        long providerProfileRevision,
+        long routeRevision,
+        AnalysisWindowSnapshot window,
+        IReadOnlyList<TimelineEntry> entries,
+        DateTimeOffset committedAtUtc,
+        CancellationToken cancellationToken = default);
+}
+
 public enum AnalysisResultCommitStatus
 {
     Committed = 0,

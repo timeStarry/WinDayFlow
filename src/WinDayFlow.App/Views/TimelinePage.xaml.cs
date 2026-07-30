@@ -5,6 +5,7 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Imaging;
 using WinDayFlow.App.Services;
+using WinDayFlow.Application.Analysis;
 using WinDayFlow.Application.Timeline;
 using WinDayFlow.Domain;
 using WinDayFlow.Presentation.Timeline;
@@ -506,6 +507,16 @@ public sealed partial class TimelinePage : Page
             && ViewModel.HasUnprocessedIntervalLoadError
                 ? Visibility.Visible
                 : Visibility.Collapsed;
+        if (!showUnprocessedStatus)
+        {
+            UnprocessedStatusExpander.IsExpanded = false;
+        }
+        else if (ViewModel.HasUnprocessedIntervalLoadError
+            || ViewModel.UnprocessedIntervals.Any(static interval =>
+                interval.State != UnprocessedIntervalState.LocalOnly))
+        {
+            UnprocessedStatusExpander.IsExpanded = true;
+        }
 
         AnalysisPipelineStatusInfoBar.Severity = ViewModel.HasAnalysisPipelineFault
             ? InfoBarSeverity.Error
@@ -597,8 +608,8 @@ public sealed partial class TimelinePage : Page
         var timeStack = FindNamedDescendant<StackPanel>(entryLayoutRoot, "TimeStack");
         var contentStack = FindNamedDescendant<StackPanel>(entryLayoutRoot, "ContentStack");
         var metadataStack = FindNamedDescendant<StackPanel>(entryLayoutRoot, "MetadataStack");
-        var categoryText = FindNamedDescendant<TextBlock>(entryLayoutRoot, "CategoryTextBlock");
-        var productivityText = FindNamedDescendant<TextBlock>(
+        var categoryBadge = FindNamedDescendant<Border>(entryLayoutRoot, "CategoryTextBlock");
+        var productivityBadge = FindNamedDescendant<Border>(
             entryLayoutRoot,
             "ProductivityTextBlock");
 
@@ -606,8 +617,8 @@ public sealed partial class TimelinePage : Page
             || timeStack is null
             || contentStack is null
             || metadataStack is null
-            || categoryText is null
-            || productivityText is null)
+            || categoryBadge is null
+            || productivityBadge is null)
         {
             return;
         }
@@ -647,11 +658,10 @@ public sealed partial class TimelinePage : Page
             : Orientation.Vertical;
         metadataStack.Spacing = _useNarrowEntryLayout ? 12 : 4;
 
-        var textAlignment = _useNarrowEntryLayout
-            ? TextAlignment.Left
-            : TextAlignment.Right;
-        categoryText.TextAlignment = textAlignment;
-        productivityText.TextAlignment = textAlignment;
+        categoryBadge.HorizontalAlignment = _useNarrowEntryLayout
+            ? HorizontalAlignment.Left
+            : HorizontalAlignment.Right;
+        productivityBadge.HorizontalAlignment = categoryBadge.HorizontalAlignment;
     }
 
     private static T? FindNamedDescendant<T>(DependencyObject root, string name)
@@ -1019,6 +1029,9 @@ public sealed partial class TimelinePage : Page
         EvidenceFramePositionText.Text = string.Empty;
         EvidenceInfoBar.IsOpen = false;
         ProcessTelemetryPanel.Visibility = Visibility.Collapsed;
+        ApplicationContextPanel.Visibility = Visibility.Collapsed;
+        ApplicationContextList.ItemsSource = null;
+        ApplicationContextUnavailableText.Visibility = Visibility.Collapsed;
 
         if (ViewModel.SelectedEntry?.Entry.EvidenceReferences is not { Count: > 0 } evidence)
         {
@@ -1042,8 +1055,14 @@ public sealed partial class TimelinePage : Page
         SetEvidenceBusy(true);
         try
         {
-            var frames = await _evidenceMediaService
-                .GetFramesAsync(evidence, cancellationToken);
+            var framesTask = _evidenceMediaService.GetFramesAsync(
+                evidence,
+                cancellationToken);
+            var applicationsTask = LoadApplicationSummariesAsync(
+                evidence,
+                cancellationToken);
+            var frames = await framesTask;
+            var applications = await applicationsTask;
             if (cancellationToken.IsCancellationRequested
                 || ViewModel.SelectedEntry?.Id != entryId)
             {
@@ -1051,6 +1070,11 @@ public sealed partial class TimelinePage : Page
             }
 
             _evidenceFrames = frames;
+            ApplicationContextPanel.Visibility = Visibility.Visible;
+            ApplicationContextList.ItemsSource = applications;
+            ApplicationContextUnavailableText.Visibility = applications.Count == 0
+                ? Visibility.Visible
+                : Visibility.Collapsed;
             await DisplayEvidenceFrameAsync(0, cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -1073,6 +1097,27 @@ public sealed partial class TimelinePage : Page
                 SetEvidenceBusy(false);
                 SetEvidenceNavigationState();
             }
+        }
+    }
+
+    private async Task<IReadOnlyList<EvidenceApplicationSummary>>
+        LoadApplicationSummariesAsync(
+            IReadOnlyList<EvidenceReference> evidence,
+            CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await _evidenceMediaService.GetApplicationSummariesAsync(
+                evidence,
+                cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            return [];
         }
     }
 

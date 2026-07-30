@@ -20,7 +20,9 @@ public sealed record CaptureChunk
         DateTimeOffset committedAtUtc,
         DateTimeOffset ingestedAtUtc,
         CaptureChunkAvailability availability = CaptureChunkAvailability.Available,
-        CaptureProcessTelemetry? processTelemetry = null)
+        CaptureProcessTelemetry? processTelemetry = null,
+        uint blackFrameCount = 0,
+        uint? duplicateFrameCount = null)
     {
         ValidateIdentifier(id);
         ArgumentNullException.ThrowIfNull(manifestPath);
@@ -36,10 +38,17 @@ public sealed record CaptureChunk
                 nameof(manifestPath));
         }
 
+        var resolvedDuplicateFrameCount = duplicateFrameCount
+            ?? ((ulong)frameCount + blackFrameCount <= capturedFrameCount
+                ? capturedFrameCount - frameCount - blackFrameCount
+                : uint.MaxValue);
         if (capturedFrameCount == 0
-            || frameCount == 0
             || frameCount > capturedFrameCount
-            || frameCount > MaximumFramesPerChunk)
+            || frameCount > MaximumFramesPerChunk
+            || blackFrameCount > capturedFrameCount
+            || resolvedDuplicateFrameCount > capturedFrameCount
+            || (ulong)blackFrameCount + resolvedDuplicateFrameCount + frameCount
+                != capturedFrameCount)
         {
             throw new ArgumentOutOfRangeException(nameof(frameCount));
         }
@@ -54,7 +63,10 @@ public sealed record CaptureChunk
                 "Capture dimensions must be positive even values.");
         }
 
-        if (frameByteCount is <= 0 or > MaximumFrameByteCount)
+        if (frameByteCount < 0
+            || frameByteCount > MaximumFrameByteCount
+            || (frameCount == 0 && frameByteCount != 0)
+            || (frameCount != 0 && frameByteCount == 0))
         {
             throw new ArgumentOutOfRangeException(nameof(frameByteCount));
         }
@@ -80,6 +92,8 @@ public sealed record CaptureChunk
         IngestedAtUtc = ingestedAtUtc.ToUniversalTime();
         Availability = availability;
         ProcessTelemetry = processTelemetry;
+        BlackFrameCount = blackFrameCount;
+        DuplicateFrameCount = resolvedDuplicateFrameCount;
     }
 
     public string Id { get; }
@@ -96,6 +110,8 @@ public sealed record CaptureChunk
     public DateTimeOffset IngestedAtUtc { get; }
     public CaptureChunkAvailability Availability { get; }
     public CaptureProcessTelemetry? ProcessTelemetry { get; }
+    public uint BlackFrameCount { get; }
+    public uint DuplicateFrameCount { get; }
 
     public static void ValidateIdentifier(string id)
     {

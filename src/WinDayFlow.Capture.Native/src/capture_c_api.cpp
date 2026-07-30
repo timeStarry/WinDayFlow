@@ -44,8 +44,6 @@ constexpr uint32_t kMaximumCaptureHeight = 4'320;
 constexpr uint32_t kMaximumOutputDirectoryBytes = 32'767;
 constexpr uint32_t kMaximumPollTimeoutMs = 60'000;
 constexpr size_t kVersionedStructHeaderSize = sizeof(uint32_t) * 2U;
-constexpr size_t kLegacyRuntimeAuthorizationSize =
-    WDF_CAPTURE_RUNTIME_AUTHORIZATION_V1_LEGACY_SIZE;
 constexpr size_t kCurrentRuntimeAuthorizationSize =
     sizeof(wdf_capture_runtime_authorization_v1);
 constexpr int kMaximumDisplayDeviceKeyUtf16Characters = 31;
@@ -62,10 +60,7 @@ constexpr CaptureActivationMode kCaptureActivationMode =
 constexpr wdf_capture_capabilities kLiveCaptureCapabilities = 0;
 #endif
 
-static_assert(kLegacyRuntimeAuthorizationSize ==
-              offsetof(wdf_capture_runtime_authorization_v1,
-                       target_display_monitor_handle));
-static_assert(kCurrentRuntimeAuthorizationSize == 224);
+static_assert(kCurrentRuntimeAuthorizationSize == 184);
 
 struct CaptureInstance {
   CaptureInstance(CaptureInstanceControllerConfiguration configuration,
@@ -329,10 +324,10 @@ wdf_capture_result CopyPrivacyContext(
   value.consent_granted = source->consent_granted;
   value.session_unlocked = source->session_unlocked;
   value.secure_desktop_clear = source->secure_desktop_clear;
-  value.remote_session_allowed = source->remote_session_allowed;
-  value.presentation_allowed = source->presentation_allowed;
-  value.application_allowed = source->application_allowed;
-  value.window_allowed = source->window_allowed;
+  value.remote_session_allowed = WDF_CAPTURE_POLICY_ALLOW;
+  value.presentation_allowed = WDF_CAPTURE_POLICY_ALLOW;
+  value.application_allowed = WDF_CAPTURE_POLICY_ALLOW;
+  value.window_allowed = WDF_CAPTURE_POLICY_ALLOW;
   value.storage_available = source->storage_available;
   value.policy_revision = source->policy_revision;
   if (!windayflow::capture::IsValidPrivacyContext(value)) {
@@ -428,22 +423,11 @@ wdf_capture_result CopyRuntimeAuthorization(
     return WDF_CAPTURE_RESULT_INVALID_ARGUMENT;
   }
   const wdf_capture_result header = ValidateStructHeader(
-      source, kLegacyRuntimeAuthorizationSize);
+      source, kCurrentRuntimeAuthorizationSize);
   if (header != WDF_CAPTURE_RESULT_OK) {
     return header;
   }
-
-  const bool has_display_tail =
-      source->struct_size >= kCurrentRuntimeAuthorizationSize;
-  if (source->struct_size != kLegacyRuntimeAuthorizationSize &&
-      !has_display_tail) {
-    return WDF_CAPTURE_RESULT_INVALID_ARGUMENT;
-  }
-
-  constexpr wdf_capture_target_flags kKnownTargetFlags =
-      WDF_CAPTURE_TARGET_PRESENT | WDF_CAPTURE_TARGET_DISPLAY_PRESENT |
-      WDF_CAPTURE_TARGET_DISPLAY_WIDE_SCOPE;
-  if ((source->target_flags & ~kKnownTargetFlags) != 0) {
+  if (source->struct_size != kCurrentRuntimeAuthorizationSize) {
     return WDF_CAPTURE_RESULT_INVALID_ARGUMENT;
   }
   for (const uint32_t reserved : source->reserved) {
@@ -456,89 +440,63 @@ wdf_capture_result CopyRuntimeAuthorization(
   privacy.consent_granted = source->consent_granted;
   privacy.session_unlocked = source->session_unlocked;
   privacy.secure_desktop_clear = source->secure_desktop_clear;
-  privacy.remote_session_allowed = source->remote_session_allowed;
-  privacy.presentation_allowed = source->presentation_allowed;
-  privacy.application_allowed = source->application_allowed;
-  privacy.window_allowed = source->window_allowed;
+  privacy.remote_session_allowed = WDF_CAPTURE_POLICY_ALLOW;
+  privacy.presentation_allowed = WDF_CAPTURE_POLICY_ALLOW;
+  privacy.application_allowed = WDF_CAPTURE_POLICY_ALLOW;
+  privacy.window_allowed = WDF_CAPTURE_POLICY_ALLOW;
   privacy.storage_available = source->storage_available;
   privacy.policy_revision = source->runtime_policy_revision;
   if (!windayflow::capture::IsValidPrivacyContext(privacy)) {
     return WDF_CAPTURE_RESULT_INVALID_ARGUMENT;
   }
 
-  const bool target_present =
-      (source->target_flags & WDF_CAPTURE_TARGET_PRESENT) != 0;
-  const bool display_present =
-      (source->target_flags & WDF_CAPTURE_TARGET_DISPLAY_PRESENT) != 0;
-  const bool display_wide_scope =
-      (source->target_flags & WDF_CAPTURE_TARGET_DISPLAY_WIDE_SCOPE) != 0;
-  const bool window_values_present = source->target_window_handle != 0 ||
-                                     source->target_process_creation_time_100ns !=
-                                         0 ||
-                                     source->target_process_id != 0;
-  const bool scope_present = target_present || display_wide_scope;
-  if ((target_present && display_wide_scope) ||
-      (scope_present && !display_present) ||
-      (!scope_present && display_present) ||
-      (target_present != window_values_present) ||
-      (scope_present != (source->target_epoch != 0))) {
+  if (source->target_display_reserved != 0) {
+    return WDF_CAPTURE_RESULT_INVALID_ARGUMENT;
+  }
+
+  const bool display_buffer_has_value = !HasOnlyZeroBytes(
+      source->target_display_device_key_utf8,
+      0,
+      WDF_CAPTURE_DISPLAY_DEVICE_KEY_UTF8_CAPACITY);
+  const bool any_target_value = source->target_epoch != 0 ||
+                                source->target_display_monitor_handle != 0 ||
+                                source->target_display_device_key_utf8_length != 0 ||
+                                display_buffer_has_value;
+  const bool target_present = source->target_epoch != 0 &&
+                              source->target_display_monitor_handle != 0 &&
+                              source->target_display_device_key_utf8_length != 0;
+  if (any_target_value != target_present) {
     return WDF_CAPTURE_RESULT_INVALID_ARGUMENT;
   }
 
   std::wstring display_device_key;
-  if (has_display_tail) {
-    if (source->target_display_reserved != 0) {
-      return WDF_CAPTURE_RESULT_INVALID_ARGUMENT;
-    }
-    const bool display_buffer_has_value = !HasOnlyZeroBytes(
-        source->target_display_device_key_utf8,
-        0,
-        WDF_CAPTURE_DISPLAY_DEVICE_KEY_UTF8_CAPACITY);
-    const bool display_values_present =
-        source->target_display_monitor_handle != 0 ||
-        source->target_display_device_key_utf8_length != 0 ||
-        display_buffer_has_value;
-    if (display_present != display_values_present) {
-      return WDF_CAPTURE_RESULT_INVALID_ARGUMENT;
-    }
-    if (display_present &&
-        (source->target_display_monitor_handle == 0 ||
-         !TryCopyDisplayDeviceKey(
-             source->target_display_device_key_utf8,
-             source->target_display_device_key_utf8_length,
-             &display_device_key) ||
-         !HasOnlyZeroBytes(
-             source->target_display_device_key_utf8,
-             source->target_display_device_key_utf8_length,
-             WDF_CAPTURE_DISPLAY_DEVICE_KEY_UTF8_CAPACITY))) {
-      return WDF_CAPTURE_RESULT_INVALID_ARGUMENT;
-    }
-  } else if (display_present) {
+  if (target_present &&
+      (!TryCopyDisplayDeviceKey(
+           source->target_display_device_key_utf8,
+           source->target_display_device_key_utf8_length,
+           &display_device_key) ||
+       !HasOnlyZeroBytes(
+           source->target_display_device_key_utf8,
+           source->target_display_device_key_utf8_length,
+           WDF_CAPTURE_DISPLAY_DEVICE_KEY_UTF8_CAPACITY))) {
     return WDF_CAPTURE_RESULT_INVALID_ARGUMENT;
   }
 
   RuntimeAuthorization authorization;
   authorization.privacy = privacy;
-  if (scope_present) {
-    if (source->target_epoch == 0 ||
-        (target_present && (source->target_window_handle == 0 ||
-        source->target_process_creation_time_100ns == 0 ||
-        source->target_process_id == 0))) {
-      return WDF_CAPTURE_RESULT_INVALID_ARGUMENT;
-    }
+  if (target_present) {
     authorization.target = CaptureTargetIdentity{
-        source->target_window_handle,
-        source->target_process_id,
-        source->target_process_creation_time_100ns,
+        0,
+        0,
+        0,
         source->target_epoch,
         source->target_display_monitor_handle,
         std::move(display_device_key),
-        display_wide_scope ? CaptureAuthorizationScope::kDisplayWide
-                           : CaptureAuthorizationScope::kForegroundTarget};
+        CaptureAuthorizationScope::kDisplayWide};
   }
 
   const bool fully_allowed = windayflow::capture::IsFullyAllowed(privacy);
-  if (fully_allowed != scope_present) {
+  if (fully_allowed != target_present) {
     return WDF_CAPTURE_RESULT_INVALID_ARGUMENT;
   }
 
@@ -619,7 +577,8 @@ wdf_capture_get_capabilities(wdf_capture_capabilities* capabilities) noexcept {
                     WDF_CAPTURE_CAPABILITY_DISPLAY_SCOPED_AUTHORIZATION |
                     WDF_CAPTURE_CAPABILITY_DISPLAY_BOUND_COMMAND_ADMISSION |
                     WDF_CAPTURE_CAPABILITY_CALLBACK_TIME_AUTHORIZATION_INVALIDATION |
-                    WDF_CAPTURE_CAPABILITY_DISPLAY_WIDE_CONTINUOUS_AUTHORIZATION;
+                    WDF_CAPTURE_CAPABILITY_DISPLAY_WIDE_CONTINUOUS_AUTHORIZATION |
+                    WDF_CAPTURE_CAPABILITY_HEALTH_SNAPSHOT;
     return WDF_CAPTURE_RESULT_OK;
   } catch (...) {
     return WDF_CAPTURE_RESULT_INTERNAL_ERROR;
@@ -959,6 +918,26 @@ extern "C" wdf_capture_result WDF_CAPTURE_CALL wdf_capture_poll_event(
       default:
         return WDF_CAPTURE_RESULT_INTERNAL_ERROR;
     }
+  } catch (...) {
+    return WDF_CAPTURE_RESULT_INTERNAL_ERROR;
+  }
+}
+
+extern "C" wdf_capture_result WDF_CAPTURE_CALL
+wdf_capture_get_health_snapshot(
+    wdf_capture_handle handle,
+    wdf_capture_health_snapshot_v2* snapshot) noexcept {
+  try {
+    const wdf_capture_result header =
+        ValidateStructHeader(snapshot, sizeof(wdf_capture_health_snapshot_v2));
+    if (header != WDF_CAPTURE_RESULT_OK) {
+      return header;
+    }
+    InstanceLease lease = AcquireInstance(handle);
+    if (!lease) {
+      return WDF_CAPTURE_RESULT_INVALID_ARGUMENT;
+    }
+    return lease.get()->controller.GetHealthSnapshot(snapshot);
   } catch (...) {
     return WDF_CAPTURE_RESULT_INTERNAL_ERROR;
   }

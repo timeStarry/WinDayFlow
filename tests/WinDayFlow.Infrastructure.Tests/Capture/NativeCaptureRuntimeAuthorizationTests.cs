@@ -55,7 +55,14 @@ public sealed class NativeCaptureRuntimeAuthorizationTests
                 NativeCapturePrivacyContext.FailClosed(runtimePolicyRevision: 1),
                 present));
 
-        _ = new NativeCaptureRuntimeAuthorization(CreateAllowedContext(), present);
+        Assert.Throws<ArgumentException>(() =>
+            new NativeCaptureRuntimeAuthorization(CreateAllowedContext(), present));
+        _ = new NativeCaptureRuntimeAuthorization(
+            CreateAllowedContext(),
+            NativeCaptureTargetIdentity.DisplayWide(
+                1,
+                DisplayMonitorHandle,
+                DisplayDeviceKey));
         _ = new NativeCaptureRuntimeAuthorization(
             NativeCapturePrivacyContext.FailClosed(runtimePolicyRevision: 1),
             NativeCaptureTargetIdentity.Absent);
@@ -94,10 +101,7 @@ public sealed class NativeCaptureRuntimeAuthorizationTests
     [Fact]
     public void TargetAndAuthorizationTextNeverExposeIdentityValues()
     {
-        var target = NativeCaptureTargetIdentity.Present(
-            0x1234,
-            42,
-            100,
+        var target = NativeCaptureTargetIdentity.DisplayWide(
             7,
             DisplayMonitorHandle,
             DisplayDeviceKey);
@@ -107,10 +111,7 @@ public sealed class NativeCaptureRuntimeAuthorizationTests
 
         var text = target + " " + authorization;
         Assert.Contains("[REDACTED]", text, StringComparison.Ordinal);
-        Assert.DoesNotContain("4660", text, StringComparison.Ordinal);
-        Assert.DoesNotContain("1234", text, StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("42", text, StringComparison.Ordinal);
-        Assert.DoesNotContain("100", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("22136", text, StringComparison.Ordinal);
         Assert.DoesNotContain("DISPLAY1", text, StringComparison.OrdinalIgnoreCase);
     }
 

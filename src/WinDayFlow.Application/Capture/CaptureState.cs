@@ -12,4 +12,5 @@ public enum CaptureState
     Stopping = 7,
     Faulted = 8,
     BlockedByConsent = 9,
+    NeedsAttention = 10,
 }

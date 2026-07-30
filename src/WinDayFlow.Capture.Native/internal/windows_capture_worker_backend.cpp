@@ -17,6 +17,7 @@
 
 #include "dxgi_desktop_frame_source.h"
 #include "jpeg_frame_chunk_writer.h"
+#include "process_telemetry.h"
 #include "windows_capture_target_observer.h"
 #include "windows_graphics_capture_frame_source.h"
 
@@ -182,6 +183,22 @@ class WindowsCaptureWorkerBackend final : public CaptureWorkerBackend {
                              : CaptureWorkerBackendResult::kInvalidFrame;
   }
 
+  std::optional<ProcessTelemetrySample> ObserveApplicationContext(
+      const CaptureTargetIdentity& capture_target) noexcept override {
+    if (capture_target.scope == CaptureAuthorizationScope::kForegroundTarget) {
+      return ReadProcessTelemetrySample(
+          capture_target.process_id,
+          capture_target.process_creation_time_100ns);
+    }
+    const std::optional<CaptureTargetIdentity> foreground =
+        ObserveWindowsForegroundTargetForDisplay(capture_target);
+    return foreground.has_value()
+        ? ReadProcessTelemetrySample(
+              foreground->process_id,
+              foreground->process_creation_time_100ns)
+        : std::nullopt;
+  }
+
   CaptureWorkerBackendResult BeginChunk(
       std::string_view artifact_id,
       const JpegFrameChunkWriterConfig& config) noexcept override {
@@ -198,12 +215,20 @@ class WindowsCaptureWorkerBackend final : public CaptureWorkerBackend {
 
   CaptureWorkerBackendResult EncodeFrame(
       std::span<const uint8_t> top_down_bgra,
-      uint64_t offset_milliseconds) noexcept override {
+      uint64_t offset_milliseconds,
+      CaptureFrameWriteDisposition* disposition) noexcept override {
     if (!IsOwnerThread()) {
       return CaptureWorkerBackendResult::kInternalFailure;
     }
-    return MapJpegWriterResult(
-        writer_.AddFrame(top_down_bgra, offset_milliseconds));
+    JpegFrameDisposition writer_disposition = JpegFrameDisposition::kDuplicate;
+    const JpegFrameChunkWriterResult result = writer_.AddFrame(
+        top_down_bgra, offset_milliseconds, &writer_disposition);
+    if (result == JpegFrameChunkWriterResult::kOk && disposition != nullptr) {
+      *disposition = writer_disposition == JpegFrameDisposition::kRetained
+                         ? CaptureFrameWriteDisposition::kRetained
+                         : CaptureFrameWriteDisposition::kDuplicate;
+    }
+    return MapJpegWriterResult(result);
   }
 
   CaptureWorkerBackendResult FinalizeChunk(

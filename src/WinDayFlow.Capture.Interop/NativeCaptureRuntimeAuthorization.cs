@@ -216,6 +216,14 @@ public sealed class NativeCaptureRuntimeAuthorization
                 nameof(target));
         }
 
+        if (fullyAllowed
+            && target.Scope != NativeCaptureAuthorizationScope.DisplayWide)
+        {
+            throw new ArgumentException(
+                "A fully allowed runtime authorization requires a display-wide capture target.",
+                nameof(target));
+        }
+
 
         if (!fullyAllowed && target.State == NativeCaptureTargetIdentityState.Present)
         {

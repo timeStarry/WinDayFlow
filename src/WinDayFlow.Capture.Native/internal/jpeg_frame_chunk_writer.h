@@ -30,6 +30,11 @@ enum class JpegFrameChunkWriterResult {
   kStorageFailure,
 };
 
+enum class JpegFrameDisposition {
+  kRetained,
+  kDuplicate,
+};
+
 class JpegFrameChunkWriter final {
  public:
   explicit JpegFrameChunkWriter(std::wstring output_root);
@@ -44,7 +49,8 @@ class JpegFrameChunkWriter final {
       const JpegFrameChunkWriterConfig& config) noexcept;
   JpegFrameChunkWriterResult AddFrame(
       std::span<const uint8_t> top_down_bgra,
-      uint64_t offset_milliseconds) noexcept;
+      uint64_t offset_milliseconds,
+      JpegFrameDisposition* disposition = nullptr) noexcept;
   JpegFrameChunkWriterResult Finalize(
       ChunkManifest* manifest,
       AtomicChunkPublication* publication) noexcept;

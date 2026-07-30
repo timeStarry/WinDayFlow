@@ -4,7 +4,7 @@ Status: Architecture and product design baseline
 Project: WinDayFlow  
 Repository: https://github.com/timeStarry/WinDayFlow  
 Developer: timeStarry <timestarry@qq.com>  
-Last updated: 2026-07-29
+Last updated: 2026-07-30
 
 ## 1. Purpose
 
@@ -30,26 +30,47 @@ distinct Windows-native architecture and identity.
 ### 1.1 Current Capture And Analysis Decision
 
 [ADR 0014](adr/0014-canonical-jpeg-capture-archive.md) is authoritative for the
-current artifact format. Recording publishes strict schema 3 manifests plus
-canonical JPEG frames; schema 2 archives remain read-only compatible. It never
-records MP4. All-black compositor startup surfaces are rejected before chunk
-creation, and consecutive near-duplicates are discarded before persistence
-while chunk endpoints are retained. Managed code validates and analyzes those
-JPEGs directly. MP4 exists only as a rebuildable 10/15/30/60 FPS export for a
-user-selected `[start,end)` range.
+current artifact format. Recording publishes immutable schema 4 manifests and
+canonical JPEG frames and does not read older development manifests. It never
+records MP4. Compositor-invalid/all-black surfaces and consecutive perceptual
+duplicates are rejected before provider evidence is assembled. Each manifest
+preserves the exact time range, sampled/black/duplicate/retained counts, bounded
+frame metadata, and application-context samples; a sampled interval with zero
+retained JPEGs remains a valid context-only chunk. MP4 is only a rebuildable
+10/15/30/60 FPS export for a user-selected `[start,end)` range.
 
-SQLite schema 10 intentionally discards legacy development chunks, analysis
-jobs, and timeline rows while retaining settings and provider configuration;
-schema 11 adds privacy-limited foreground process telemetry, and schema 12
-seeds a removable WinDayFlow executable exclusion through the ordinary rule
-model. The current
-analysis version is `timeline-v5`; ordered evidence references and persisted
-45-minute sliding-window members preserve provenance across chunks, while
-strict category and productivity enums prevent unknown provider labels from
-silently becoming `Unknown`. Earlier H.264, native-extractor, `evidence-v2`,
-`timeline-v3`, `timeline-v4`, and compatibility-migration descriptions below
-are historical design records where explicitly identified and do not override
-ADR 0014.
+SQLite schema 13 intentionally resets all legacy development chunks, timeline
+evidence, analysis jobs, screenings, caches, staging data, and app-local exports
+without touching exports outside the WinDayFlow data root. It preserves user
+settings, recording consent, provider profiles, and DPAPI ciphertext; a legacy
+active provider migrates only to the timeline-analysis binding. Schema 13 also
+adds stage routing, privacy screening and invocation ledgers, multi-evidence
+analysis-window members, application context projections, and statistics
+installation state.
+
+The current analysis version uses persisted 45-minute sliding-window members.
+Route/profile/screening revisions and actual evidence fingerprints are part of
+the analysis input identity, and transactional `WindowChanged` checks prevent
+stale results from overwriting a changed window. User-edited fields remain
+locked while unaffected generated fields may be rewritten.
+
+### 1.2 Current Privacy and Provider-Routing Decision
+
+[ADR 0015](adr/0015-user-controlled-capture-and-provider-routing.md) defines the
+implemented privacy boundary. Continuous local capture is separate from
+provider-request policy. Application/window send rules, optional privacy
+inspection, redaction, provider routing, and provider failures do not interrupt
+local frame persistence. Capture admission is limited to explicit user intent,
+recording consent, Windows lock/secure desktop, suspend or session/display loss,
+storage or capture access loss, fatal failure, and shutdown.
+
+WinDayFlow does not infer trust from whether a provider is local or remote.
+Revisioned OpenAI-compatible profiles are independently assigned to
+`PrivacyInspection` and `TimelineAnalysis`; the user decides whether either
+stage is enabled and which profile it uses. Privacy match/error actions are also
+user policy. WinDayFlow protects credentials, validates stage capabilities,
+rechecks send rules immediately before each request, creates immutable redacted
+derivatives when requested, and records payload-free invocation facts.
 
 ## 2. Reference Baseline
 
@@ -124,10 +145,12 @@ Windows technology-stack decision.
   failure, and recovery state immediately understandable.
 - Adapt the proven QiDayflow native capture approach, remove Flutter coupling,
   and preserve code provenance where implementation is reused.
-- Keep recordings, evidence, timeline data, settings, and the database local by
-  default, with behavior that users can inspect and verify.
+- Keep the canonical archive and product database under user-controlled local
+  storage, and make every provider route and evidence transfer inspectable and
+  explicitly configurable.
 - Make all background work recoverable, observable, and safe to retry.
-- Support cloud and local AI providers through capability-based adapters.
+- Support user-selected AI providers through capability-based standard-API
+  adapters without inferring trust or eligibility from deployment location.
 - Build daily, weekly, export, and chat features on one stable activity model.
 - Allow users to inspect, edit, merge, split, reclassify, and delete their data.
 - Preserve user corrections as durable provenance that automated reanalysis
@@ -164,6 +187,7 @@ Today
 
 Insights
 |-- Weekly
+|-- Statistics
 `-- Chat
 
 System
@@ -213,18 +237,30 @@ running, and failed jobs with retry and evidence-location actions.
 - Starts with structured queries and SQLite FTS5; embeddings are deferred until
   real retrieval quality requires them.
 
-### 5.6 Settings
+### 5.6 Statistics
 
-- Recording, storage, retention, provider, model, privacy, startup, update, and
-  diagnostic settings.
-- The current foundation persists system/light/dark theme preference, the
-  capture-enabled preference, the cloud-off default, and versioned recording
-  consent before the main window is created. It also persists an application
-  privacy mode: `ProtectByForegroundApplication` is the conservative default;
-  `AllowAllApplications` is an explicit wider-scope, single-display continuity
-  choice that requires a new privacy revision and renewed consent.
-- Provider selection is capability-aware: text support does not imply vision
-  support.
+- Shows today, 7-day, 30-day, and lifetime deterministic metrics.
+- Includes recorded and focused duration, active days, activity/category/
+  productivity distributions, and most-used applications.
+- Includes system metrics such as first-use date, captured and retained frame
+  counts, deduplication ratio, timeline entries, provider invocations, failures,
+  and storage usage.
+- Uses one compact KPI band plus full-width chart/list sections rather than
+  nested decorative cards. Numeric definitions remain reproducible without AI.
+
+### 5.7 Settings
+
+- Uses a compact landing page with navigable Recording, Storage, Privacy and
+  processing, Providers, Appearance, and About pages instead of one flattened
+  form.
+- The Storage page shows a read-only data path and a standard Open Folder action.
+- The Providers page manages reusable profiles. Privacy and processing owns
+  independent stage switches, provider assignments, no-send rules, and failure
+  behavior; creating or editing a provider never silently assigns it to a stage.
+- Provider selection is capability-aware: text support does not imply vision or
+  structured privacy-inspection support, but capability does not imply trust.
+- Exclusion-rule rows use a stable enable switch and edit action, with reorder
+  and delete in an overflow menu.
 - Destructive actions use explicit confirmation and show their exact scope.
 
 ## 6. Technology Baseline
@@ -308,6 +344,13 @@ Dev-live runtime: an explicitly gated x64 bundle composes monitor, owner, writer
 Analysis runtime: App always composes scanner, durable jobs, native extraction,
                   provider, and Timeline commit
 ```
+
+The paragraphs below describe the schema-v12 transitional implementation. ADR
+0015 is authoritative for the target product boundary: the consent service will
+retain only the hard capture gate, while provider routing and privacy processing
+move to separate application services and persistence. Foreground verification
+remains useful for display selection and optional metadata, not as permission to
+persist each frame.
 
 `ICaptureService` and `ICaptureBackend` are owned by Application. The
 Application-layer `ConsentGatedCaptureService` implements the feature-facing
@@ -466,10 +509,10 @@ public interface ICaptureService
 ```
 
 [ADR 0002](adr/0002-capture-exclusion-rules.md), "Typed, Ordered Capture
-Exclusion Rules," is also Accepted. It defines application-anchored identities,
-bounded window-title operators, ordered first-match reporting, complete-snapshot
-concurrency, and the atomic capture-off/privacy-revision transition. It does not
-authorize live capture or live window enumeration.
+Exclusion Rules," remains accepted for application-anchored identities, bounded
+window-title operators, ordering, and safe matching. ADR 0015 supersedes its
+capture-off/privacy-revision semantics and reuses the rules as explicit no-send
+policy at the provider-request boundary.
 
 [ADR 0003](adr/0003-native-capture-safety-core.md), "Native Capture Safety
 Core," fixes the additive C ABI v1 runtime-authorization layout, target and
@@ -550,18 +593,23 @@ advertises only `ScreenCapture | CanonicalJpegChunks` in addition to the safety
 capabilities.
 
 [ADR 0013](adr/0013-display-wide-continuous-capture.md), "User-Authorized
-Display-Wide Continuous Capture," adds the explicit application privacy-mode
-choice. It records the schema-v7/privacy-revision transition, capability bit 12,
-the compatible target flag in the unchanged 224-byte authorization structure,
-active-recording display pinning, suspended application/window exclusions, and
-the wider-scope privacy consequences. It is accepted for the dev-live QA path
-only and does not open production capture.
+Display-Wide Continuous Capture," is superseded as product policy by ADR 0015.
+Its compatible target flag, capability bit 12, single-display pinning, and
+generation implementation remain useful history; its two user-facing modes and
+exclusion suspension no longer define the target experience.
 
 [ADR 0014](adr/0014-canonical-jpeg-capture-archive.md), "Canonical JPEG Capture
 Archive," supersedes the H.264 artifact and native extraction portions of ADRs
 0010 and 0011. It defines the canonical JPEG chunk, write-time black-surface
 rejection and deduplication, schema 10 reset, schema 3 process telemetry,
 direct managed analysis, and export-only MP4 behavior.
+
+[ADR 0015](adr/0015-user-controlled-capture-and-provider-routing.md),
+"User-Controlled Capture, Privacy Processing, and Provider Routing," separates
+the hard capture gate, canonical archive, optional privacy stage, user policy,
+and per-stage provider bindings. It is authoritative wherever earlier capture
+ADRs coupled application/window classification or provider policy to frame
+persistence.
 
 `CaptureStatus` is a stable machine-readable contract, not just display text.
 It carries an unsigned 64-bit `Sequence`, `CaptureReasonCode`, and
@@ -1121,12 +1169,18 @@ settings commit.
 does not create a lasting hold. WTS lock, disconnect, logoff, and terminate enter
 an independent session-unavailable hold; corresponding connect, logon, unlock,
 create, and desktop-ready events clear it, while remote-control changes only
-request revalidation. Suspend enters an independent power hold and the supported
+request revalidation. The low-frequency health refresh also samples only the
+current session decision while that hold is active. An observed unlocked session
+clears the hold through a new SessionAvailable invalidation when Windows omitted
+the matching event. Suspend enters an independent power hold and the supported
 resume notifications clear it. Unknown WTS events fail closed as unavailable.
 While either hold remains, the worker completes the current native Block barrier
-and publishes FailClosed without sampling. Clearing a hold never restores old
-authority: the new generation still requires a Block acknowledgement and a fresh
-sample. All registrations and reverse-order cleanup run on the owner thread;
+and publishes FailClosed without a full target sample. Such publications do not
+replace the last independently sampled storage decision, so a healthy disk does
+not alternate between Allow and Unknown every refresh. Clearing a hold never
+restores old authority: the new generation still requires a Block acknowledgement
+and a fresh sample. All registrations and reverse-order cleanup run on the owner
+thread;
 partial startup or uncertain cleanup remains fail closed and conservatively
 retains callback roots when detachment cannot be proven.
 
@@ -1197,17 +1251,24 @@ The current App host composes this workflow at startup. It initializes SQLite,
 settings, and provider configuration before starting a hosted background runner.
 The runner treats a full scan of committed `chunks/<id>/manifest.json` files as
 the source of truth; startup and chunk-completed events are only wake reasons.
-It idempotently stores chunks and jobs, fingerprints each source, invokes the
-root-bound native evidence extractor, calls the validated active
-OpenAI-compatible provider, and commits normalized Timeline entries with job
-completion in one SQLite transaction.
+It idempotently stores chunks and jobs, fingerprints each source, calls the
+currently validated OpenAI-compatible provider, and commits normalized Timeline
+entries with job completion in one SQLite transaction.
 
-Provider readiness requires a complete saved profile, a successful synthetic
-connection test for its current revision, explicit cloud-transfer enablement,
-and current settings at send time. A process-local send gate linearizes cloud
-disable persistence with creation of a new network task. Completed chunks are
-not reanalyzed merely because the provider profile revision changes, preserving
-user-edited Timeline history.
+ADR 0015 replaces the single active-provider send gate with independently
+enabled processing-stage routes. A route is ready only when its selected profile
+is complete, validated for its current revision, technically capable of the
+stage, and still enabled immediately before request creation. An optional
+privacy route may precede timeline analysis, use the same provider, use another
+provider, or be disabled. The selected privacy match/error policy determines
+whether original evidence, a distinct redacted derivative, or no evidence
+continues. No endpoint is preferred or rejected because WinDayFlow infers it to
+be local, remote, trusted, or untrusted.
+
+Route changes are serialized against creation of a new provider request but do
+not stop capture. Completed chunks are not reanalyzed merely because a profile
+or route revision changes, preserving user-edited Timeline history unless the
+user explicitly requests reanalysis.
 
 Rules:
 
@@ -1270,8 +1331,8 @@ public interface IAiProvider
 {
     ProviderCapabilities Capabilities { get; }
 
-    Task<AnalysisResult> AnalyzeAsync(
-        AnalysisRequest request,
+    Task<ProviderStageResult> ExecuteAsync(
+        ProviderStageRequest request,
         CancellationToken cancellationToken);
 
     IAsyncEnumerable<ChatDelta> ChatAsync(
@@ -1283,20 +1344,34 @@ public interface IAiProvider
 Capabilities include:
 
 ```text
-VisionAnalysis | TextGeneration | Streaming | ToolCalling | LocalExecution
+VisionInput | StructuredOutput | PrivacyInspection | TimelineAnalysis
+TextGeneration | Streaming | ToolCalling
 ```
 
 Current and deferred adapters:
 
-1. OpenAI-compatible HTTP is implemented for bounded vision analysis.
-2. Gemini is deferred.
-3. Ollama and LM Studio are deferred.
-4. Codex CLI and Claude Code CLI are deferred until stable interfaces and a
-   reviewed local-process boundary exist.
+1. OpenAI-compatible HTTP is implemented for bounded vision analysis. Any
+   compatible user-configured endpoint can use this adapter without a branded or
+   deployment-specific product mode.
+2. Additional standard API formats are added only when they cannot be expressed
+   through an existing adapter; Gemini is currently deferred.
+3. CLI/process adapters are deferred until their interfaces and process boundary
+   are stable. Their execution location would still not establish user trust.
+
+Provider profiles are reusable connection descriptions, not trust labels and not
+stage assignments. An independently persisted binding selects one profile for
+each enabled stage. The initial stages are `PrivacyInspection` and
+`TimelineAnalysis`; later stages may add Daily, Weekly, and Chat without changing
+capture or rewriting existing profiles. The same profile may be bound to several
+stages, and a stage may point at any compatible saved profile.
 
 All provider-specific payloads and labels are normalized in Infrastructure.
 Provider responses cannot write domain state directly. Structured analysis uses
 strict DTO and semantic validation before entering the application workflow.
+Privacy findings are normalized before WinDayFlow performs any redaction, hold,
+review, or pass-through action. A remote privacy route necessarily receives the
+original evidence; the UI discloses that endpoint and payload but does not
+forbid the user's selection.
 
 ## 13. Chat Retrieval Boundary
 
@@ -1337,6 +1412,11 @@ weekly_reviews
 conversations
 conversation_messages
 ai_provider_profiles
+analysis_stage_bindings
+privacy_screenings
+provider_invocations
+app_installation
+application_catalog
 app_settings
 capture_exclusion_rules
 schema_migrations
@@ -1421,113 +1501,133 @@ project directly from chunk/job truth, and completed results commit into the
 editable Timeline. Daily,
 Weekly, Journal, Chat, audit, retention, and import table groups remain pending.
 
+The next development schema implements ADR 0015. It replaces the single active
+provider and capture-coupled privacy mode with `analysis_stage_bindings`,
+`privacy_screenings`, and `provider_invocations`. Existing provider profiles and
+DPAPI credentials are retained. An existing explicitly enabled analysis profile
+may seed only the `TimelineAnalysis` binding; migration never enables a privacy
+stage. Existing exclusion rules preserve their enabled state as no-send rules
+without disabling capture or advancing recording consent. Because this remains
+a development product, the obsolete application privacy-mode column may be
+removed by a documented reset rather than a compatibility bridge.
+
+### 14.2 Statistics Read Model
+
+Statistics is a read model over canonical operational data, not a second source
+of truth. Definitions are fixed before visualization:
+
+- recorded duration is the union of available capture-chunk ranges, not retained
+  frame count multiplied by capture interval;
+- focused/category/productivity duration is the sum of non-overlapping normalized
+  timeline ranges with the corresponding classification;
+- active days are distinct local dates with available capture or user-authored
+  timeline data;
+- captured and retained frames come from `capture_chunks`; deduplicated frames
+  are their non-negative difference;
+- provider request count, success, latency, token usage, and reported cost come
+  from `provider_invocations`, never inferred from job attempts;
+- evidence usage comes from a cancellable file-system scan and reports database,
+  original evidence, derivatives, exports, and logs separately; and
+- accompanied days use an explicit installation timestamp, while accompanied
+  work duration uses recorded-duration truth.
+
+Basic timeline, frame, deduplication, job-state, and process metrics are already
+derivable from schema v12. Accurate invocation usage, first-use time, privacy-
+stage results, and complete storage breakdown require the target tables/services
+listed above. Missing provider usage is displayed as unavailable, never estimated
+as an exact token count or cost.
+
 ## 15. Privacy and Security
 
-The following are mandatory release requirements. The current build implements
-the persistent, versioned recording-consent gate and defaults capture and cloud
-analysis to off. Production live capture remains unavailable; the
-OpenAI-compatible cloud provider becomes usable only after a current synthetic
-connection test, disclosure, and explicit enablement. The dev-live capture path
-is separately gated and is not a production claim. Schema version 12 stores
-manual and analyzed timeline content, ordered evidence provenance, analysis
-window membership, settings, user-authored exclusion rules, capture chunks,
-analysis jobs, and provider profiles locally without
-application-level database encryption.
+The following are mandatory release requirements. ADR 0015 is authoritative for
+the target boundary; schema v12 and the current dev-live foreground coordinator
+are transitional implementation, not the final product policy. Production live
+capture remains unavailable until the refactor and its clean-profile acceptance
+tests pass. Current local data is not protected by application-level database or
+evidence encryption.
 
-- Recording is opt-in. Before the first capture, onboarding explains the data
-  collected, excluded data classes, local storage location, retention policy,
-  whether any configured provider is local or cloud, and how to pause or exit.
-  Capture cannot start until this consent and the initial privacy choices are
-  persisted. A later release that expands collection scope requires renewed
-  consent.
-- The current service enforces this gate for Start/Resume using the persisted
-  capture-enabled choice and consent policy version 2; consent records the exact
-  privacy revision it covered, and disabling capture, revoking consent, or any
-  privacy change triggers an automatic stop. Privacy changes disable capture
-  until renewed consent is persisted. Pause/Stop remain available regardless of
-  consent. Settings persist a 30-day conservative
-  default plus user-selectable retention, sensitive-application exclusion,
-  remote-session pause, screen-sharing pause choices, and typed ordered
-  application/window rule lists. Full first-run onboarding remains Phase 1
-  work. The event-driven application/window identity monitor plus
-  display/session/power invalidation foundation remains inactive in production
-  and is composed only by dev-live; its low-frequency storage refresh is also
-  dev-live-only today. Production attribution, presentation integration,
-  clean-profile Pause/Stop/startup validation, and live-desktop smoke remain
-  Phase 1 work.
-- Application capture scope is an explicit choice. The default
-  `ProtectByForegroundApplication` mode revalidates each foreground target and
-  enforces built-in sensitive-application policy plus ordered application/window
-  exclusions. `AllowAllApplications` is opt-in and display-wide: it temporarily
-  suspends both application and window exclusion evaluation, including the
-  seeded WinDayFlow rule when retained, while retaining those settings for later.
-  The UI must explain that all ordinary content on the selected display can
-  enter local evidence and may later be included in an explicitly enabled cloud
-  analysis request.
-- Changing either direction advances the privacy revision, turns capture off,
-  and requires the user to accept the current disclosure again before
-  Start/Resume. Each broader-mode recording pins the display selected at Start:
-  ordinary application and cross-display focus switches neither move the target
-  nor revoke or discard a partial chunk, while lock, secure desktop,
-  current-session WTS, power, display topology, storage, consent, and user Stop
-  remain fail closed. Selecting another recording display requires waiting for
-  recording to stop completely, moving the WinDayFlow window to that display,
-  and starting again there; one run never silently expands to every monitor.
-- Dev-live refreshes only the storage-headroom decision on an independent
-  five-second cadence. An unchanged decision is a no-op and cannot by itself
-  rebuild a pinned-display target. A transition below the configured threshold
-  or an unreadable storage result closes admission immediately; unreadable is
-  Unknown, and recovery requires fresh authorization rather than restoring a
-  previous Allow.
-- The current `pause_during_screen_sharing` storage name is retained for schema
-  compatibility, but the Windows UI describes only Windows Presentation Mode.
-  Windows has no public, universal signal for arbitrary third-party screen
-  sharing; unsupported sharing contexts remain unknown and fail closed rather
-  than being reported as positively detected.
-- Consent history is not considered fully audit-ready until immutable snapshots
-  record the concrete disclosure and privacy values accepted at each revision.
-  The current stale metadata is sufficient only to reject superseded consent.
-- Capture state is always available from the window and tray. Pause is a
-  one-action command, and the resulting state is distinguishable from stopped,
-  excluded, failed, locked, and storage-constrained states.
-- Users can exclude applications and windows. Rules support stable process or
-  publisher identity where available and bounded window-title matching where
-  necessary. The UI previews which rule matched without writing raw sensitive
-  titles to normal logs.
-- A documented sensitive-application policy provides conservative defaults for
-  authentication, password, secret, financial, health, and private-browsing
-  contexts that Windows can identify reliably. Because classification cannot be
-  perfect, users can inspect and extend the rules; no UI may claim universal
-  sensitive-content detection.
-- Lock and secure-desktop transitions pause evidence capture. Remote Desktop
-  and presentation or screen-sharing contexts use explicit policies with a
-  conservative pause default and visible override state. Sleep, session switch,
-  and resume transitions are auditable and never silently backfill evidence.
-- An unknown privacy input uses the generic policy-blocked reason. Specific
-  reasons such as session locked, remote session, or excluded application are
-  shown only after that condition is positively observed.
-- API secrets are protected for the current Windows user using DPAPI.
-- Production logs and startup diagnostics must reject or redact secrets,
-  authorization headers, base64/JPEG data, and raw window titles by
-  construction.
-- INFO logging is event-oriented and never per-frame.
-- Diagnostic mode uses an explicit metadata allowlist.
-- Before cloud analysis is enabled, the UI names the provider and endpoint,
-  shows the exact classes of evidence and metadata that may leave the device,
-  and provides a preview of the bounded images and context for a representative
-  request. A per-job preview remains available before retrying or manually
-  sending sensitive evidence.
-- Cloud requests produce a local, payload-free audit record containing provider
-  profile, endpoint origin, evidence references, byte and item counts, time,
-  outcome, and correlation ID. Users can inspect and clear this audit according
-  to a documented retention policy.
-- Local-provider mode keeps analysis on the machine, subject to the selected
-  provider's own behavior.
-- Retention never deletes evidence for pending, active, or failed jobs.
+### Capture Safety
+
+- Recording is opt-in. Onboarding explains the selected display, screenshot
+  cadence, local storage location, retention, and direct Pause, Stop, and Exit
+  actions. Expanding the collected data classes requires renewed recording
+  consent; changing an analysis route does not.
+- The hard capture gate is limited to explicit user intent or revoked recording
+  consent, lock or secure desktop, suspend/session/display loss, insufficient
+  storage, capture-access loss, fatal runtime failure, and shutdown.
+- Ordinary foreground changes, application/window exclusions, provider state,
+  optional privacy-inspection state, Remote Desktop, and presentation state do
+  not interrupt the target local archive. These observations may inform metadata
+  or a user-configured provider-request rule.
+- One capture run remains pinned to one selected display. Focus moving to
+  another display neither moves the target nor expands collection to every
+  monitor. A display loss crosses the hard gate.
+- Unknown optional identity or classification input means that metadata is
+  unavailable. It does not revoke persistence authority. Unknown lock, secure-
+  desktop, display, or storage state remains a hard-gate failure because those
+  inputs establish whether capture can be performed safely.
+- Primary status is derived from native state plus the last successful frame-
+  persistence heartbeat. It never reports "privacy protected" while frames are
+  being committed. Processing and privacy statuses are displayed separately.
+
+### User-Controlled Processing and Trust
+
+- Provider profiles contain standard API, endpoint, model, credential, timeout,
+  validation, and capability data. WinDayFlow does not assign trust from the
+  endpoint, model, vendor, loopback status, or deployment location.
+- Each processing stage has an independent enabled switch and provider binding.
+  The same provider may serve every stage, or different providers may serve
+  privacy inspection and timeline analysis. A provider profile is never assigned
+  to a stage merely because it was saved or validated.
+- Privacy inspection is optional. When disabled, the user may route original
+  bounded evidence directly to timeline analysis. When enabled, its provider may
+  use any configured endpoint, including an endpoint that receives the original
+  evidence over the network.
+- Match behavior and failure behavior are explicit user policy: audit, redact,
+  hold, require review, or pass through where applicable. WinDayFlow discloses
+  consequences and preserves the user's choice rather than enforcing one
+  product-selected trust hierarchy.
+- Enabled application/window exclusion rules are user-authored no-send rules at
+  the request boundary. They do not stop capture. The seeded WinDayFlow rule is
+  an ordinary removable rule.
+- A privacy provider returns a normalized typed result. WinDayFlow performs any
+  configured redaction and writes a separate derivative artifact; provider
+  output never overwrites original evidence or directly mutates timeline state.
+
+### Request, Credential, and Audit Boundary
+
+- Immediately before each provider call, the application rechecks the stage
+  binding, profile and route revisions, credentials, no-send rules, configured
+  prior-stage result, and exact original or derivative evidence references.
+- The UI names the selected provider and endpoint and shows the evidence and
+  metadata classes that will be sent. Loopback versus non-loopback may be shown
+  as a factual endpoint property, never as a trust verdict.
+- Provider calls produce a local payload-free invocation record containing the
+  stage, profile/route revisions, endpoint origin, evidence references, byte and
+  item counts, time, outcome, correlation ID, and usage data when the provider
+  reports it. Accurate call counts come from this ledger, not job attempts.
+- API credentials are protected for the current Windows user using DPAPI.
+- Provider-specific payloads, credentials, authorization headers, base64/JPEG
+  data, and raw window titles never enter normal logs. INFO logging is event-
+  oriented and never per-frame; diagnostic mode uses an explicit allowlist.
+- Providers cannot access SQLite directly and cannot authorize another stage.
+  Adapters normalize and validate responses before application policy executes.
+
+### Local Evidence and Retention
+
+- Original canonical JPEG evidence and sanitized derivatives are different
+  artifacts with explicit provenance. Derivatives are rebuildable and cannot
+  replace or silently weaken the original evidence record.
+- Retention does not delete evidence needed by pending, active, held, review, or
+  failed jobs unless the user explicitly chooses a destructive action that names
+  the affected scope.
 - Storage cleanup is quota-based, deterministic, auditable, and interruptible.
-- Destructive operations list the affected date range and data classes.
-- Privacy enforcement occurs before capture or request construction, not only
-  as a presentation filter after evidence has been stored.
+- Consent history is not fully audit-ready until immutable snapshots record the
+  concrete recording disclosure and provider-route disclosure accepted at each
+  revision.
+- No built-in or provider classifier may claim universal password, secret,
+  financial, health, or private-content detection. Optional OCR, deterministic
+  rules, and VLM stages expose their version and limitations.
 
 ## 16. Windows Application Lifecycle
 
@@ -1586,6 +1686,18 @@ Explicit application exit performs:
   accent color, and reduced-motion preferences. Theme changes update the custom
   title bar and caption-button colors without restarting.
 - Keep timelines virtualized; do not render an entire history in nested panels.
+- Settings uses a landing page plus secondary pages. Storage uses a read-only
+  path row with an Open Folder command; provider details never flatten into the
+  settings landing page.
+- Category and productivity metadata use restrained semantic icons, text, and
+  theme-aware badges rather than unrelated bright pills. Tags use compact
+  four-pixel-radius tokens and collapse excess values behind a count.
+- Application icons are fixed at 20-24 pixels with a stable neutral fallback.
+  App names remain available in tooltips and details; mixed missing/icon states
+  must not shift timeline layout.
+- Statistics uses one compact KPI band followed by unframed full-width trend,
+  distribution, and top-application sections. It does not nest cards or use
+  decorative charts without reproducible metric definitions.
 - Ensure complete keyboard navigation, logical tab order, visible focus,
   accelerator discoverability, focus restoration after overlays, and Narrator
   announcements for capture, progress, failure, and destructive-action state.
@@ -1636,17 +1748,20 @@ Stable event categories:
 ```text
 capture.session.*
 capture.chunk.*
+capture.persistence.heartbeat
 analysis.job.*
-provider.request.*
+privacy.screening.*
+provider.invocation.*
 timeline.write.*
 storage.cleanup.*
 database.migration.*
 application.lifecycle.*
 ```
 
-Every background job log includes a non-sensitive correlation ID, attempt,
-state transition, duration, and stable outcome code. Metrics remain local unless
-the user explicitly enables a future telemetry feature.
+Every background job log includes a non-sensitive correlation ID, stage, profile
+and route revision, attempt, state transition, duration, and stable outcome code.
+The heartbeat records time and status only, never pixels or window text. Metrics
+remain local unless the user explicitly enables a future telemetry feature.
 
 ## 20. Testing Strategy
 
@@ -1740,10 +1855,16 @@ the user explicitly enables a future telemetry feature.
   schema-v9 ordered evidence/window membership, and the destructive schema-v10
   canonical JPEG reset, schema-v11 foreground process telemetry, and schema-v12
   removable WinDayFlow exclusion seeding.
+- ADR-0015 migration coverage for reusable provider profiles, independent stage
+  bindings, no implicit privacy-stage enablement, screening provenance, and the
+  provider-invocation ledger.
 - Transaction rollback with no partial observations or timeline entries.
 - Provider fixture mapping and strict category/productivity enum rejection.
-- Provider disclosure and upload-preview construction with no network request
-  before consent, plus payload-free network-audit completeness.
+- Per-stage provider disclosure and evidence-preview construction with no
+  request before that route is enabled, plus payload-free invocation-audit
+  completeness.
+- Same-provider, different-provider, disabled-privacy, redacted, held, reviewed,
+  and user-selected pass-through integration fixtures.
 - Log-safety tests that reject secrets, raw window titles, and encoded evidence.
 - DPAPI round-trip under the current user.
 - Retention protection for non-completed work.
@@ -1769,7 +1890,7 @@ the user explicitly enables a future telemetry feature.
 ## 21. Delivery Plan
 
 Phases are release gates, not a claim of strict implementation order. As of
-2026-07-29, schema v10, consent policy v2, manual and analyzed Timeline storage,
+2026-07-30, schema v10, consent policy v2, manual and analyzed Timeline storage,
 capture chunk/job/provider persistence, provider configuration and validation,
 canonical JPEG validation, and the hosted analysis pipeline are implemented.
 Sixteen native tests cover the C ABI, safety core, JPEG writer, atomic store,
@@ -1780,53 +1901,54 @@ provider and restart idempotency.
 The x64 dev-live flavor also composes the native owner, privacy monitor, target
 verifier, real DXGI-first/WGC-fallback JPEG worker, chunk notifier, and analysis
 runner. It is protected by compile property, development-bundle property, and
-exact launch-argument gates, and its QA policy admits only fully resolved
-foreground targets. The default mode preserves exclusions; the explicitly
-re-consented continuous mode converts the initial target to a single-display
-authorization and suspends application/window exclusions. Independent lifecycle
-and storage signals remain effective in both modes. Production remains in
-disabled activation mode and advertises
-neither `ScreenCapture` nor `CanonicalJpegChunks`. P0 and the Phase 1
-exit criterion are therefore not complete: a clean-profile dev-live Desktop
-Duplication and startup-intent smoke, full privacy/lifecycle transitions,
-production-grade signer/hosted-app attribution, presentation and periodic
-storage integration, and recovery at native persistence boundaries remain
-gates.
+exact launch-argument gates. Its foreground-protection and re-consented
+continuous modes are now transitional implementation under ADR 0015 rather than
+the production policy. Production remains disabled and advertises neither
+`ScreenCapture` nor `CanonicalJpegChunks` until continuous capture uses only the
+hard gate, status is heartbeat-consistent, provider routing is independent, and
+the resulting lifecycle/request-boundary acceptance suite passes.
 
 ### Immediate P0: Runnable Capture-to-Analysis Vertical Slice
 
 Until this slice meets its exit criterion, it takes precedence over new Daily,
-Weekly, Journal, Chat, export, provider-expansion, and visual-polish work. Those
-areas may receive only fixes needed to keep the current shell and manual
-timeline usable.
+Weekly, Journal, Chat, and unrelated visual-polish work. Provider expansion here
+means the reusable profile and stage-routing boundary required by ADR 0015, not
+adding vendor-specific product policy.
 
 Current implementation status follows the end-to-end order:
 
-1. **Record and publish: implemented behind dev-live gates, smoke pending.** The
+1. **Record and publish: implemented behind dev-live gates; hard-gate refactor
+   pending.** The
    native runtime owner, monitor, verifier, writer, and committed
    `chunks/<id>/manifest.json` plus `frames/*.jpg` path are composed. Production
    uses DXGI first and WGC only for explicit Desktop Duplication access denial.
-   Schema-v7 application privacy mode and ABI capability bit 12 are composed for
-   dev-live QA, but default and continuous real-device transition checks remain
-   acceptance work. Production stays disabled until those checks pass.
-2. **Discover and enqueue: implemented.** Startup and every chunk-completed wake
+   The atomic JPEG writer, black-frame rejection, deduplication, and pinned-
+   display capability remain. Foreground identity, exclusions, provider state,
+   and privacy inspection must be removed from persistence authorization.
+2. **Project truthful capture status: refactor pending.** Native state and the
+   last successful persistence heartbeat must produce Recording, Paused,
+   Stopped, or NeedsAttention independently from privacy-processing state.
+3. **Discover and enqueue: implemented.** Startup and every chunk-completed wake
    rescan committed manifests, strictly accept the two authorized foreground or
-   continuous display scope values, idempotently upsert chunks, and enqueue only
-   for the current validated provider. Wake events are never the source of truth.
-3. **Configure the LLM boundary: implemented.** Settings owns endpoint, model,
-   timeout, DPAPI-protected credential, synthetic connection test, revision
-   invalidation, disclosure, and explicit cloud enablement. Cloud disable is
-   serialized against creation of a new provider request.
-4. **Load bounded evidence: implemented.** The root-bound managed archive
+   continuous display scope values and idempotently upsert chunks. Enqueueing
+   must next depend on the selected stage route rather than a global active
+   provider. Wake events are never the source of truth.
+4. **Configure processing routes: profile foundation implemented; routing
+   pending.** Endpoint, model, timeout, DPAPI credentials, and synthetic tests
+   exist. The next schema adds reusable profile lists, independent privacy and
+   timeline bindings, user-selected privacy match/error policy, and revision-
+   checked request admission without local/remote trust inference.
+5. **Load bounded evidence: implemented.** The root-bound managed archive
    accepts only canonical chunk identifiers, selects at most 32 JPEG frames
    under a 12 MiB request budget, and verifies source plus per-frame hashes. No
    derived evidence directory or video decode is involved.
-5. **Analyze and commit: implemented and integration-tested.** The durable job
+6. **Analyze and commit: timeline stage implemented; optional privacy stage
+   pending.** The durable job
    state machine validates provider output, rechecks readiness/revision, and
    atomically commits normalized Timeline entries with completion. Retry,
    timeout, cancellation, lease recovery, stale responses, completed-version
    idempotency, and user-edit protection use persisted state.
-6. **Expose truth in the UI: implemented, acceptance smoke pending.** Timeline
+7. **Expose truth in the UI: partial.** Timeline
    projects unprocessed chunks, job attempts/failures, and editable normalized
    results; provider configuration is available in Settings. A compact command-
    area indicator opens stable checking, running, waiting, recent-summary, and
@@ -1837,30 +1959,33 @@ Current implementation status follows the end-to-end order:
    batch results until the queue is drained, while data revisions still advance
    only for batches that persist changes. The narrow toolbar collapses commands
    to stable icon widths and constrains the status Flyout to available width.
-   Final recording-state, accessibility, and clean-profile retry smoke remains
-   acceptance work.
+   Settings navigation, provider lists and stage assignment, separate processing
+   status, statistics, final recording-state, accessibility, and clean-profile
+   retry smoke remain acceptance work.
 
 P0 acceptance requires one clean-profile Windows x64 run to demonstrate all of
 the following:
 
-- with cloud analysis off, recording creates a visible local unprocessed
+- with all provider stages off, recording creates a visible local unprocessed
   interval and performs no network request;
-- after a provider is saved, synthetically tested, disclosed, and enabled, a
-  newly recorded chunk reaches a normalized, editable timeline entry using only
-  bounded canonical JPEG evidence;
+- after any compatible provider is saved, tested, disclosed, and bound to
+  `TimelineAnalysis`, a newly recorded chunk reaches a normalized, editable
+  timeline entry using bounded canonical JPEG evidence;
+- privacy inspection can be disabled, assigned to the same profile as timeline
+  analysis, or assigned to a different profile without changing capture;
+- privacy match/error policies exercise audit, redaction, hold, review, and
+  user-selected pass-through behavior, and a remote privacy fixture receives
+  original evidence only after that exact route is enabled and disclosed;
 - forced termination after chunk publication, extraction, provider response,
   and commit is recoverable without duplicate chunks, jobs, or timeline entries;
-- lock, secure desktop, RDP, presentation, display change, sleep, exclusion,
-  consent revocation, and shutdown stop or pause persistence before stale
-  evidence can advance;
-- default application protection pauses/rebuilds on excluded or unresolved
-  foreground targets, while separately re-consented `AllowAllApplications`
-  records the display pinned at Start across ordinary application and
-  cross-display focus switches without recovery-state churn, target movement,
-  or partial-chunk loss; topology, WTS, power, storage, consent, and explicit
-  Stop still revoke or terminate fail closed, and another target display is
-  selected only after Stop completes and WinDayFlow is moved there for a new
-  Start;
+- lock, secure desktop, display/session loss, sleep, storage, consent revocation,
+  fatal capture errors, and shutdown stop or pause persistence with an accurate
+  visible reason;
+- RDP, presentation, foreground changes, unresolved optional identity,
+  exclusions, and provider/privacy-stage failures do not interrupt a healthy
+  local archive; an enabled no-send rule prevents request creation instead;
+- capture state agrees with native persistence heartbeat within two configured
+  capture intervals and never reports privacy protection while frames persist;
 - provider authentication, rate-limit, timeout, malformed-output, storage, and
   missing-evidence failures remain visible and retryable or terminal according
   to their stable disposition; and
@@ -1882,8 +2007,8 @@ change. Analysis remains managed code over the canonical archive.
   every reused source or shipped third-party asset.
 - Record ADRs for interop, SQLite access, packaging, capture/context cadence,
   evidence bounds, and the Windows App SDK servicing channel.
-- Define the first-run consent contract, sensitive-context policy, cloud
-  disclosure contract, and resource/performance benchmark protocol.
+- Define the first-run recording consent, provider-route disclosure, optional
+  privacy-stage policy, and resource/performance benchmark protocol.
 
 Exit criterion: clean build and tests on a supported Windows CI runner, with
 source provenance, privacy gates, and benchmark protocols reviewed and versioned.
@@ -1896,13 +2021,14 @@ source provenance, privacy gates, and benchmark protocols reviewed and versioned
 - Port the native regression suite.
 - Build a minimal WinUI capture diagnostic surface with first-run consent,
   visible state, and one-action pause/resume.
-- Enforce application/window exclusions, sensitive-context rules, and lock,
-  secure-desktop, Remote Desktop, presentation, sleep, and session transitions
-  before evidence is persisted.
+- Enforce only lock, secure desktop, display/session loss, storage, user intent,
+  consent, fatal runtime, and shutdown at the persistence boundary. Feed bounded
+  application/window context into metadata and provider-request policy without
+  interrupting capture.
 
 Exit criterion: repeatable recording, pause/resume, display switch, stop,
-extraction, exclusion, privacy-state transitions, and clean shutdown without
-Flutter; capture cannot begin without recorded consent.
+extraction, no-send request policy, hard-gate transitions, and clean shutdown
+without Flutter; capture cannot begin without recorded consent.
 
 ### Phase 2: Reliable Timeline Vertical Slice
 
@@ -1912,15 +2038,16 @@ Flutter; capture cannot begin without recorded consent.
 - Build on the implemented manual create, edit, and delete path by adding the
   deterministic unprocessed-interval projection and promotion before requiring
   any provider response.
-- Add the OpenAI-compatible provider behind explicit enablement, provider and
-  endpoint disclosure, bounded evidence preview, and payload-free request audit.
+- Add reusable OpenAI-compatible profiles behind per-stage enablement, provider
+  and endpoint disclosure, bounded evidence preview, and payload-free invocation
+  audit. Keep privacy and timeline bindings independent.
 - Extend the implemented WinUI manual timeline with observations, analyzed
   activities, and merge rules.
 
 Exit criterion: with providers disabled, capture produces visible unprocessed
 intervals that can be inspected and promoted manually; with a provider enabled,
 capture-to-normalized-timeline works end to end, survives forced restart, and
-makes no cloud request before the user can verify what will leave the device.
+makes no provider request before the user can verify what will leave the device.
 
 ### Phase 3: Review and Editing
 
@@ -1946,8 +2073,8 @@ Exit criterion: weekly numerical results are reproducible from timeline data.
 
 ### Phase 6: Chat and Providers
 
-- Add controlled retrieval tools, cited chat, FTS5, streaming, and local-provider
-  adapters.
+- Add controlled retrieval tools, cited chat, FTS5, streaming, and additional
+  standard-API provider adapters without deployment-location trust policy.
 
 Exit criterion: answers cite navigable timeline entries and cannot exceed the
 configured data/query boundary.
@@ -1971,20 +2098,24 @@ and uninstall checklist on the supported Windows baseline.
   high-contrast, keyboard, Narrator, and reduced-motion behavior.
 - C++ capture component passes ported native regression tests.
 - Capture, analysis, and persistence recover after abnormal termination.
-- The user can always tell whether capture is active, paused, excluded, failed,
-  or blocked, and can pause it with one direct action.
-- First-run consent, application/window exclusions, sensitive-context rules,
-  lock/RDP/presentation policies, retention, and destructive-action checks pass.
-- Before cloud analysis, the user can verify the provider, endpoint, evidence,
-  and metadata that may leave the device; completed requests are locally
-  auditable without retaining their payloads.
+- The user can always tell whether capture is recording, paused, stopped, or
+  needs attention, and can pause it with one direct action. Privacy and provider
+  processing states are visible separately.
+- First-run consent, the hard capture gate, no-send rules, optional privacy-stage
+  policy, retention, and destructive-action checks pass.
+- Before any provider stage is enabled, the user can verify its provider,
+  endpoint, evidence, metadata, and configured failure behavior; completed
+  requests are locally auditable without retaining their payloads.
 - Timeline entries are inspectable and editable, and user corrections are
   protected from automatic overwrite.
 - Daily standup works from the same canonical timeline data.
+- Statistics reproduces its documented duration, frame, deduplication,
+  invocation, and storage definitions from canonical data and fixture queries.
 - With AI and the network unavailable, users can still capture, pause, review,
   inspect unprocessed intervals, create and edit manual entries, search, compute
   explicitly scoped deterministic metrics, and export their journal.
-- Cloud/local provider behavior and data disclosure are explicit and verifiable.
+- Per-stage provider behavior and data disclosure are explicit and verifiable;
+  the product does not assign trust from provider deployment location.
 - Existing QiDayflow data can be imported or a documented migration limitation
   is approved before release.
 - MSIX release and unpackaged development workflows are documented and tested.

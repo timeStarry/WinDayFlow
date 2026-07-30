@@ -13,6 +13,7 @@ internal sealed class NativeCaptureBackend
         "原生录制基础已加载；实时屏幕捕获能力尚未启用。";
     private const int MaximumEventDetailBytes = 1024 * 1024;
     private const uint PollTimeoutMilliseconds = 250;
+    private static readonly TimeSpan HealthPollInterval = TimeSpan.FromSeconds(2);
     internal const uint StopTimeoutMilliseconds = 5_000;
     internal const uint AuthorizedLifecycleConfirmationTimeoutMilliseconds =
         StopTimeoutMilliseconds;
@@ -46,6 +47,8 @@ internal sealed class NativeCaptureBackend
     private TaskCompletionSource _eventPumpObservationChanged =
         CreateEventPumpObservationSource();
     private CaptureStatus _status;
+    private CaptureHealthSnapshot _healthSnapshot = CaptureHealthSnapshot.Empty;
+    private long _captureIntervalMilliseconds;
     private EventHandler<CaptureStatusChangedEventArgs>? _statusChanged;
     private EventHandler<NativeCaptureChunkCommittedEventArgs>? _chunkCommitted;
     private EventHandler<CaptureChunkCommittedEventArgs>? _chunkCommittedHint;
@@ -91,6 +94,7 @@ internal sealed class NativeCaptureBackend
         ArgumentNullException.ThrowIfNull(configuration);
         ArgumentNullException.ThrowIfNull(initialPrivacyContext);
         _nativeApi = nativeApi ?? throw new ArgumentNullException(nameof(nativeApi));
+        _captureIntervalMilliseconds = configuration.CaptureIntervalMilliseconds;
         EnsureSupportedPlatform();
 
         var probe = Probe(_nativeApi);
@@ -179,6 +183,17 @@ internal sealed class NativeCaptureBackend
             lock (_statusSync)
             {
                 return _status;
+            }
+        }
+    }
+
+    public CaptureHealthSnapshot CurrentHealthSnapshot
+    {
+        get
+        {
+            lock (_statusSync)
+            {
+                return _healthSnapshot;
             }
         }
     }
@@ -390,6 +405,9 @@ internal sealed class NativeCaptureBackend
                     captureIntervalMilliseconds,
                     chunkDurationMilliseconds),
                 "update_timing");
+            Volatile.Write(
+                ref _captureIntervalMilliseconds,
+                captureIntervalMilliseconds);
         }
         finally
         {
@@ -988,15 +1006,11 @@ internal sealed class NativeCaptureBackend
     {
         var nativeContext = new NativeCapturePrivacyContextV1
         {
-            StructSize = NativeCaptureAbiContract.X64StructureSize,
+            StructSize = NativeCaptureAbiContract.PrivacyContextStructureSize,
             AbiVersion = NativeCaptureAbiContract.AbiVersion,
             ConsentGranted = (int)context.ConsentGranted,
             SessionUnlocked = (int)context.SessionUnlocked,
             SecureDesktopClear = (int)context.SecureDesktopClear,
-            RemoteSessionAllowed = (int)context.RemoteSessionAllowed,
-            PresentationAllowed = (int)context.PresentationAllowed,
-            ApplicationAllowed = (int)context.ApplicationAllowed,
-            WindowAllowed = (int)context.WindowAllowed,
             StorageAvailable = (int)context.StorageAvailable,
             PolicyRevision = context.RuntimePolicyRevision,
         };
@@ -1036,36 +1050,15 @@ internal sealed class NativeCaptureBackend
         var context = authorization.PrivacyContext;
         var target = authorization.Target;
         var targetPresent = target.State == NativeCaptureTargetIdentityState.Present;
-        var displayWide = targetPresent
-            && target.Scope == NativeCaptureAuthorizationScope.DisplayWide;
         var nativeAuthorization = new NativeCaptureRuntimeAuthorizationV1
         {
             StructSize = NativeCaptureAbiContract.X64RuntimeAuthorizationStructureSize,
             AbiVersion = NativeCaptureAbiContract.AbiVersion,
             RuntimePolicyRevision = context.RuntimePolicyRevision,
             TargetEpoch = targetPresent ? target.TargetEpoch : 0,
-            TargetWindowHandle = targetPresent && !displayWide
-                ? target.WindowHandle
-                : 0,
-            TargetProcessCreationTime100ns = targetPresent && !displayWide
-                ? target.ProcessCreationTime100ns
-                : 0,
-            TargetProcessId = targetPresent && !displayWide
-                ? target.ProcessId
-                : 0,
-            TargetFlags = targetPresent
-                ? NativeCaptureRuntimeAuthorizationV1.TargetDisplayPresent
-                    | (displayWide
-                        ? NativeCaptureRuntimeAuthorizationV1.TargetDisplayWideScope
-                        : NativeCaptureRuntimeAuthorizationV1.TargetPresent)
-                : 0,
             ConsentGranted = (int)context.ConsentGranted,
             SessionUnlocked = (int)context.SessionUnlocked,
             SecureDesktopClear = (int)context.SecureDesktopClear,
-            RemoteSessionAllowed = (int)context.RemoteSessionAllowed,
-            PresentationAllowed = (int)context.PresentationAllowed,
-            ApplicationAllowed = (int)context.ApplicationAllowed,
-            WindowAllowed = (int)context.WindowAllowed,
             StorageAvailable = (int)context.StorageAvailable,
             TargetDisplayMonitorHandle = targetPresent
                 ? target.DisplayMonitorHandle
@@ -1193,7 +1186,6 @@ internal sealed class NativeCaptureBackend
 
             nativeAuthorization.TargetDisplayDeviceKeyUtf8Length = 0;
             nativeAuthorization.TargetDisplayMonitorHandle = 0;
-            nativeAuthorization.TargetFlags = 0;
         }
     }
 
@@ -1232,6 +1224,7 @@ internal sealed class NativeCaptureBackend
     private async Task PollEventsAsync()
     {
         var detailBuffer = new byte[4_096];
+        var nextHealthPollAt = DateTimeOffset.UtcNow;
         Exception? pumpFailure = null;
         try
         {
@@ -1239,6 +1232,14 @@ internal sealed class NativeCaptureBackend
             {
                 try
                 {
+                    var now = DateTimeOffset.UtcNow;
+                    if (Capabilities.HasFlag(NativeCaptureCapabilities.HealthSnapshot)
+                        && now >= nextHealthPollAt)
+                    {
+                        PollHealthSnapshot(now);
+                        nextHealthPollAt = now + HealthPollInterval;
+                    }
+
                     var captureEvent = NativeCaptureEventV1.Create();
                     var result = _nativeApi.PollEvent(
                         _handle,
@@ -1308,6 +1309,91 @@ internal sealed class NativeCaptureBackend
         finally
         {
             MarkEventPumpExited(pumpFailure);
+        }
+    }
+
+    private void PollHealthSnapshot(DateTimeOffset observedAt)
+    {
+        var native = NativeCaptureHealthSnapshotV2.Create();
+        var result = _nativeApi.GetHealthSnapshot(_handle, ref native);
+        if (result != NativeCaptureResult.Ok)
+        {
+            throw new NativeCaptureException(result, "get_health_snapshot");
+        }
+        if (native.StructSize < NativeCaptureAbiContract.HealthSnapshotStructureSize
+            || native.AbiVersion != NativeCaptureAbiContract.AbiVersion
+            || !Enum.IsDefined((CaptureState)native.State)
+            || !Enum.IsDefined((CaptureReasonCode)native.Reason)
+            || native.BlackFrameCount + native.DuplicateFrameCount
+                + native.RetainedFrameCount > native.SampledFrameCount)
+        {
+            throw new InvalidDataException("The native capture health snapshot is invalid.");
+        }
+
+        var snapshot = new CaptureHealthSnapshot(
+            (CaptureState)native.State,
+            (CaptureReasonCode)native.Reason,
+            FromOptionalUnixMilliseconds(native.LastSuccessfulSampleUnixMilliseconds),
+            FromOptionalUnixMilliseconds(native.LastRetainedFrameUnixMilliseconds),
+            native.SampledFrameCount,
+            native.BlackFrameCount,
+            native.DuplicateFrameCount,
+            native.RetainedFrameCount,
+            native.Revision);
+        lock (_statusSync)
+        {
+            if (!_disposed && snapshot.Revision >= _healthSnapshot.Revision)
+            {
+                _healthSnapshot = snapshot;
+            }
+        }
+
+        var current = CurrentStatus;
+        if (snapshot.NativeState != CaptureState.Recording)
+        {
+            return;
+        }
+        var heartbeat = snapshot.LastSuccessfulSampleAt ?? current.ChangedAt;
+        var staleAfter = TimeSpan.FromMilliseconds(
+            Math.Max(500L, checked(
+                Volatile.Read(ref _captureIntervalMilliseconds) * 2L)));
+        if (observedAt - heartbeat > staleAfter)
+        {
+            UpdateStatus(new CaptureStatus(
+                CaptureState.NeedsAttention,
+                observedAt,
+                "超过两个录制间隔未收到成功采样心跳。",
+                current.Sequence,
+                snapshot.GateReason == CaptureReasonCode.None
+                    ? CaptureReasonCode.BackendFault
+                    : snapshot.GateReason));
+        }
+        else if (current.State == CaptureState.NeedsAttention)
+        {
+            UpdateStatus(new CaptureStatus(
+                CaptureState.Recording,
+                observedAt,
+                "录制采样心跳已恢复。",
+                current.Sequence,
+                snapshot.GateReason));
+        }
+    }
+
+    private static DateTimeOffset? FromOptionalUnixMilliseconds(long value)
+    {
+        if (value <= 0)
+        {
+            return null;
+        }
+        try
+        {
+            return DateTimeOffset.FromUnixTimeMilliseconds(value);
+        }
+        catch (ArgumentOutOfRangeException exception)
+        {
+            throw new InvalidDataException(
+                "The native capture health snapshot contains an invalid timestamp.",
+                exception);
         }
     }
 
@@ -1808,8 +1894,14 @@ internal sealed class NativeCaptureBackend
         CaptureStatus previous;
         lock (_statusSync)
         {
+            var sameSequenceHealthProjection =
+                current.Sequence == _status.Sequence
+                && (current.State == CaptureState.NeedsAttention
+                    || _status.State == CaptureState.NeedsAttention);
             if (_disposed
-                || (_status.Sequence > 0 && current.Sequence <= _status.Sequence)
+                || (_status.Sequence > 0
+                    && current.Sequence <= _status.Sequence
+                    && !sameSequenceHealthProjection)
                 || current == _status)
             {
                 return;

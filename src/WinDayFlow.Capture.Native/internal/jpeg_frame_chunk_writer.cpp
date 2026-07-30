@@ -156,7 +156,11 @@ class JpegFrameChunkWriter::Impl final {
 
   JpegFrameChunkWriterResult AddFrame(
       std::span<const uint8_t> top_down_bgra,
-      uint64_t offset_milliseconds) noexcept {
+      uint64_t offset_milliseconds,
+      JpegFrameDisposition* disposition) noexcept {
+    if (disposition != nullptr) {
+      *disposition = JpegFrameDisposition::kDuplicate;
+    }
     const uint64_t required =
         static_cast<uint64_t>(config_.width) * config_.height * 4U;
     if (!active_ || factory_ == nullptr || top_down_bgra.size() != required ||
@@ -180,7 +184,23 @@ class JpegFrameChunkWriter::Impl final {
     ++captured_frame_count_;
     last_capture_offset_ = offset_milliseconds;
     if (!last_retained_.has_value()) {
-      return AppendRetained(std::move(current));
+      const bool duplicate_of_previous_chunk =
+          previous_retained_signature_.has_value() &&
+          previous_retained_sha256_.has_value() &&
+          (IsNearDuplicate(*previous_retained_signature_, current.signature) ||
+           *previous_retained_sha256_ == current.sha256);
+      if (duplicate_of_previous_chunk) {
+        if (pending_final_.has_value()) {
+          SecureClear(&pending_final_->jpeg);
+        }
+        pending_final_ = std::move(current);
+        return JpegFrameChunkWriterResult::kOk;
+      }
+      const JpegFrameChunkWriterResult appended = AppendRetained(std::move(current));
+      if (appended == JpegFrameChunkWriterResult::kOk && disposition != nullptr) {
+        *disposition = JpegFrameDisposition::kRetained;
+      }
+      return appended;
     }
 
     const bool duplicate =
@@ -198,7 +218,11 @@ class JpegFrameChunkWriter::Impl final {
       SecureClear(&pending_final_->jpeg);
       pending_final_.reset();
     }
-    return AppendRetained(std::move(current));
+    const JpegFrameChunkWriterResult appended = AppendRetained(std::move(current));
+    if (appended == JpegFrameChunkWriterResult::kOk && disposition != nullptr) {
+      *disposition = JpegFrameDisposition::kRetained;
+    }
+    return appended;
   }
 
   JpegFrameChunkWriterResult Finalize(
@@ -206,15 +230,21 @@ class JpegFrameChunkWriter::Impl final {
       AtomicChunkPublication* publication) noexcept {
     if (!active_ || manifest == nullptr || publication == nullptr ||
         manifest->chunk_id != writer_.chunk_id() ||
-        manifest->captured_frame_count != captured_frame_count_ ||
+        manifest->captured_frame_count < manifest->black_frame_count ||
+        manifest->captured_frame_count - manifest->black_frame_count !=
+            captured_frame_count_ ||
         manifest->frame_width != config_.width ||
         manifest->frame_height != config_.height || !manifest->frames.empty() ||
         manifest->frame_byte_count != 0) {
       return JpegFrameChunkWriterResult::kInvalidArgument;
     }
     if (pending_final_.has_value()) {
-      const JpegFrameChunkWriterResult appended =
-          AppendRetained(std::move(*pending_final_));
+      const JpegFrameChunkWriterResult appended = last_retained_.has_value()
+          ? AppendRetained(std::move(*pending_final_))
+          : JpegFrameChunkWriterResult::kOk;
+      if (!last_retained_.has_value()) {
+        SecureClear(&pending_final_->jpeg);
+      }
       pending_final_.reset();
       if (appended != JpegFrameChunkWriterResult::kOk) {
         return appended;
@@ -222,6 +252,8 @@ class JpegFrameChunkWriter::Impl final {
     }
     manifest->frames = records_;
     manifest->frame_byte_count = total_frame_bytes_;
+    manifest->duplicate_frame_count =
+        captured_frame_count_ - static_cast<uint32_t>(records_.size());
     const AtomicChunkStoreResult prepared = writer_.Prepare(*manifest, publication);
     if (prepared != AtomicChunkStoreResult::kOk) {
       return JpegFrameChunkWriterResult::kStorageFailure;
@@ -267,6 +299,8 @@ class JpegFrameChunkWriter::Impl final {
 
   void ClearStateAfterPrepare() noexcept {
     if (last_retained_.has_value()) {
+      previous_retained_signature_ = last_retained_->signature;
+      previous_retained_sha256_ = last_retained_->sha256;
       SecureClear(&last_retained_->jpeg);
       last_retained_.reset();
     }
@@ -285,6 +319,8 @@ class JpegFrameChunkWriter::Impl final {
   JpegFrameChunkWriterConfig config_;
   std::optional<EncodedFrame> last_retained_;
   std::optional<EncodedFrame> pending_final_;
+  std::optional<FrameSignature> previous_retained_signature_;
+  std::optional<std::string> previous_retained_sha256_;
   std::vector<ChunkFrameManifest> records_;
   uint32_t captured_frame_count_ = 0;
   size_t total_frame_bytes_ = 0;
@@ -302,8 +338,9 @@ JpegFrameChunkWriterResult JpegFrameChunkWriter::Begin(
 }
 JpegFrameChunkWriterResult JpegFrameChunkWriter::AddFrame(
     std::span<const uint8_t> top_down_bgra,
-    uint64_t offset_milliseconds) noexcept {
-  return impl_->AddFrame(top_down_bgra, offset_milliseconds);
+    uint64_t offset_milliseconds,
+    JpegFrameDisposition* disposition) noexcept {
+  return impl_->AddFrame(top_down_bgra, offset_milliseconds, disposition);
 }
 JpegFrameChunkWriterResult JpegFrameChunkWriter::Finalize(
     ChunkManifest* manifest,

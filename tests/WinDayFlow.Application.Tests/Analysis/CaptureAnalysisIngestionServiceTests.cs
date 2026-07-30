@@ -1,6 +1,7 @@
 using WinDayFlow.Application.Ai;
 using WinDayFlow.Application.Analysis;
 using WinDayFlow.Application.Capture;
+using WinDayFlow.Application.Privacy;
 using WinDayFlow.Application.Settings;
 using WinDayFlow.Domain;
 using Xunit;
@@ -49,6 +50,38 @@ public sealed class CaptureAnalysisIngestionServiceTests
     }
 
     [Fact]
+    public async Task ThreeContinuousFifteenMinuteChunksCreateAFortyFiveMinuteWindow()
+    {
+        var chunks = new[]
+        {
+            CreateChunk("chunk-a", minuteOffset: 0, durationMinutes: 15),
+            CreateChunk("chunk-b", minuteOffset: 15, durationMinutes: 15),
+            CreateChunk("chunk-c", minuteOffset: 30, durationMinutes: 15),
+        };
+        var store = new TestCaptureAnalysisStore();
+        using var settings = await CreateSettingsAsync(cloudEnabled: true);
+        using var service = new CaptureAnalysisIngestionService(
+            new TestManifestScanner(chunks),
+            store,
+            store,
+            new TestFingerprintProvider(),
+            new TestProviderStore(CreateProfile(revision: 1)),
+            settings,
+            stageBindingStore: new TestStageBindingStore(enabled: true));
+
+        var result = await service.ReconcileAsync();
+
+        Assert.Equal(new CaptureAnalysisIngestionResult(3, 3, 3, true), result);
+        var finalWindow = Assert.Single(
+            store.EnqueuedWindows,
+            static members => members.Count == 3);
+        Assert.Equal(chunks.Select(static chunk => chunk.Id),
+            finalWindow.Select(static member => member.Chunk.Id));
+        Assert.Equal(TimeSpan.FromMinutes(45),
+            finalWindow[^1].ContributionRange.End - finalWindow[0].ContributionRange.Start);
+    }
+
+    [Fact]
     public async Task CloudOffStillIngestsEveryCommittedChunkWithoutEnqueueing()
     {
         var later = CreateChunk("chunk-b", minuteOffset: 1);
@@ -62,13 +95,55 @@ public sealed class CaptureAnalysisIngestionServiceTests
             store,
             new TestFingerprintProvider(),
             new TestProviderStore(CreateProfile(revision: 1)),
-            settings);
+            settings,
+            stageBindingStore: new TestStageBindingStore(enabled: false));
 
         var result = await service.ReconcileAsync();
 
         Assert.Equal(new CaptureAnalysisIngestionResult(2, 2, 0, false), result);
         Assert.Equal(["chunk-a", "chunk-b"], store.IngestOrder);
         Assert.Empty(store.Jobs);
+    }
+
+    [Fact]
+    public async Task NewChunkAttachesSafeRuleObservationMetadataBeforePersistence()
+    {
+        var chunk = CreateChunk("chunk-context", minuteOffset: 0);
+        var sample = new CaptureContextSample(
+            chunk.Id,
+            ordinal: 0,
+            chunk.Range.Start.AddSeconds(10),
+            application: null);
+        var scanner = new ContextManifestScanner(chunk, sample);
+        var store = new TestCaptureAnalysisStore();
+        var contextStore = new RecordingContextStore();
+        var match = new CaptureContextRuleMatch(
+            Guid.Parse("62c4141b-4cfa-43c0-b222-292f90adf86c"),
+            RuleRevision: 3);
+        using var settings = await CreateSettingsAsync(cloudEnabled: false);
+        using var service = new CaptureAnalysisIngestionService(
+            scanner,
+            store,
+            store,
+            new TestFingerprintProvider(),
+            new TestProviderStore(CreateProfile(revision: 1)),
+            settings,
+            stageBindingStore: new TestStageBindingStore(enabled: false),
+            contextStore: contextStore,
+            ruleObservations: new StaticRuleObservationSource(
+                new CaptureContextRuleEvaluation(
+                    ruleSetRevision: 7,
+                    applicationContextAvailable: true,
+                    windowContextAvailable: true,
+                    [match])));
+
+        await service.ReconcileAsync();
+
+        var persisted = Assert.Single(contextStore.Samples);
+        Assert.Equal(7, persisted.EvaluatedRuleSetRevision);
+        Assert.True(persisted.ApplicationContextAvailable);
+        Assert.True(persisted.WindowContextAvailable);
+        Assert.Equal(match, Assert.Single(persisted.RuleMatches));
     }
 
     [Fact]
@@ -91,7 +166,8 @@ public sealed class CaptureAnalysisIngestionServiceTests
             new TestProviderStore(CreateProfile(revision: 7)),
             settings,
             timeProvider: new FixedTimeProvider(
-                new DateTimeOffset(2026, 7, 23, 9, 30, 0, TimeSpan.Zero)));
+                new DateTimeOffset(2026, 7, 23, 9, 30, 0, TimeSpan.Zero)),
+            stageBindingStore: new TestStageBindingStore(enabled: true));
 
         var first = await service.ReconcileAsync();
         var firstJobs = store.Jobs.Values.OrderBy(static job => job.CaptureChunkId).ToArray();
@@ -114,7 +190,7 @@ public sealed class CaptureAnalysisIngestionServiceTests
     }
 
     [Fact]
-    public async Task CompletedAnalysisAtOlderProviderRevisionRecomputesFingerprintAndSkipsEnqueue()
+    public async Task CompletedAnalysisAtExactRouteInputSkipsEnqueue()
     {
         var chunk = CreateChunk("chunk-a", minuteOffset: 0);
         var scanner = new TestManifestScanner([chunk]);
@@ -122,7 +198,7 @@ public sealed class CaptureAnalysisIngestionServiceTests
         store.MarkCompletedAnalysis(
             chunk.Id,
             CaptureAnalysisIngestionOptions.DefaultAnalysisVersion,
-            CreateFingerprint(chunk).Value);
+            CreateTimelineInputFingerprint(chunk, revision: 2).Value);
         var fingerprints = new TestFingerprintProvider();
         using var settings = await CreateSettingsAsync(cloudEnabled: true);
         using var service = new CaptureAnalysisIngestionService(
@@ -131,7 +207,8 @@ public sealed class CaptureAnalysisIngestionServiceTests
             store,
             fingerprints,
             new TestProviderStore(CreateProfile(revision: 2)),
-            settings);
+            settings,
+            stageBindingStore: new TestStageBindingStore(enabled: true));
 
         var result = await service.ReconcileAsync();
 
@@ -143,7 +220,7 @@ public sealed class CaptureAnalysisIngestionServiceTests
     }
 
     [Fact]
-    public async Task CompletedAnalysisWithChangedFingerprintFailsClosedBeforeEnqueue()
+    public async Task CompletedAnalysisWithChangedInputDoesNotBlockNewJob()
     {
         var chunk = CreateChunk("chunk-a", minuteOffset: 0);
         var scanner = new TestManifestScanner([chunk]);
@@ -164,13 +241,14 @@ public sealed class CaptureAnalysisIngestionServiceTests
             store,
             fingerprints,
             new TestProviderStore(CreateProfile(revision: 2)),
-            settings);
+            settings,
+            stageBindingStore: new TestStageBindingStore(enabled: true));
 
-        await Assert.ThrowsAsync<CaptureChunkConflictException>(
-            () => service.ReconcileAsync());
+        var result = await service.ReconcileAsync();
 
+        Assert.Equal(new CaptureAnalysisIngestionResult(1, 1, 1, true), result);
         Assert.Equal(1, fingerprints.CallCount);
-        Assert.Empty(store.Jobs);
+        Assert.Single(store.Jobs);
     }
 
     [Fact]
@@ -195,7 +273,8 @@ public sealed class CaptureAnalysisIngestionServiceTests
             new CaptureAnalysisIngestionOptions(
                 "timeline-v2",
                 CaptureAnalysisIngestionOptions.DefaultEvidencePolicyVersion,
-                maxAttempts: 5));
+                maxAttempts: 5),
+            stageBindingStore: new TestStageBindingStore(enabled: true));
 
         var result = await service.ReconcileAsync();
 
@@ -222,7 +301,8 @@ public sealed class CaptureAnalysisIngestionServiceTests
             store,
             new TestFingerprintProvider(),
             providerStore,
-            settings);
+            settings,
+            stageBindingStore: new TestStageBindingStore(enabled: true));
 
         var result = await service.ReconcileAsync();
 
@@ -246,7 +326,8 @@ public sealed class CaptureAnalysisIngestionServiceTests
             store,
             new TestFingerprintProvider(),
             providerStore,
-            settings);
+            settings,
+            stageBindingStore: new TestStageBindingStore(enabled: true));
 
         var result = await service.ReconcileAsync();
 
@@ -268,7 +349,8 @@ public sealed class CaptureAnalysisIngestionServiceTests
             store,
             new TestFingerprintProvider(),
             new TestProviderStore(CreateProfile(revision: 2)),
-            settings);
+            settings,
+            stageBindingStore: new TestStageBindingStore(enabled: true));
 
         var result = await service.ReconcileAsync();
 
@@ -278,13 +360,16 @@ public sealed class CaptureAnalysisIngestionServiceTests
         Assert.Empty(store.Jobs);
     }
 
-    private static CaptureChunk CreateChunk(string id, int minuteOffset)
+    private static CaptureChunk CreateChunk(
+        string id,
+        int minuteOffset,
+        int durationMinutes = 1)
     {
         var start = new DateTimeOffset(2026, 7, 23, 8, minuteOffset, 0, TimeSpan.Zero);
         return new CaptureChunk(
             id,
             new EvidenceRelativePath($"chunks/{id}/manifest.json"),
-            new TimeRange(start, start.AddMinutes(1)),
+            new TimeRange(start, start.AddMinutes(durationMinutes)),
             capturedFrameCount: 40,
             frameCount: 30,
             frameWidth: 1280,
@@ -292,8 +377,8 @@ public sealed class CaptureAnalysisIngestionServiceTests
             frameByteCount: 1_024,
             persistenceGeneration: 11,
             targetEpoch: 12,
-            committedAtUtc: start.AddMinutes(1),
-            ingestedAtUtc: start.AddMinutes(1));
+            committedAtUtc: start.AddMinutes(durationMinutes),
+            ingestedAtUtc: start.AddMinutes(durationMinutes));
     }
 
     private static AiProviderProfileSnapshot CreateProfile(long revision)
@@ -320,15 +405,41 @@ public sealed class CaptureAnalysisIngestionServiceTests
         return new CaptureChunkFingerprint(Convert.ToHexString(source));
     }
 
+    private static CaptureChunkFingerprint CreateTimelineInputFingerprint(
+        CaptureChunk chunk,
+        long revision)
+    {
+        var sourceFingerprint = CreateFingerprint(chunk);
+        var members = CaptureAnalysisIngestionService.BuildWindowMembers(
+            [chunk],
+            new Dictionary<string, CaptureChunkFingerprint>(StringComparer.Ordinal)
+            {
+                [chunk.Id] = sourceFingerprint,
+            },
+            chunk);
+        var selections = new Dictionary<string, PrivacyEvidenceSelection>(StringComparer.Ordinal)
+        {
+            [chunk.Id] = new(
+                PrivacyEvidenceStatus.ReadyOriginal,
+                sourceFingerprint,
+                chunk.ManifestPath,
+                ScreeningId: null,
+                ScreeningRevision: null),
+        };
+        var evidenceFingerprint = CaptureAnalysisIngestionService.ComputeWindowFingerprint(
+            members,
+            selections);
+        return CaptureAnalysisIngestionService.BindRouteFingerprint(
+            evidenceFingerprint,
+            CreateProfile(revision),
+            new TestStageBindingStore(enabled: true).Binding);
+    }
+
     private static async Task<AppSettingsService> CreateSettingsAsync(bool cloudEnabled)
     {
-        var initial = AppSettings.Default;
-        var settings = new AppSettingsService(new TestSettingsRepository(new AppSettings(
-            initial.Theme,
-            initial.CaptureEnabled,
-            cloudEnabled,
-            initial.RecordingConsent,
-            initial.CapturePrivacy)));
+        _ = cloudEnabled;
+        var settings = new AppSettingsService(
+            new TestSettingsRepository(AppSettings.Default));
         await settings.InitializeAsync();
         return settings;
     }
@@ -342,6 +453,53 @@ public sealed class CaptureAnalysisIngestionServiceTests
             cancellationToken.ThrowIfCancellationRequested();
             return Task.FromResult(chunks);
         }
+    }
+
+    private sealed class ContextManifestScanner(
+        CaptureChunk chunk,
+        CaptureContextSample sample)
+        : ICaptureManifestScanner,
+          ICaptureManifestContextSource
+    {
+        public Task<IReadOnlyList<CaptureChunk>> ScanCommittedAsync(
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult<IReadOnlyList<CaptureChunk>>([chunk]);
+
+        public Task<IReadOnlyList<CaptureContextSample>> ReadContextAsync(
+            CaptureChunk requestedChunk,
+            CancellationToken cancellationToken = default)
+        {
+            Assert.Equal(chunk.Id, requestedChunk.Id);
+            return Task.FromResult<IReadOnlyList<CaptureContextSample>>([sample]);
+        }
+    }
+
+    private sealed class RecordingContextStore : ICaptureContextStore
+    {
+        public IReadOnlyList<CaptureContextSample> Samples { get; private set; } = [];
+
+        public Task ReplaceAsync(
+            CaptureChunk chunk,
+            IReadOnlyList<CaptureContextSample> samples,
+            CaptureExclusionRuleSet rules,
+            CancellationToken cancellationToken = default)
+        {
+            Samples = samples.ToArray();
+            return Task.CompletedTask;
+        }
+
+        public Task<IReadOnlyList<CaptureContextSample>> ListAsync(
+            string captureChunkId,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult(Samples);
+    }
+
+    private sealed class StaticRuleObservationSource(
+        CaptureContextRuleEvaluation evaluation)
+        : ICaptureRuleObservationSource
+    {
+        public CaptureContextRuleEvaluation? FindAt(DateTimeOffset sampledAt) =>
+            evaluation;
     }
 
     private sealed class SequencedManifestScanner(
@@ -372,7 +530,10 @@ public sealed class CaptureAnalysisIngestionServiceTests
         }
     }
 
-    private sealed class TestCaptureAnalysisStore : ICaptureChunkStore, IAnalysisJobStore
+    private sealed class TestCaptureAnalysisStore :
+        ICaptureChunkStore,
+        IAnalysisJobStore,
+        IAnalysisWindowStore
     {
         private readonly Dictionary<string, CaptureChunk> _chunks = new(StringComparer.Ordinal);
         private readonly Dictionary<string, AnalysisJob> _jobs = new(StringComparer.Ordinal);
@@ -383,6 +544,8 @@ public sealed class CaptureAnalysisIngestionServiceTests
             _completedAnalyses = [];
 
         public List<string> IngestOrder { get; } = [];
+
+        public List<IReadOnlyList<AnalysisWindowMember>> EnqueuedWindows { get; } = [];
 
         public IReadOnlyDictionary<string, AnalysisJob> Jobs => _jobs;
 
@@ -426,7 +589,8 @@ public sealed class CaptureAnalysisIngestionServiceTests
                 pendingJob.CaptureChunkId,
                 pendingJob.ProviderProfileId,
                 pendingJob.ProviderProfileRevision,
-                pendingJob.AnalysisVersion);
+                pendingJob.AnalysisVersion,
+                pendingJob.InputFingerprint);
             if (_jobs.TryGetValue(key, out var existing))
             {
                 Assert.Equal(existing.Id, pendingJob.Id);
@@ -437,6 +601,21 @@ public sealed class CaptureAnalysisIngestionServiceTests
             _jobs.Add(key, pendingJob);
             return Task.FromResult(new AnalysisJobEnqueueResult(pendingJob, Created: true));
         }
+
+        public Task<AnalysisJobEnqueueResult> EnqueueWindowAsync(
+            AnalysisJob pendingJob,
+            IReadOnlyList<AnalysisWindowMember> members,
+            CancellationToken cancellationToken = default)
+        {
+            Assert.NotEmpty(members);
+            EnqueuedWindows.Add(members.ToArray());
+            return EnqueueAsync(pendingJob, cancellationToken);
+        }
+
+        public Task<AnalysisWindowSnapshot?> GetWindowAsync(
+            Guid jobId,
+            CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
 
         Task<AnalysisJob?> IAnalysisJobStore.GetAsync(
             Guid jobId,
@@ -449,39 +628,10 @@ public sealed class CaptureAnalysisIngestionServiceTests
             CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var completed = _completedAnalyses
-                .Where(item =>
-                    string.Equals(
-                        item.CaptureChunkId,
-                        captureChunkId,
-                        StringComparison.Ordinal)
-                    && string.Equals(
-                        item.AnalysisVersion,
-                        analysisVersion,
-                        StringComparison.Ordinal))
-                .ToArray();
-            var jobs = _jobs.Values
-                .Where(job =>
-                    string.Equals(
-                        job.CaptureChunkId,
-                        captureChunkId,
-                        StringComparison.Ordinal)
-                    && string.Equals(
-                        job.AnalysisVersion,
-                        analysisVersion,
-                        StringComparison.Ordinal))
-                .Select(static job => job.InputFingerprint);
-            if (completed.Select(static item => item.InputFingerprint)
-                .Concat(jobs)
-                .Any(value => !string.Equals(
-                    value,
-                    inputFingerprint,
-                    StringComparison.Ordinal)))
-            {
-                throw new CaptureChunkConflictException(captureChunkId);
-            }
-
-            return Task.FromResult(completed.Length > 0);
+            return Task.FromResult(_completedAnalyses.Contains((
+                captureChunkId,
+                analysisVersion,
+                inputFingerprint)));
         }
 
         public Task<AnalysisJob?> TryClaimNextAsync(
@@ -532,26 +682,101 @@ public sealed class CaptureAnalysisIngestionServiceTests
     {
         private int _readIndex;
 
-        public Task<AiProviderProfileSnapshot?> GetActiveAsync(
+        public Task<IReadOnlyList<AiProviderProfileSnapshot>> ListAsync(
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.FromResult<IReadOnlyList<AiProviderProfileSnapshot>>(
+                snapshots.OfType<AiProviderProfileSnapshot>().TakeLast(1).ToArray());
+        }
+
+        public Task<AiProviderProfileSnapshot?> GetAsync(
+            Guid profileId,
             CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
             var index = Math.Min(_readIndex++, snapshots.Length - 1);
-            return Task.FromResult(snapshots[index]);
+            var snapshot = snapshots[index];
+            return Task.FromResult(snapshot?.Profile.Id == profileId ? snapshot : null);
         }
 
-        public Task<AiProviderProfileSnapshot> SaveActiveAsync(
+        public Task<AiProviderProfileSnapshot> CreateAsync(
             AiProviderProfile profile,
-            long? expectedRevision,
             AiProviderCredentialUpdate credentialUpdate,
             DateTimeOffset changedAtUtc,
             CancellationToken cancellationToken = default) => throw new NotSupportedException();
 
-        public Task<AiProviderProfileSnapshot?> MarkValidatedAsync(
+        public Task<AiProviderProfileSnapshot> UpdateAsync(
+            AiProviderProfile profile,
+            long expectedRevision,
+            AiProviderCredentialUpdate credentialUpdate,
+            DateTimeOffset changedAtUtc,
+            CancellationToken cancellationToken = default) => throw new NotSupportedException();
+
+        public Task DeleteAsync(
             Guid profileId,
             long expectedRevision,
-            DateTimeOffset validatedAtUtc,
             CancellationToken cancellationToken = default) => throw new NotSupportedException();
+    }
+
+    private sealed class TestStageBindingStore(bool enabled) : IAnalysisStageBindingStore
+    {
+        private static readonly Guid ProviderId = CreateProfile(revision: 1).Profile.Id;
+
+        public AnalysisStageBinding Binding { get; } = new(
+            AnalysisStage.TimelineAnalysis,
+            enabled,
+            enabled ? ProviderId : null,
+            routeRevision: 1);
+
+        public Task<IReadOnlyList<AnalysisStageBinding>> ListAsync(
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult<IReadOnlyList<AnalysisStageBinding>>([Binding]);
+
+        public Task<AnalysisStageBinding> GetAsync(
+            AnalysisStage stage,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult(stage == AnalysisStage.TimelineAnalysis
+                ? Binding
+                : new AnalysisStageBinding(
+                    AnalysisStage.PrivacyInspection,
+                    enabled: false,
+                    providerProfileId: null,
+                    routeRevision: 1));
+
+        public Task<AnalysisStageBinding> SaveAsync(
+            AnalysisStage stage,
+            bool enabled,
+            Guid? providerProfileId,
+            long expectedRouteRevision,
+            PrivacyStageOptions? privacyOptions,
+            DateTimeOffset changedAtUtc,
+            CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+
+        public Task<ProviderStageValidation?> GetValidationAsync(
+            Guid profileId,
+            long profileRevision,
+            AnalysisStage stage,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult<ProviderStageValidation?>(
+                enabled
+                    && profileId == ProviderId
+                    && stage == AnalysisStage.TimelineAnalysis
+                        ? new ProviderStageValidation(
+                            profileId,
+                            profileRevision,
+                            stage,
+                            new DateTimeOffset(2026, 7, 23, 8, 0, 0, TimeSpan.Zero))
+                        : null);
+
+        public Task<ProviderStageValidation> MarkValidatedAsync(
+            Guid profileId,
+            long profileRevision,
+            AnalysisStage stage,
+            DateTimeOffset validatedAtUtc,
+            CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
     }
 
     private sealed class TestSettingsRepository(AppSettings settings)

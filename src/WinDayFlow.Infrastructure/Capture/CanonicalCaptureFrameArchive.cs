@@ -46,27 +46,16 @@ public sealed class CanonicalCaptureFrameArchive : ICaptureFrameArchive
         var schemaVersion = ReadUInt32(root, "schemaVersion");
         RequireExactProperties(
             root,
-            schemaVersion == 2
-                ? [
-                    "schemaVersion",
-                    "captureScope",
-                    "chunkId",
-                    "startTimeUnixMs",
-                    "endTimeUnixMs",
-                    "authorization",
-                    "frames",
-                ]
-                : [
-                    "schemaVersion",
-                    "captureScope",
-                    "chunkId",
-                    "startTimeUnixMs",
-                    "endTimeUnixMs",
-                    "authorization",
-                    "application",
-                    "frames",
-                ]);
-        if (schemaVersion is not (2 or 3)
+            "schemaVersion",
+            "captureScope",
+            "chunkId",
+            "startTimeUnixMs",
+            "endTimeUnixMs",
+            "authorization",
+            "application",
+            "contextSamples",
+            "frames");
+        if (schemaVersion != 4
             || ReadString(root, "chunkId") != chunk.Id
             || DateTimeOffset.FromUnixTimeMilliseconds(ReadInt64(root, "startTimeUnixMs"))
                     .ToUniversalTime() != chunk.Range.Start.ToUniversalTime()
@@ -82,7 +71,9 @@ public sealed class CanonicalCaptureFrameArchive : ICaptureFrameArchive
             frames,
             "format",
             "quality",
-            "capturedFrameCount",
+            "sampledFrameCount",
+            "blackFrameCount",
+            "duplicateFrameCount",
             "retainedFrameCount",
             "width",
             "height",
@@ -91,7 +82,9 @@ public sealed class CanonicalCaptureFrameArchive : ICaptureFrameArchive
         var items = frames.GetProperty("items");
         if (ReadString(frames, "format") != "jpeg"
             || ReadUInt32(frames, "quality") != 82
-            || ReadUInt32(frames, "capturedFrameCount") != chunk.CapturedFrameCount
+            || ReadUInt32(frames, "sampledFrameCount") != chunk.CapturedFrameCount
+            || ReadUInt32(frames, "blackFrameCount") != chunk.BlackFrameCount
+            || ReadUInt32(frames, "duplicateFrameCount") != chunk.DuplicateFrameCount
             || ReadUInt32(frames, "retainedFrameCount") != chunk.FrameCount
             || ReadUInt32(frames, "width") != chunk.FrameWidth
             || ReadUInt32(frames, "height") != chunk.FrameHeight

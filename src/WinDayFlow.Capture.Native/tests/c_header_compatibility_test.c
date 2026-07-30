@@ -5,32 +5,6 @@
 #include <stdio.h>
 #include <string.h>
 
-#pragma pack(push, 8)
-typedef struct legacy_runtime_authorization_v1 {
-  uint32_t struct_size;
-  uint32_t abi_version;
-  uint64_t runtime_policy_revision;
-  uint64_t target_epoch;
-  uint64_t target_window_handle;
-  uint64_t target_process_creation_time_100ns;
-  uint32_t target_process_id;
-  wdf_capture_target_flags target_flags;
-  wdf_capture_policy_decision consent_granted;
-  wdf_capture_policy_decision session_unlocked;
-  wdf_capture_policy_decision secure_desktop_clear;
-  wdf_capture_policy_decision remote_session_allowed;
-  wdf_capture_policy_decision presentation_allowed;
-  wdf_capture_policy_decision application_allowed;
-  wdf_capture_policy_decision window_allowed;
-  wdf_capture_policy_decision storage_available;
-  uint32_t reserved[8];
-} legacy_runtime_authorization_v1;
-#pragma pack(pop)
-
-_Static_assert(sizeof(legacy_runtime_authorization_v1) ==
-                   WDF_CAPTURE_RUNTIME_AUTHORIZATION_V1_LEGACY_SIZE,
-               "legacy runtime authorization prefix changed");
-
 int main(void) {
   wdf_capture_capabilities capabilities = 0;
   static const char output_path[] = "C:\\WinDayFlow-C-Test";
@@ -60,7 +34,8 @@ int main(void) {
       (capabilities &
        WDF_CAPTURE_CAPABILITY_CALLBACK_TIME_AUTHORIZATION_INVALIDATION) == 0 ||
       (capabilities &
-       WDF_CAPTURE_CAPABILITY_DISPLAY_WIDE_CONTINUOUS_AUTHORIZATION) == 0) {
+       WDF_CAPTURE_CAPABILITY_DISPLAY_WIDE_CONTINUOUS_AUTHORIZATION) == 0 ||
+      (capabilities & WDF_CAPTURE_CAPABILITY_HEALTH_SNAPSHOT) == 0) {
     fputs("C translation unit observed incomplete foundation capabilities\n",
           stderr);
     return 1;
@@ -88,6 +63,7 @@ int main(void) {
           (1ULL << 11) ||
       WDF_CAPTURE_CAPABILITY_DISPLAY_WIDE_CONTINUOUS_AUTHORIZATION !=
           (1ULL << 12) ||
+      WDF_CAPTURE_CAPABILITY_HEALTH_SNAPSHOT != (1ULL << 13) ||
       WDF_CAPTURE_RESULT_AUTHORIZATION_SUPERSEDED != -14 ||
       WDF_CAPTURE_RESULT_EVIDENCE_NOT_FOUND != -15 ||
       WDF_CAPTURE_RESULT_UNSAFE_EVIDENCE != -16 ||
@@ -98,35 +74,26 @@ int main(void) {
       WDF_CAPTURE_RESULT_EVIDENCE_INVALID != -21 ||
       WDF_CAPTURE_RESULT_DECODER_FAILURE != -22 ||
       WDF_CAPTURE_RESULT_EVIDENCE_CONFLICT != -23 ||
-      WDF_CAPTURE_TARGET_DISPLAY_PRESENT != (1U << 1) ||
-      WDF_CAPTURE_TARGET_DISPLAY_WIDE_SCOPE != (1U << 2) ||
-      WDF_CAPTURE_RUNTIME_AUTHORIZATION_V1_LEGACY_SIZE != 112U ||
       WDF_CAPTURE_DISPLAY_DEVICE_KEY_UTF8_CAPACITY != 96U ||
       WDF_CAPTURE_DISPLAY_DEVICE_KEY_UTF8_MAX_LENGTH != 93U ||
       sizeof(wdf_capture_config_v1) != 80 ||
-      sizeof(wdf_capture_privacy_context_v1) != 80 ||
-      sizeof(wdf_capture_runtime_authorization_v1) != 224 ||
+      sizeof(wdf_capture_privacy_context_v1) != 64 ||
+      sizeof(wdf_capture_runtime_authorization_v1) != 184 ||
       sizeof(wdf_capture_command_admission_v1) != 64 ||
       sizeof(wdf_capture_event_v1) != 80 ||
       offsetof(wdf_capture_runtime_authorization_v1,
                runtime_policy_revision) != 8 ||
       offsetof(wdf_capture_runtime_authorization_v1, target_epoch) != 16 ||
-      offsetof(wdf_capture_runtime_authorization_v1, target_window_handle) !=
-          24 ||
+      offsetof(wdf_capture_runtime_authorization_v1, consent_granted) != 24 ||
+      offsetof(wdf_capture_runtime_authorization_v1, reserved) != 40 ||
       offsetof(wdf_capture_runtime_authorization_v1,
-               target_process_creation_time_100ns) != 32 ||
-      offsetof(wdf_capture_runtime_authorization_v1, target_process_id) != 40 ||
-      offsetof(wdf_capture_runtime_authorization_v1, target_flags) != 44 ||
-      offsetof(wdf_capture_runtime_authorization_v1, consent_granted) != 48 ||
-      offsetof(wdf_capture_runtime_authorization_v1, reserved) != 80 ||
+               target_display_monitor_handle) != 72 ||
       offsetof(wdf_capture_runtime_authorization_v1,
-               target_display_monitor_handle) != 112 ||
+               target_display_device_key_utf8_length) != 80 ||
       offsetof(wdf_capture_runtime_authorization_v1,
-               target_display_device_key_utf8_length) != 120 ||
+               target_display_reserved) != 84 ||
       offsetof(wdf_capture_runtime_authorization_v1,
-               target_display_reserved) != 124 ||
-      offsetof(wdf_capture_runtime_authorization_v1,
-               target_display_device_key_utf8) != 128 ||
+               target_display_device_key_utf8) != 88 ||
       offsetof(wdf_capture_command_admission_v1, instance_epoch) != 8 ||
       offsetof(wdf_capture_command_admission_v1,
                runtime_policy_revision) != 16 ||
@@ -155,8 +122,7 @@ int main(void) {
   {
     wdf_capture_config_v1 config = {0};
     wdf_capture_runtime_authorization_v1 authorization = {0};
-    legacy_runtime_authorization_v1 legacy_block = {0};
-    legacy_runtime_authorization_v1 legacy_allow = {0};
+    wdf_capture_runtime_authorization_v1 blocked = {0};
     wdf_capture_command_admission_v1 admission = {0};
     wdf_capture_handle handle = 0;
     uint64_t generation = 0;
@@ -178,18 +144,9 @@ int main(void) {
     authorization.abi_version = WDF_CAPTURE_ABI_VERSION;
     authorization.runtime_policy_revision = 2;
     authorization.target_epoch = 1;
-    authorization.target_window_handle = 100;
-    authorization.target_process_creation_time_100ns = 300;
-    authorization.target_process_id = 200;
-    authorization.target_flags = WDF_CAPTURE_TARGET_PRESENT |
-                                 WDF_CAPTURE_TARGET_DISPLAY_PRESENT;
     authorization.consent_granted = WDF_CAPTURE_POLICY_ALLOW;
     authorization.session_unlocked = WDF_CAPTURE_POLICY_ALLOW;
     authorization.secure_desktop_clear = WDF_CAPTURE_POLICY_ALLOW;
-    authorization.remote_session_allowed = WDF_CAPTURE_POLICY_ALLOW;
-    authorization.presentation_allowed = WDF_CAPTURE_POLICY_ALLOW;
-    authorization.application_allowed = WDF_CAPTURE_POLICY_ALLOW;
-    authorization.window_allowed = WDF_CAPTURE_POLICY_ALLOW;
     authorization.storage_available = WDF_CAPTURE_POLICY_ALLOW;
     authorization.target_display_monitor_handle = 400;
     authorization.target_display_device_key_utf8_length =
@@ -197,37 +154,19 @@ int main(void) {
     memcpy(authorization.target_display_device_key_utf8,
            display_key,
            sizeof(display_key) - 1U);
-    legacy_block.struct_size =
-        WDF_CAPTURE_RUNTIME_AUTHORIZATION_V1_LEGACY_SIZE;
-    legacy_block.abi_version = WDF_CAPTURE_ABI_VERSION;
-    legacy_block.runtime_policy_revision = 1;
-    legacy_block.consent_granted = WDF_CAPTURE_POLICY_BLOCK;
-    legacy_block.session_unlocked = WDF_CAPTURE_POLICY_ALLOW;
-    legacy_block.secure_desktop_clear = WDF_CAPTURE_POLICY_ALLOW;
-    legacy_block.remote_session_allowed = WDF_CAPTURE_POLICY_ALLOW;
-    legacy_block.presentation_allowed = WDF_CAPTURE_POLICY_ALLOW;
-    legacy_block.application_allowed = WDF_CAPTURE_POLICY_ALLOW;
-    legacy_block.window_allowed = WDF_CAPTURE_POLICY_ALLOW;
-    legacy_block.storage_available = WDF_CAPTURE_POLICY_ALLOW;
-    memcpy(&legacy_allow, &authorization, sizeof(legacy_allow));
-    legacy_allow.struct_size =
-        WDF_CAPTURE_RUNTIME_AUTHORIZATION_V1_LEGACY_SIZE;
-    legacy_allow.runtime_policy_revision = 1;
-    legacy_allow.target_flags = WDF_CAPTURE_TARGET_PRESENT;
+    blocked.struct_size = (uint32_t)sizeof(blocked);
+    blocked.abi_version = WDF_CAPTURE_ABI_VERSION;
+    blocked.runtime_policy_revision = 1;
+    blocked.consent_granted = WDF_CAPTURE_POLICY_BLOCK;
+    blocked.session_unlocked = WDF_CAPTURE_POLICY_ALLOW;
+    blocked.secure_desktop_clear = WDF_CAPTURE_POLICY_ALLOW;
+    blocked.storage_available = WDF_CAPTURE_POLICY_ALLOW;
     admission.struct_size = (uint32_t)sizeof(admission);
     admission.abi_version = WDF_CAPTURE_ABI_VERSION;
 
     if (wdf_capture_create(&config, &handle) != WDF_CAPTURE_RESULT_OK ||
         wdf_capture_update_runtime_authorization(
-            handle,
-            (const wdf_capture_runtime_authorization_v1*)&legacy_allow,
-            &generation) !=
-            WDF_CAPTURE_RESULT_INVALID_ARGUMENT ||
-        generation != 0 ||
-        wdf_capture_update_runtime_authorization(
-            handle,
-            (const wdf_capture_runtime_authorization_v1*)&legacy_block,
-            &generation) != WDF_CAPTURE_RESULT_OK ||
+            handle, &blocked, &generation) != WDF_CAPTURE_RESULT_OK ||
         generation != 2 ||
         wdf_capture_update_runtime_authorization(
             handle, &authorization, &generation) != WDF_CAPTURE_RESULT_OK ||

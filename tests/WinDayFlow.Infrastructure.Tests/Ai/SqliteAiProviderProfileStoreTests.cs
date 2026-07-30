@@ -19,89 +19,6 @@ public sealed class SqliteAiProviderProfileStoreTests
         Guid.Parse("72c1d90a-361e-42fa-bf7b-27e319d9c532");
 
     [Fact]
-    public async Task VersionFiveUpgradePreservesDataAndForcesCloudAnalysisOff()
-    {
-        using var database = new TemporaryDatabase();
-        var factory = new SqliteConnectionFactory(database.DatabasePath);
-        var initializer = new SqliteDatabaseInitializer(factory);
-        await initializer.InitializeAsync();
-
-        await using (var connection = await factory.OpenConnectionAsync())
-        await using (var command = connection.CreateCommand())
-        {
-            command.CommandText = """
-                DROP INDEX ix_analysis_jobs_provider_revision_state;
-                DROP TABLE ai_provider_profiles;
-                DELETE FROM schema_migrations WHERE version = 6;
-                UPDATE app_settings
-                SET theme = 2,
-                    cloud_analysis_enabled = 1,
-                    evidence_retention_days = 90
-                WHERE id = 1;
-                INSERT INTO capture_chunks(
-                    id,
-                    manifest_relative_path,
-                    start_utc_ticks,
-                    start_offset_minutes,
-                    end_utc_ticks,
-                    end_offset_minutes,
-                    captured_frame_count,
-                    frame_count,
-                    frame_width,
-                    frame_height,
-                    frame_byte_count,
-                    persistence_generation_hex,
-                    target_epoch_hex,
-                    committed_at_utc_ticks,
-                    ingested_at_utc_ticks,
-                    availability)
-                VALUES (
-                    'migration-chunk',
-                    'chunks/migration-chunk/manifest.json',
-                    100,
-                    0,
-                    200,
-                    0,
-                    1,
-                    1,
-                    2,
-                    2,
-                    4,
-                    '0000000000000001',
-                    '0000000000000001',
-                    200,
-                    201,
-                    0);
-                """;
-            await command.ExecuteNonQueryAsync();
-        }
-
-        await initializer.InitializeAsync();
-        await initializer.InitializeAsync();
-
-        await using var migrated = await factory.OpenConnectionAsync();
-        await using var verify = migrated.CreateCommand();
-        verify.CommandText = """
-            SELECT
-                (SELECT COUNT(*) FROM schema_migrations WHERE version = 6),
-                (SELECT COUNT(*) FROM sqlite_master
-                    WHERE type = 'table' AND name = 'ai_provider_profiles'),
-                (SELECT theme FROM app_settings WHERE id = 1),
-                (SELECT cloud_analysis_enabled FROM app_settings WHERE id = 1),
-                (SELECT evidence_retention_days FROM app_settings WHERE id = 1),
-                (SELECT COUNT(*) FROM capture_chunks WHERE id = 'migration-chunk');
-            """;
-        await using var reader = await verify.ExecuteReaderAsync();
-        Assert.True(await reader.ReadAsync());
-        Assert.Equal(1, reader.GetInt32(0));
-        Assert.Equal(1, reader.GetInt32(1));
-        Assert.Equal(2, reader.GetInt32(2));
-        Assert.Equal(0, reader.GetInt32(3));
-        Assert.Equal(90, reader.GetInt32(4));
-        Assert.Equal(1, reader.GetInt32(5));
-    }
-
-    [Fact]
     public async Task DpapiRoundTripSupportsNoOpAndRevisionReprotection()
     {
         using var database = new TemporaryDatabase();
@@ -109,34 +26,26 @@ public sealed class SqliteAiProviderProfileStoreTests
         const string apiKey = "sk-roundtrip-secret-value";
         var profile = CreateProfile();
 
-        var created = await store.SaveActiveAsync(
+        var created = await store.CreateAsync(
             profile,
-            expectedRevision: null,
             AiProviderCredentialUpdate.Replace(apiKey),
             Now);
-        var validated = await store.MarkValidatedAsync(
-            profile.Id,
-            created.Revision,
-            Now.AddMinutes(1));
-        Assert.NotNull(validated);
 
-        var noOp = await store.SaveActiveAsync(
+        var noOp = await store.UpdateAsync(
             profile,
-            validated.Revision,
+            created.Revision,
             AiProviderCredentialUpdate.Preserve,
             Now.AddMinutes(2));
-        Assert.Equal(validated, noOp);
+        Assert.Equal(created, noOp);
 
         var changedProfile = CreateProfile(displayName: "Updated provider");
-        var changed = await store.SaveActiveAsync(
+        var changed = await store.UpdateAsync(
             changedProfile,
             noOp.Revision,
             AiProviderCredentialUpdate.Preserve,
             Now.AddMinutes(3));
         Assert.Equal(2, changed.Revision);
         Assert.True(changed.HasApiKey);
-        Assert.Null(changed.ValidatedRevision);
-        Assert.Null(changed.ValidatedAtUtc);
 
         var handler = new CredentialObservingHandler();
         var providerFactory = new OpenAiCompatibleProviderFactory(
@@ -161,13 +70,12 @@ public sealed class SqliteAiProviderProfileStoreTests
         const string apiKey = "sk-plaintext-sentinel-4e5bd7bb";
         var profile = CreateProfile();
 
-        var first = await store.SaveActiveAsync(
+        var first = await store.CreateAsync(
             profile,
-            expectedRevision: null,
             AiProviderCredentialUpdate.Replace(apiKey),
             Now);
         var firstCredential = await ReadCredentialColumnsAsync(factory);
-        var second = await store.SaveActiveAsync(
+        var second = await store.UpdateAsync(
             profile,
             first.Revision,
             AiProviderCredentialUpdate.Replace(apiKey),
@@ -190,9 +98,8 @@ public sealed class SqliteAiProviderProfileStoreTests
     {
         using var database = new TemporaryDatabase();
         var (factory, store) = await CreateStoreAsync(database);
-        var snapshot = await store.SaveActiveAsync(
+        var snapshot = await store.CreateAsync(
             CreateProfile(),
-            expectedRevision: null,
             AiProviderCredentialUpdate.Replace("sk-tamper-test"),
             Now);
         var credential = await ReadCredentialColumnsAsync(factory);
@@ -213,9 +120,8 @@ public sealed class SqliteAiProviderProfileStoreTests
     {
         using var database = new TemporaryDatabase();
         var (factory, store) = await CreateStoreAsync(database);
-        await store.SaveActiveAsync(
+        await store.CreateAsync(
             CreateProfile(),
-            expectedRevision: null,
             AiProviderCredentialUpdate.Replace("sk-profile-binding-test"),
             Now);
 
@@ -223,8 +129,9 @@ public sealed class SqliteAiProviderProfileStoreTests
         await using (var command = connection.CreateCommand())
         {
             command.CommandText = mutation == "profile"
-                ? "UPDATE ai_provider_profiles SET id = $value WHERE is_active = 1;"
-                : "UPDATE ai_provider_profiles SET base_endpoint = $value WHERE is_active = 1;";
+                ? "UPDATE ai_provider_profiles SET id = $value WHERE id = $id;"
+                : "UPDATE ai_provider_profiles SET base_endpoint = $value WHERE id = $id;";
+            command.Parameters.AddWithValue("$id", ProfileId.ToString("D"));
             command.Parameters.AddWithValue(
                 "$value",
                 mutation == "profile"
@@ -233,7 +140,10 @@ public sealed class SqliteAiProviderProfileStoreTests
             Assert.Equal(1, await command.ExecuteNonQueryAsync());
         }
 
-        var mutated = await store.GetActiveAsync();
+        var mutatedId = mutation == "profile"
+            ? Guid.Parse("199675f1-a947-49e7-b0db-64273a1da387")
+            : ProfileId;
+        var mutated = await store.GetAsync(mutatedId);
         Assert.NotNull(mutated);
         var failure = await Assert.ThrowsAsync<AiProviderException>(
             () => new OpenAiCompatibleProviderFactory(store).CreateAsync(mutated));
@@ -246,9 +156,8 @@ public sealed class SqliteAiProviderProfileStoreTests
     {
         using var database = new TemporaryDatabase();
         var (factory, firstStore) = await CreateStoreAsync(database);
-        var initial = await firstStore.SaveActiveAsync(
+        var initial = await firstStore.CreateAsync(
             CreateProfile(new Uri("http://127.0.0.1:11434/v1")),
-            expectedRevision: null,
             AiProviderCredentialUpdate.Preserve,
             Now);
         var secondStore = new SqliteAiProviderProfileStore(
@@ -273,62 +182,19 @@ public sealed class SqliteAiProviderProfileStoreTests
         var conflict = Assert.Single(attempts, static attempt => attempt.Exception is not null);
         Assert.Equal(2, winner.Snapshot!.Revision);
         Assert.IsType<AiProviderConfigurationConflictException>(conflict.Exception);
-        Assert.Equal(2, (await firstStore.GetActiveAsync())?.Revision);
+        Assert.Equal(2, (await firstStore.GetAsync(ProfileId))?.Revision);
     }
 
     [Fact]
-    public async Task ValidationUsesRevisionCompareAndSwapAndConfigurationClearsIt()
+    public async Task FactoryRejectsSnapshotAfterProfileRevisionChanges()
     {
         using var database = new TemporaryDatabase();
         var (_, store) = await CreateStoreAsync(database);
-        var profile = CreateProfile(new Uri("http://127.0.0.1:11434/v1"));
-        var first = await store.SaveActiveAsync(
-            profile,
-            expectedRevision: null,
-            AiProviderCredentialUpdate.Preserve,
-            Now);
-        var validated = await store.MarkValidatedAsync(
-            profile.Id,
-            first.Revision,
-            Now.AddMinutes(1));
-        Assert.NotNull(validated);
-        Assert.Equal(first.Revision, validated.ValidatedRevision);
-        Assert.Equal(Now.AddMinutes(1), validated.ValidatedAtUtc);
-
-        var second = await store.SaveActiveAsync(
-            CreateProfile(
-                new Uri("http://127.0.0.1:11434/v1"),
-                model: "new-model"),
-            first.Revision,
-            AiProviderCredentialUpdate.Preserve,
-            Now.AddMinutes(2));
-        Assert.Equal(2, second.Revision);
-        Assert.False(second.IsValidated);
-        Assert.Null(await store.MarkValidatedAsync(
-            profile.Id,
-            expectedRevision: 1,
-            Now.AddMinutes(3)));
-
-        var current = await store.MarkValidatedAsync(
-            profile.Id,
-            second.Revision,
-            Now.AddMinutes(4));
-        Assert.NotNull(current);
-        Assert.True(current.IsValidated);
-        Assert.Equal(Now.AddMinutes(4), current.ValidatedAtUtc);
-    }
-
-    [Fact]
-    public async Task FactoryRejectsSnapshotAfterActiveRevisionChanges()
-    {
-        using var database = new TemporaryDatabase();
-        var (_, store) = await CreateStoreAsync(database);
-        var first = await store.SaveActiveAsync(
+        var first = await store.CreateAsync(
             CreateProfile(),
-            expectedRevision: null,
             AiProviderCredentialUpdate.Replace("sk-stale-revision"),
             Now);
-        var second = await store.SaveActiveAsync(
+        var second = await store.UpdateAsync(
             CreateProfile(model: "new-model"),
             first.Revision,
             AiProviderCredentialUpdate.Preserve,
@@ -344,9 +210,8 @@ public sealed class SqliteAiProviderProfileStoreTests
     {
         using var database = new TemporaryDatabase();
         var (factory, store) = await CreateStoreAsync(database);
-        await store.SaveActiveAsync(
+        await store.CreateAsync(
             CreateProfile(new Uri("http://127.0.0.1:11434/v1")),
-            expectedRevision: null,
             AiProviderCredentialUpdate.Preserve,
             Now);
 
@@ -357,66 +222,51 @@ public sealed class SqliteAiProviderProfileStoreTests
                 PRAGMA ignore_check_constraints = ON;
                 UPDATE ai_provider_profiles
                 SET request_timeout_ticks = 1
-                WHERE is_active = 1;
+                WHERE id = $id;
                 """;
+            command.Parameters.AddWithValue("$id", ProfileId.ToString("D"));
             await command.ExecuteNonQueryAsync();
         }
 
-        await Assert.ThrowsAsync<InvalidDataException>(() => store.GetActiveAsync());
+        await Assert.ThrowsAsync<InvalidDataException>(() => store.GetAsync(ProfileId));
     }
 
     [Fact]
-    public async Task SchemaAllowsManyProfilesButOnlyOneActiveProfile()
+    public async Task CreatingProfilesDoesNotActivateOrBindThem()
     {
         using var database = new TemporaryDatabase();
         var (factory, store) = await CreateStoreAsync(database);
-        await store.SaveActiveAsync(
+        await store.CreateAsync(
             CreateProfile(new Uri("http://127.0.0.1:11434/v1")),
-            expectedRevision: null,
             AiProviderCredentialUpdate.Preserve,
             Now);
+        await store.CreateAsync(
+            new AiProviderProfile(
+                Guid.Parse("0a5516a7-018a-42c0-9bca-9404ca9d8a51"),
+                "Secondary provider",
+                AiProviderKind.OpenAiCompatible,
+                new Uri("http://localhost:11434/v1/"),
+                "vision-model-2",
+                TimeSpan.FromSeconds(30)),
+            AiProviderCredentialUpdate.Preserve,
+            Now.AddSeconds(1));
 
         await using var connection = await factory.OpenConnectionAsync();
-        await using (var insert = connection.CreateCommand())
-        {
-            insert.CommandText = """
-                INSERT INTO ai_provider_profiles(
-                    id, display_name, kind, base_endpoint, model,
-                    request_timeout_ticks, revision, is_active,
-                    api_key_ciphertext, api_key_salt, api_key_protection_version,
-                    validated_revision, validated_at_utc_ticks,
-                    created_at_utc_ticks, updated_at_utc_ticks)
-                SELECT
-                    '0a5516a7-018a-42c0-9bca-9404ca9d8a51',
-                    'Inactive provider', kind, base_endpoint, model,
-                    request_timeout_ticks, revision, 0,
-                    NULL, NULL, NULL, NULL, NULL,
-                    created_at_utc_ticks, updated_at_utc_ticks
-                FROM ai_provider_profiles
-                WHERE is_active = 1;
-                """;
-            Assert.Equal(1, await insert.ExecuteNonQueryAsync());
-        }
-
         await using (var count = connection.CreateCommand())
         {
             count.CommandText = """
-                SELECT COUNT(*), SUM(is_active)
-                FROM ai_provider_profiles;
+                SELECT
+                    (SELECT COUNT(*) FROM ai_provider_profiles),
+                    (SELECT COALESCE(SUM(is_active), 0) FROM ai_provider_profiles),
+                    (SELECT COUNT(*) FROM analysis_stage_bindings
+                        WHERE provider_profile_id IS NOT NULL);
                 """;
             await using var reader = await count.ExecuteReaderAsync();
             Assert.True(await reader.ReadAsync());
             Assert.Equal(2, reader.GetInt32(0));
-            Assert.Equal(1, reader.GetInt32(1));
+            Assert.Equal(0, reader.GetInt32(1));
+            Assert.Equal(0, reader.GetInt32(2));
         }
-
-        await using var activate = connection.CreateCommand();
-        activate.CommandText = """
-            UPDATE ai_provider_profiles
-            SET is_active = 1
-            WHERE id = '0a5516a7-018a-42c0-9bca-9404ca9d8a51';
-            """;
-        await Assert.ThrowsAsync<SqliteException>(() => activate.ExecuteNonQueryAsync());
     }
 
     private static async Task<(SqliteConnectionFactory Factory, SqliteAiProviderProfileStore Store)>
@@ -453,7 +303,7 @@ public sealed class SqliteAiProviderProfileStoreTests
         try
         {
             return new SaveAttempt(
-                await store.SaveActiveAsync(
+                await store.UpdateAsync(
                     profile,
                     expectedRevision,
                     AiProviderCredentialUpdate.Preserve,
@@ -477,8 +327,9 @@ public sealed class SqliteAiProviderProfileStoreTests
                 api_key_salt,
                 api_key_protection_version
             FROM ai_provider_profiles
-            WHERE is_active = 1;
+            WHERE id = $id;
             """;
+        command.Parameters.AddWithValue("$id", ProfileId.ToString("D"));
         await using var reader = await command.ExecuteReaderAsync();
         Assert.True(await reader.ReadAsync());
         return new CredentialColumns(
@@ -496,8 +347,9 @@ public sealed class SqliteAiProviderProfileStoreTests
         command.CommandText = """
             UPDATE ai_provider_profiles
             SET api_key_ciphertext = $ciphertext
-            WHERE is_active = 1;
+            WHERE id = $id;
             """;
+        command.Parameters.AddWithValue("$id", ProfileId.ToString("D"));
         command.Parameters.Add("$ciphertext", SqliteType.Blob).Value = ciphertext;
         Assert.Equal(1, await command.ExecuteNonQueryAsync());
     }

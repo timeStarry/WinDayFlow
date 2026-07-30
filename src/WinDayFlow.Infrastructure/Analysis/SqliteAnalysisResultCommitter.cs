@@ -1,12 +1,13 @@
 using System.Globalization;
 using Microsoft.Data.Sqlite;
+using WinDayFlow.Application.Ai;
 using WinDayFlow.Application.Analysis;
 using WinDayFlow.Domain;
 using WinDayFlow.Infrastructure.Persistence;
 
 namespace WinDayFlow.Infrastructure.Analysis;
 
-public sealed class SqliteAnalysisResultCommitter : IAnalysisWindowResultCommitter
+public sealed class SqliteAnalysisResultCommitter : IAnalysisStageAwareWindowResultCommitter
 {
     private readonly SqliteConnectionFactory _connectionFactory;
 
@@ -27,6 +28,25 @@ public sealed class SqliteAnalysisResultCommitter : IAnalysisWindowResultCommitt
             lease,
             providerProfileId,
             providerProfileRevision,
+            expectedRouteRevision: null,
+            window: null,
+            entries,
+            committedAtUtc,
+            cancellationToken);
+
+    public Task<AnalysisResultCommitStatus> TryCommitAsync(
+        AnalysisJobLease lease,
+        Guid providerProfileId,
+        long providerProfileRevision,
+        long routeRevision,
+        IReadOnlyList<TimelineEntry> entries,
+        DateTimeOffset committedAtUtc,
+        CancellationToken cancellationToken = default) =>
+        TryCommitCoreAsync(
+            lease,
+            providerProfileId,
+            providerProfileRevision,
+            routeRevision,
             window: null,
             entries,
             committedAtUtc,
@@ -46,6 +66,29 @@ public sealed class SqliteAnalysisResultCommitter : IAnalysisWindowResultCommitt
             lease,
             providerProfileId,
             providerProfileRevision,
+            expectedRouteRevision: null,
+            window,
+            entries,
+            committedAtUtc,
+            cancellationToken);
+    }
+
+    public Task<AnalysisResultCommitStatus> TryCommitWindowAsync(
+        AnalysisJobLease lease,
+        Guid providerProfileId,
+        long providerProfileRevision,
+        long routeRevision,
+        AnalysisWindowSnapshot window,
+        IReadOnlyList<TimelineEntry> entries,
+        DateTimeOffset committedAtUtc,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(window);
+        return TryCommitCoreAsync(
+            lease,
+            providerProfileId,
+            providerProfileRevision,
+            routeRevision,
             window,
             entries,
             committedAtUtc,
@@ -56,6 +99,7 @@ public sealed class SqliteAnalysisResultCommitter : IAnalysisWindowResultCommitt
         AnalysisJobLease lease,
         Guid providerProfileId,
         long providerProfileRevision,
+        long? expectedRouteRevision,
         AnalysisWindowSnapshot? window,
         IReadOnlyList<TimelineEntry> entries,
         DateTimeOffset committedAtUtc,
@@ -70,6 +114,10 @@ public sealed class SqliteAnalysisResultCommitter : IAnalysisWindowResultCommitt
         }
 
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(providerProfileRevision);
+        if (expectedRouteRevision.HasValue)
+        {
+            ArgumentOutOfRangeException.ThrowIfNegativeOrZero(expectedRouteRevision.Value);
+        }
         ArgumentNullException.ThrowIfNull(entries);
         if (entries.Any(static entry => entry is null))
         {
@@ -92,27 +140,18 @@ public sealed class SqliteAnalysisResultCommitter : IAnalysisWindowResultCommitt
             .ConfigureAwait(false);
         await using var transaction = connection.BeginTransaction(deferred: false);
 
-        var profileStatus = await ReadProfileStatusAsync(
+        var profileStatus = await ReadRouteStatusAsync(
                 connection,
                 transaction,
                 providerProfileId,
                 providerProfileRevision,
+                expectedRouteRevision,
                 cancellationToken)
             .ConfigureAwait(false);
         if (profileStatus != AnalysisResultCommitStatus.Committed)
         {
             await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
             return profileStatus;
-        }
-
-        if (!await IsCloudAnalysisEnabledAsync(
-                connection,
-                transaction,
-                cancellationToken)
-            .ConfigureAwait(false))
-        {
-            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-            return AnalysisResultCommitStatus.CloudAnalysisDisabled;
         }
 
         var job = await ReadCommittingJobAsync(
@@ -225,25 +264,35 @@ public sealed class SqliteAnalysisResultCommitter : IAnalysisWindowResultCommitt
         return AnalysisResultCommitStatus.Committed;
     }
 
-    private static async Task<AnalysisResultCommitStatus> ReadProfileStatusAsync(
+    private static async Task<AnalysisResultCommitStatus> ReadRouteStatusAsync(
         SqliteConnection connection,
         SqliteTransaction transaction,
         Guid providerProfileId,
         long providerProfileRevision,
+        long? expectedRouteRevision,
         CancellationToken cancellationToken)
     {
         await using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = """
             SELECT
-                id,
-                revision,
-                validated_revision,
-                base_endpoint,
-                api_key_ciphertext IS NOT NULL
-            FROM ai_provider_profiles
-            WHERE is_active = 1;
+                profiles.id,
+                profiles.revision,
+                profiles.base_endpoint,
+                profiles.api_key_ciphertext IS NOT NULL,
+                bindings.enabled,
+                bindings.route_revision,
+                validations.provider_profile_id IS NOT NULL
+            FROM analysis_stage_bindings AS bindings
+            INNER JOIN ai_provider_profiles AS profiles
+                ON profiles.id = bindings.provider_profile_id
+            LEFT JOIN provider_profile_validations AS validations
+                ON validations.provider_profile_id = profiles.id
+                AND validations.provider_profile_revision = profiles.revision
+                AND validations.stage = bindings.stage
+            WHERE bindings.stage = $stage;
             """;
+        command.Parameters.AddWithValue("$stage", (int)AnalysisStage.TimelineAnalysis);
         await using var reader = await command
             .ExecuteReaderAsync(cancellationToken)
             .ConfigureAwait(false);
@@ -251,37 +300,17 @@ public sealed class SqliteAnalysisResultCommitter : IAnalysisWindowResultCommitt
             || !Guid.TryParse(reader.GetString(0), out var activeProfileId)
             || activeProfileId != providerProfileId
             || reader.GetInt64(1) != providerProfileRevision
-            || reader.IsDBNull(2)
-            || reader.GetInt64(2) != providerProfileRevision
-            || !Uri.TryCreate(reader.GetString(3), UriKind.Absolute, out var endpoint)
-            || (!endpoint.IsLoopback && reader.GetInt64(4) != 1))
+            || !Uri.TryCreate(reader.GetString(2), UriKind.Absolute, out var endpoint)
+            || (!endpoint.IsLoopback && reader.GetInt64(3) != 1)
+            || reader.GetInt64(4) != 1
+            || (expectedRouteRevision.HasValue
+                && reader.GetInt64(5) != expectedRouteRevision.Value)
+            || reader.GetInt64(6) != 1)
         {
             return AnalysisResultCommitStatus.ProviderRevisionChanged;
         }
 
         return AnalysisResultCommitStatus.Committed;
-    }
-
-    private static async Task<bool> IsCloudAnalysisEnabledAsync(
-        SqliteConnection connection,
-        SqliteTransaction transaction,
-        CancellationToken cancellationToken)
-    {
-        await using var command = connection.CreateCommand();
-        command.Transaction = transaction;
-        command.CommandText = """
-            SELECT cloud_analysis_enabled
-            FROM app_settings
-            WHERE id = 1;
-            """;
-        var scalar = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
-        return scalar switch
-        {
-            long value => value == 1,
-            int value => value == 1,
-            _ => throw new InvalidDataException(
-                "The application settings row is missing or invalid."),
-        };
     }
 
     private static async Task<CommittingJob?> ReadCommittingJobAsync(

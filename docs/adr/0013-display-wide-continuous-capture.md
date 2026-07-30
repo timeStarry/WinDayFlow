@@ -1,6 +1,7 @@
 # ADR 0013: User-Authorized Display-Wide Continuous Capture
 
-- Status: Accepted
+- Status: Superseded by
+  [ADR 0015](0015-user-controlled-capture-and-provider-routing.md)
 - Date: 2026-07-28
 - Decision owners: WinDayFlow maintainers
 - Scope: application privacy settings, recording consent, Windows privacy
@@ -13,6 +14,12 @@
   [ADR 0009](0009-windows-lifecycle-invalidation-and-callback-time-authorization-closure.md),
   [ADR 0011](0011-authority-checked-native-capture-worker-orchestration.md),
   and [ADR 0012](0012-run-isolated-native-capture-instance-control.md)
+
+ADR 0015 supersedes the two user-facing privacy modes, the recommended
+foreground-protection default, exclusion-rule suspension, and mode-change
+consent churn. The compatible native display-wide authorization, pinned-display
+identity, generation checks, and implementation history in this ADR remain
+useful foundations for continuous single-display capture.
 
 ## Context
 

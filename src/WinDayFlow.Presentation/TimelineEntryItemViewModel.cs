@@ -55,6 +55,23 @@ public sealed class TimelineEntryItemViewModel
 
     public string TagsText => string.Join(" · ", Tags);
 
+    public string CompactTagsText
+    {
+        get
+        {
+            var visible = Tags.Take(2).ToArray();
+            if (visible.Length == 0)
+            {
+                return string.Empty;
+            }
+
+            var suffix = Tags.Count > visible.Length
+                ? $"  +{Tags.Count - visible.Length}"
+                : string.Empty;
+            return string.Join(" · ", visible) + suffix;
+        }
+    }
+
     public bool HasUserEdits { get; }
 
     public bool HasEvidence { get; }

@@ -5,11 +5,14 @@ using WinDayFlow.Application.Analysis;
 using WinDayFlow.Application.Capture;
 using WinDayFlow.Application.Settings;
 using WinDayFlow.Application.Timeline;
+using WinDayFlow.Application.Privacy;
+using WinDayFlow.Application.Statistics;
 using WinDayFlow.Infrastructure.Ai;
 using WinDayFlow.Infrastructure.Analysis;
 using WinDayFlow.Infrastructure.Capture;
 using WinDayFlow.Infrastructure.Persistence;
 using WinDayFlow.Infrastructure.Settings;
+using WinDayFlow.Infrastructure.Statistics;
 using WinDayFlow.Infrastructure.Timeline;
 
 namespace WinDayFlow.Composition;
@@ -68,12 +71,25 @@ public static class WinDayFlowServiceCollectionExtensions
         services.AddSingleton<SqliteAiProviderProfileStore>();
         services.AddSingleton<IAiProviderProfileStore>(static provider =>
             provider.GetRequiredService<SqliteAiProviderProfileStore>());
+        services.AddSingleton<SqliteAnalysisStageBindingStore>();
+        services.AddSingleton<IAnalysisStageBindingStore>(static provider =>
+            provider.GetRequiredService<SqliteAnalysisStageBindingStore>());
+        services.AddSingleton<SqliteProviderInvocationStore>();
+        services.AddSingleton<IProviderInvocationStore>(static provider =>
+            provider.GetRequiredService<SqliteProviderInvocationStore>());
+        services.AddSingleton<SqlitePrivacyScreeningStore>();
+        services.AddSingleton<IPrivacyScreeningStore>(static provider =>
+            provider.GetRequiredService<SqlitePrivacyScreeningStore>());
+        services.AddSingleton<SqliteEvidenceSendOverrideStore>();
+        services.AddSingleton<IEvidenceSendOverrideStore>(static provider =>
+            provider.GetRequiredService<SqliteEvidenceSendOverrideStore>());
         services.AddSingleton(static provider =>
             new OpenAiCompatibleProviderFactory(
                 provider.GetRequiredService<SqliteAiProviderProfileStore>()));
         services.AddSingleton<IAiAnalysisProviderFactory>(static provider =>
             provider.GetRequiredService<OpenAiCompatibleProviderFactory>());
-        services.AddSingleton<AiProviderConfigurationService>();
+        services.AddSingleton<AnalysisProviderSendGate>();
+        services.AddSingleton<AiProviderRoutingService>();
 
         services.AddSingleton<SqliteTimelineRepository>();
         services.AddSingleton<ITimelineStore>(static provider =>
@@ -82,11 +98,26 @@ public static class WinDayFlowServiceCollectionExtensions
             provider.GetRequiredService<SqliteTimelineRepository>());
         services.AddSingleton<TimelineQueryService>();
         services.AddSingleton<TimelineCommandService>();
+        services.AddSingleton<IStatisticsService>(provider =>
+            new SqliteStatisticsService(
+                provider.GetRequiredService<SqliteConnectionFactory>(),
+                dataRoot,
+                provider.GetRequiredService<TimeProvider>()));
 
-        services.AddSingleton<ICaptureManifestScanner>(provider =>
+        services.AddSingleton<CaptureManifestScanner>(provider =>
             new CaptureManifestScanner(
                 dataRoot,
                 provider.GetRequiredService<TimeProvider>()));
+        services.AddSingleton<ICaptureManifestScanner>(static provider =>
+            provider.GetRequiredService<CaptureManifestScanner>());
+        services.AddSingleton<ICaptureManifestContextSource>(static provider =>
+            provider.GetRequiredService<CaptureManifestScanner>());
+        services.AddSingleton<SqliteCaptureContextStore>();
+        services.AddSingleton<ICaptureContextStore>(static provider =>
+            provider.GetRequiredService<SqliteCaptureContextStore>());
+        services.AddSingleton<EvidenceSendPolicy>();
+        services.AddSingleton<IEvidenceSendPolicy>(static provider =>
+            provider.GetRequiredService<EvidenceSendPolicy>());
         services.AddSingleton(_ => new CanonicalCaptureFrameArchive(dataRoot));
         services.AddSingleton<ICaptureFrameArchive>(static provider =>
             provider.GetRequiredService<CanonicalCaptureFrameArchive>());
@@ -105,10 +136,17 @@ public static class WinDayFlowServiceCollectionExtensions
                 provider.GetRequiredService<CanonicalCaptureFrameArchive>()));
         if (evidenceExtractorFactory is null)
         {
-            services.AddSingleton<IAnalysisEvidenceExtractor>(static provider =>
+            services.AddSingleton<CanonicalFrameAnalysisEvidenceExtractor>(static provider =>
                 new CanonicalFrameAnalysisEvidenceExtractor(
                     provider.GetRequiredService<ICaptureFrameArchive>(),
                     provider.GetRequiredService<ICaptureChunkFingerprintProvider>()));
+            services.AddSingleton<IAnalysisEvidenceExtractor>(provider =>
+                new PrivacyAwareAnalysisEvidenceExtractor(
+                    dataRoot,
+                    provider.GetRequiredService<CanonicalFrameAnalysisEvidenceExtractor>(),
+                    provider.GetRequiredService<ICaptureChunkFingerprintProvider>(),
+                    provider.GetRequiredService<IPrivacyScreeningStore>(),
+                    provider.GetRequiredService<ICaptureContextStore>()));
         }
         else
         {
@@ -121,6 +159,9 @@ public static class WinDayFlowServiceCollectionExtensions
             SqliteAnalysisResultCommitter>();
         services.AddSingleton<IUnprocessedIntervalRepository,
             SqliteUnprocessedIntervalRepository>();
+        services.AddSingleton<PrivacyScreeningService>();
+        services.AddSingleton<IPrivacyScreeningService>(static provider =>
+            provider.GetRequiredService<PrivacyScreeningService>());
 
         services.AddSingleton(CaptureAnalysisIngestionOptions.Default);
         services.AddSingleton<CaptureAnalysisIngestionService>();

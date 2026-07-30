@@ -10,6 +10,8 @@ internal interface INativeCaptureRuntimeBackend
 
     CaptureStatus CurrentStatus { get; }
 
+    CaptureHealthSnapshot CurrentHealthSnapshot => CaptureHealthSnapshot.Empty;
+
     Task UpdateTimingAsync(
         uint captureIntervalMilliseconds,
         uint chunkDurationMilliseconds,

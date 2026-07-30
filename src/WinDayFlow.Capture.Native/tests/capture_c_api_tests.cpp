@@ -54,10 +54,6 @@ wdf_capture_privacy_context_v1 PrivacyContext(
   context.consent_granted = consent;
   context.session_unlocked = WDF_CAPTURE_POLICY_ALLOW;
   context.secure_desktop_clear = WDF_CAPTURE_POLICY_ALLOW;
-  context.remote_session_allowed = WDF_CAPTURE_POLICY_ALLOW;
-  context.presentation_allowed = WDF_CAPTURE_POLICY_ALLOW;
-  context.application_allowed = WDF_CAPTURE_POLICY_ALLOW;
-  context.window_allowed = WDF_CAPTURE_POLICY_ALLOW;
   context.storage_available = WDF_CAPTURE_POLICY_ALLOW;
   context.policy_revision = revision;
   return context;
@@ -67,9 +63,9 @@ wdf_capture_runtime_authorization_v1 RuntimeAuthorization(
     wdf_capture_policy_decision consent,
     uint64_t revision,
     uint64_t target_epoch = 1,
-    uint64_t window_handle = 100,
-    uint32_t process_id = 200,
-    uint64_t creation_time = 300,
+    uint64_t = 100,
+    uint32_t = 200,
+    uint64_t = 300,
     uint64_t display_monitor_handle = 400,
     std::string_view display_device_key = "\\\\.\\DISPLAY1") {
   wdf_capture_runtime_authorization_v1 context{};
@@ -79,18 +75,9 @@ wdf_capture_runtime_authorization_v1 RuntimeAuthorization(
   context.consent_granted = consent;
   context.session_unlocked = WDF_CAPTURE_POLICY_ALLOW;
   context.secure_desktop_clear = WDF_CAPTURE_POLICY_ALLOW;
-  context.remote_session_allowed = WDF_CAPTURE_POLICY_ALLOW;
-  context.presentation_allowed = WDF_CAPTURE_POLICY_ALLOW;
-  context.application_allowed = WDF_CAPTURE_POLICY_ALLOW;
-  context.window_allowed = WDF_CAPTURE_POLICY_ALLOW;
   context.storage_available = WDF_CAPTURE_POLICY_ALLOW;
   if (consent == WDF_CAPTURE_POLICY_ALLOW) {
     context.target_epoch = target_epoch;
-    context.target_window_handle = window_handle;
-    context.target_process_creation_time_100ns = creation_time;
-    context.target_process_id = process_id;
-    context.target_flags = WDF_CAPTURE_TARGET_PRESENT |
-                           WDF_CAPTURE_TARGET_DISPLAY_PRESENT;
     context.target_display_monitor_handle = display_monitor_handle;
     context.target_display_device_key_utf8_length =
         static_cast<uint32_t>(display_device_key.size());
@@ -109,11 +96,6 @@ wdf_capture_runtime_authorization_v1 DisplayWideRuntimeAuthorization(
   auto context = RuntimeAuthorization(
       WDF_CAPTURE_POLICY_ALLOW, revision, target_epoch, 100, 200, 300,
       display_monitor_handle, display_device_key);
-  context.target_window_handle = 0;
-  context.target_process_creation_time_100ns = 0;
-  context.target_process_id = 0;
-  context.target_flags = WDF_CAPTURE_TARGET_DISPLAY_PRESENT |
-                         WDF_CAPTURE_TARGET_DISPLAY_WIDE_SCOPE;
   return context;
 }
 
@@ -509,24 +491,8 @@ bool TestRuntimeAuthorizationDisplayStructureContract() {
 
   wdf_capture_runtime_authorization_v1 invalid =
       RuntimeAuthorization(WDF_CAPTURE_POLICY_ALLOW, 1);
-  invalid.struct_size =
-      WDF_CAPTURE_RUNTIME_AUTHORIZATION_V1_LEGACY_SIZE + 1U;
-  bool valid = Reject(&invalid, "a partial display tail was accepted");
-
-  invalid = RuntimeAuthorization(WDF_CAPTURE_POLICY_ALLOW, 1);
   invalid.struct_size = sizeof(invalid) - 1U;
-  valid = Reject(&invalid, "a nearly complete display tail was accepted") &&
-          valid;
-
-  invalid = RuntimeAuthorization(WDF_CAPTURE_POLICY_ALLOW, 1);
-  invalid.struct_size = WDF_CAPTURE_RUNTIME_AUTHORIZATION_V1_LEGACY_SIZE;
-  invalid.target_flags = WDF_CAPTURE_TARGET_PRESENT;
-  valid = Reject(&invalid, "legacy target-only allow was accepted") && valid;
-
-  invalid = RuntimeAuthorization(WDF_CAPTURE_POLICY_ALLOW, 1);
-  invalid.target_flags = WDF_CAPTURE_TARGET_PRESENT;
-  valid = Reject(&invalid, "allow without the display-present flag was accepted") &&
-          valid;
+  bool valid = Reject(&invalid, "a partial authorization structure was accepted");
 
   invalid = RuntimeAuthorization(WDF_CAPTURE_POLICY_ALLOW, 1);
   invalid.target_display_monitor_handle = 0;
@@ -591,40 +557,19 @@ bool TestRuntimeAuthorizationDisplayStructureContract() {
   invalid.target_display_reserved = 1;
   valid = Reject(&invalid, "nonzero display reserved data was accepted") && valid;
 
-  invalid = DisplayWideRuntimeAuthorization(1);
-  invalid.target_flags |= WDF_CAPTURE_TARGET_PRESENT;
-  valid = Reject(&invalid, "overlapping foreground and display-wide scopes were accepted") &&
-          valid;
-
-  invalid = DisplayWideRuntimeAuthorization(1);
-  invalid.target_window_handle = 100;
-  valid = Reject(&invalid, "display-wide authorization retained a window identity") &&
-          valid;
-
-  invalid = DisplayWideRuntimeAuthorization(1);
-  invalid.target_flags &= ~WDF_CAPTURE_TARGET_DISPLAY_PRESENT;
-  valid = Reject(&invalid, "display-wide authorization omitted its display") &&
-          valid;
-
-  invalid = DisplayWideRuntimeAuthorization(1);
-  invalid.struct_size = WDF_CAPTURE_RUNTIME_AUTHORIZATION_V1_LEGACY_SIZE;
-  valid = Reject(&invalid, "legacy authorization claimed display-wide scope") &&
-          valid;
-
   invalid = RuntimeAuthorization(WDF_CAPTURE_POLICY_BLOCK, 1);
   invalid.target_display_monitor_handle = 400;
   valid = Reject(&invalid, "restrictive authorization retained display data") &&
           valid;
 
-  wdf_capture_runtime_authorization_v1 legacy_block =
+  wdf_capture_runtime_authorization_v1 current_block =
       RuntimeAuthorization(WDF_CAPTURE_POLICY_BLOCK, 1);
-  legacy_block.struct_size = WDF_CAPTURE_RUNTIME_AUTHORIZATION_V1_LEGACY_SIZE;
   generation = 0;
   valid = Expect(wdf_capture_update_runtime_authorization(
-                     handle, &legacy_block, &generation) ==
+                     handle, &current_block, &generation) ==
                          WDF_CAPTURE_RESULT_OK &&
                      generation == 2,
-                 "legacy restrictive authorization was rejected") &&
+                 "restrictive display authorization was rejected") &&
           valid;
 
   wdf_capture_runtime_authorization_v1 current_allow =
@@ -647,7 +592,7 @@ bool TestRuntimeAuthorizationDisplayStructureContract() {
                      handle, &current_allow, &generation) ==
                          WDF_CAPTURE_RESULT_OK &&
                      generation == 3,
-                 "maximum display key after legacy block was rejected") &&
+                 "maximum display key after a block was rejected") &&
           valid;
 
   wdf_capture_destroy(&handle);
@@ -667,9 +612,6 @@ bool TestDisplayWideRuntimeAuthorizationContract() {
       1, 1, 400, "\\\\.\\display1");
   auto changed_display_reused_epoch_v2 = DisplayWideRuntimeAuthorization(
       2, 1, 401, "\\\\.\\DISPLAY2");
-  auto foreground_reused_epoch_v2 = RuntimeAuthorization(
-      WDF_CAPTURE_POLICY_ALLOW, 2, 1, 100, 200, 300, 400,
-      "\\\\.\\DISPLAY1");
   auto changed_display_v2 = DisplayWideRuntimeAuthorization(
       2, 2, 401, "\\\\.\\DISPLAY2");
 
@@ -688,10 +630,6 @@ bool TestDisplayWideRuntimeAuthorizationContract() {
                  handle, &changed_display_reused_epoch_v2, &generation) ==
                  WDF_CAPTURE_RESULT_TARGET_MISMATCH,
              "display-wide monitor changed without an epoch advance") &&
-      Expect(wdf_capture_update_runtime_authorization(
-                 handle, &foreground_reused_epoch_v2, &generation) ==
-                 WDF_CAPTURE_RESULT_TARGET_MISMATCH,
-             "authorization scope changed without an epoch advance") &&
       Expect(wdf_capture_update_runtime_authorization(
                  handle, &changed_display_v2, &generation) ==
                      WDF_CAPTURE_RESULT_OK &&
@@ -712,13 +650,13 @@ bool TestRuntimeAuthorizationBarrierContract() {
   uint64_t generation = 99;
   wdf_capture_runtime_authorization_v1 invalid =
       RuntimeAuthorization(WDF_CAPTURE_POLICY_ALLOW, 1);
-  invalid.target_flags |= 1U << 7;
-  const bool unknown_flags_rejected = Expect(
+  invalid.target_epoch = 0;
+  const bool partial_target_rejected = Expect(
       wdf_capture_update_runtime_authorization(
           handle, &invalid, &generation) ==
               WDF_CAPTURE_RESULT_INVALID_ARGUMENT &&
           generation == 0,
-      "unknown target flags were accepted");
+      "partial display target was accepted");
   invalid = RuntimeAuthorization(WDF_CAPTURE_POLICY_ALLOW, 1);
   invalid.reserved[0] = 1;
   const bool reserved_rejected = Expect(
@@ -727,11 +665,7 @@ bool TestRuntimeAuthorizationBarrierContract() {
           WDF_CAPTURE_RESULT_INVALID_ARGUMENT,
       "nonzero runtime authorization reserved data was accepted");
   invalid = RuntimeAuthorization(WDF_CAPTURE_POLICY_ALLOW, 1);
-  invalid.target_flags = 0;
   invalid.target_epoch = 0;
-  invalid.target_window_handle = 0;
-  invalid.target_process_creation_time_100ns = 0;
-  invalid.target_process_id = 0;
   invalid.target_display_monitor_handle = 0;
   invalid.target_display_device_key_utf8_length = 0;
   std::memset(invalid.target_display_device_key_utf8,
@@ -742,12 +676,8 @@ bool TestRuntimeAuthorizationBarrierContract() {
           handle, &invalid, &generation) ==
           WDF_CAPTURE_RESULT_INVALID_ARGUMENT,
       "fully allowed authorization omitted its target");
-  invalid = RuntimeAuthorization(WDF_CAPTURE_POLICY_BLOCK, 1);
-  invalid.target_flags = WDF_CAPTURE_TARGET_PRESENT;
-  invalid.target_epoch = 1;
-  invalid.target_window_handle = 100;
-  invalid.target_process_creation_time_100ns = 300;
-  invalid.target_process_id = 200;
+  invalid = RuntimeAuthorization(WDF_CAPTURE_POLICY_ALLOW, 1);
+  invalid.consent_granted = WDF_CAPTURE_POLICY_BLOCK;
   const bool block_with_target_rejected = Expect(
       wdf_capture_update_runtime_authorization(
           handle, &invalid, &generation) ==
@@ -760,8 +690,6 @@ bool TestRuntimeAuthorizationBarrierContract() {
       RuntimeAuthorization(WDF_CAPTURE_POLICY_BLOCK, 1);
   wdf_capture_runtime_authorization_v1 gap_v3 =
       RuntimeAuthorization(WDF_CAPTURE_POLICY_ALLOW, 3);
-  wdf_capture_runtime_authorization_v1 reused_epoch_v2 =
-      RuntimeAuthorization(WDF_CAPTURE_POLICY_ALLOW, 2, 1, 101);
   wdf_capture_runtime_authorization_v1 reused_display_epoch_v2 =
       RuntimeAuthorization(
           WDF_CAPTURE_POLICY_ALLOW, 2, 1, 100, 200, 300, 401);
@@ -799,10 +727,6 @@ bool TestRuntimeAuthorizationBarrierContract() {
                  WDF_CAPTURE_RESULT_TARGET_MISMATCH,
              "display tuple changed without an epoch advance") &&
       Expect(wdf_capture_update_runtime_authorization(
-                 handle, &reused_epoch_v2, &generation) ==
-                 WDF_CAPTURE_RESULT_TARGET_MISMATCH,
-             "target tuple changed without an epoch advance") &&
-      Expect(wdf_capture_update_runtime_authorization(
                  handle, &allow_v2, &generation) == WDF_CAPTURE_RESULT_OK &&
                  generation == 3,
              "epoch-advanced target was rejected") &&
@@ -829,7 +753,7 @@ bool TestRuntimeAuthorizationBarrierContract() {
              "runtime authorization accepted a null generation output");
 
   wdf_capture_destroy(&handle);
-  return unknown_flags_rejected && reserved_rejected &&
+  return partial_target_rejected && reserved_rejected &&
          allow_without_target_rejected && block_with_target_rejected &&
          revision_and_target_rules;
 }

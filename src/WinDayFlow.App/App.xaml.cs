@@ -4,8 +4,8 @@ using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.Windows.AppLifecycle;
 using WinDayFlow.App.Services;
-using WinDayFlow.Application.Ai;
 using WinDayFlow.Application.Capture;
+using WinDayFlow.Application.Privacy;
 using WinDayFlow.Application.Settings;
 using WinDayFlow.Capture.Interop;
 using WinDayFlow.Composition;
@@ -13,6 +13,7 @@ using WinDayFlow.Infrastructure.Persistence;
 using WinDayFlow.Presentation.Capture;
 using WinDayFlow.Presentation.Settings;
 using WinDayFlow.Presentation.Shell;
+using WinDayFlow.Presentation.Statistics;
 using WinDayFlow.Presentation.Timeline;
 
 namespace WinDayFlow.App;
@@ -63,19 +64,25 @@ public partial class App : Microsoft.UI.Xaml.Application, IDisposable
                         AddUnavailableCaptureServices(services);
                     }
                     services.AddWinDayFlowProductionServices(DataDirectoryPath);
+                    services.AddSingleton<IPrivacyEvidenceRedactor>(provider =>
+                        new SystemDrawingPrivacyEvidenceRedactor(
+                            DataDirectoryPath,
+                            provider.GetRequiredService<ICaptureFrameArchive>()));
                     services.AddSingleton<ICaptureService,
                         ConsentGatedCaptureService>();
                     services.AddSingleton(provider => new EvidenceMediaService(
                         DataDirectoryPath,
                         provider.GetRequiredService<ICaptureManifestScanner>(),
-                        provider.GetRequiredService<ICaptureFrameArchive>()));
+                        provider.GetRequiredService<ICaptureFrameArchive>(),
+                        provider.GetRequiredService<ICaptureContextStore>()));
 
                     services.AddTransient<TimelineViewModel>();
                     services.AddTransient(provider => new SettingsViewModel(
                         provider.GetRequiredService<AppSettingsService>(),
                         provider.GetRequiredService<ICaptureService>(),
                         isExclusionEngineAvailable));
-                    services.AddTransient<AiProviderSettingsViewModel>();
+                    services.AddTransient<AiRoutingSettingsViewModel>();
+                    services.AddTransient<StatisticsViewModel>();
                     services.AddSingleton<CaptureStatusViewModel>();
                     services.AddSingleton<ShellViewModel>();
                     services.AddSingleton<MainWindow>();
@@ -148,9 +155,6 @@ public partial class App : Microsoft.UI.Xaml.Application, IDisposable
                 .InitializeAsync();
             var settings = _host.Services.GetRequiredService<AppSettingsService>();
             await settings.InitializeAsync();
-            await _host.Services
-                .GetRequiredService<AiProviderConfigurationService>()
-                .InitializeAsync();
             await _host.StartAsync();
             ApplyTheme(settings.Current.Theme);
             _window = _host.Services.GetRequiredService<MainWindow>();

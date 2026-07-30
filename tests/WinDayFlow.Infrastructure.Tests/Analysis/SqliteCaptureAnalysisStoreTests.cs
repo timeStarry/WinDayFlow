@@ -173,7 +173,7 @@ public sealed class SqliteCaptureAnalysisStoreTests
     }
 
     [Fact]
-    public async Task EnqueueIsIdempotentByStableInputKeyAndRejectsChangedFingerprint()
+    public async Task EnqueueIsIdempotentByStableInputKeyAndAllowsChangedFingerprint()
     {
         using var database = new TemporaryDatabase();
         var (_, store) = await CreateStoreAsync(database);
@@ -197,12 +197,14 @@ public sealed class SqliteCaptureAnalysisStoreTests
         Assert.Equal(firstJob.Id, duplicate.Job.Id);
         Assert.Equal(AnalysisJobState.Pending, duplicate.Job.State);
 
-        var conflict = CreatePendingJob(
+        var changedInput = CreatePendingJob(
             Guid.Parse("10000000-0000-0000-0000-000000000003"),
             chunk.Id,
             fingerprintCharacter: 'B');
-        await Assert.ThrowsAsync<AnalysisJobConflictException>(
-            () => store.EnqueueAsync(conflict));
+        var changed = await store.EnqueueAsync(changedInput);
+
+        Assert.True(changed.Created);
+        Assert.Equal(changedInput.Id, changed.Job.Id);
     }
 
     [Fact]
@@ -290,11 +292,10 @@ public sealed class SqliteCaptureAnalysisStoreTests
             completedChunk.Id,
             "analysis-v1",
             new string('A', 64)));
-        await Assert.ThrowsAsync<CaptureChunkConflictException>(() =>
-            jobStore.HasCompletedAnalysisAsync(
-                completedChunk.Id,
-                "analysis-v1",
-                new string('B', 64)));
+        Assert.False(await jobStore.HasCompletedAnalysisAsync(
+            completedChunk.Id,
+            "analysis-v1",
+            new string('B', 64)));
         Assert.False(await jobStore.HasCompletedAnalysisAsync(
             completedChunk.Id,
             "analysis-v2",
@@ -314,7 +315,7 @@ public sealed class SqliteCaptureAnalysisStoreTests
     }
 
     [Fact]
-    public async Task CompletedAnalysisQueryRejectsAnyConflictingFingerprint()
+    public async Task CompletedAnalysisQueryMatchesEachCompletedFingerprintIndependently()
     {
         using var database = new TemporaryDatabase();
         var (_, store) = await CreateStoreAsync(database);
@@ -334,20 +335,18 @@ public sealed class SqliteCaptureAnalysisStoreTests
             providerProfileRevision: 2));
         await CompleteNextJobAsync(store, "worker-completed-b");
 
-        await Assert.ThrowsAsync<CaptureChunkConflictException>(() =>
-            jobStore.HasCompletedAnalysisAsync(
-                chunk.Id,
-                "analysis-v1",
-                new string('A', 64)));
-        await Assert.ThrowsAsync<CaptureChunkConflictException>(() =>
-            jobStore.HasCompletedAnalysisAsync(
-                chunk.Id,
-                "analysis-v1",
-                new string('B', 64)));
+        Assert.True(await jobStore.HasCompletedAnalysisAsync(
+            chunk.Id,
+            "analysis-v1",
+            new string('A', 64)));
+        Assert.True(await jobStore.HasCompletedAnalysisAsync(
+            chunk.Id,
+            "analysis-v1",
+            new string('B', 64)));
     }
 
     [Fact]
-    public async Task CompletedAnalysisQueryRejectsChangedFingerprintWhileEarlierRevisionIsPending()
+    public async Task CompletedAnalysisQueryReturnsFalseForChangedFingerprintWhileEarlierRevisionIsPending()
     {
         using var database = new TemporaryDatabase();
         var (_, store) = await CreateStoreAsync(database);
@@ -360,11 +359,10 @@ public sealed class SqliteCaptureAnalysisStoreTests
             fingerprintCharacter: 'A',
             providerProfileRevision: 1));
 
-        await Assert.ThrowsAsync<CaptureChunkConflictException>(() =>
-            jobStore.HasCompletedAnalysisAsync(
-                chunk.Id,
-                "analysis-v1",
-                new string('B', 64)));
+        Assert.False(await jobStore.HasCompletedAnalysisAsync(
+            chunk.Id,
+            "analysis-v1",
+            new string('B', 64)));
         Assert.False(await jobStore.HasCompletedAnalysisAsync(
             chunk.Id,
             "analysis-v1",

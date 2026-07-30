@@ -17,21 +17,49 @@ internal sealed record EvidenceFrameMedia(
     CaptureFrameDescriptor Descriptor,
     CaptureProcessTelemetry? ProcessTelemetry);
 
+internal sealed record EvidenceApplicationSummary(
+    string ApplicationId,
+    string DisplayName,
+    int SampleCount,
+    double AverageCpuPercent,
+    double PeakCpuPercent,
+    long PeakWorkingSetBytes,
+    long PeakPrivateMemoryBytes)
+{
+    public string CpuSummary =>
+        $"CPU 平均 {AverageCpuPercent:F1}% · 峰值 {PeakCpuPercent:F1}%";
+
+    public string MemorySummary =>
+        $"工作集峰值 {FormatBytes(PeakWorkingSetBytes)} · 私有内存峰值 {FormatBytes(PeakPrivateMemoryBytes)}";
+
+    private static string FormatBytes(long bytes)
+    {
+        const double mebibyte = 1024d * 1024d;
+        const double gibibyte = 1024d * mebibyte;
+        return bytes >= gibibyte
+            ? $"{bytes / gibibyte:F1} GB"
+            : $"{bytes / mebibyte:F0} MB";
+    }
+}
+
 internal sealed class EvidenceMediaService
 {
     private readonly string _dataRoot;
     private readonly string _dataRootPrefix;
     private readonly ICaptureManifestScanner _scanner;
     private readonly ICaptureFrameArchive _archive;
+    private readonly ICaptureContextStore _contextStore;
 
     public EvidenceMediaService(
         string dataRoot,
         ICaptureManifestScanner scanner,
-        ICaptureFrameArchive archive)
+        ICaptureFrameArchive archive,
+        ICaptureContextStore contextStore)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(dataRoot);
         _scanner = scanner ?? throw new ArgumentNullException(nameof(scanner));
         _archive = archive ?? throw new ArgumentNullException(nameof(archive));
+        _contextStore = contextStore ?? throw new ArgumentNullException(nameof(contextStore));
         _dataRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(dataRoot));
         _dataRootPrefix = _dataRoot + Path.DirectorySeparatorChar;
     }
@@ -126,6 +154,49 @@ internal sealed class EvidenceMediaService
         ArgumentNullException.ThrowIfNull(frame);
         EnsureUnderDataRoot(frame.AbsolutePath);
         return _archive.ReadFrameBytesAsync(frame.Descriptor, cancellationToken);
+    }
+
+    public async Task<IReadOnlyList<EvidenceApplicationSummary>> GetApplicationSummariesAsync(
+        IReadOnlyList<EvidenceReference> evidenceReferences,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(evidenceReferences);
+        var samples = new List<CaptureContextSample>();
+        foreach (var evidence in evidenceReferences)
+        {
+            var chunkSamples = await _contextStore.ListAsync(
+                    evidence.CaptureChunkId,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            samples.AddRange(chunkSamples.Where(sample =>
+                sample.Application is not null
+                && (evidence.ContributionRange is null
+                    || evidence.ContributionRange.Contains(sample.SampledAt))));
+        }
+
+        return samples
+            .GroupBy(
+                static sample => sample.Application!.ApplicationId,
+                StringComparer.Ordinal)
+            .Select(group =>
+            {
+                var applications = group.Select(static sample => sample.Application!).ToArray();
+                return new EvidenceApplicationSummary(
+                    group.Key,
+                    applications
+                        .GroupBy(static app => app.DisplayName, StringComparer.Ordinal)
+                        .OrderByDescending(static names => names.Count())
+                        .ThenBy(static names => names.Key, StringComparer.Ordinal)
+                        .First().Key,
+                    applications.Length,
+                    applications.Average(static app => app.CpuUsageBasisPoints) / 100d,
+                    applications.Max(static app => app.CpuUsageBasisPoints) / 100d,
+                    applications.Max(static app => app.WorkingSetBytes),
+                    applications.Max(static app => app.PrivateMemoryBytes));
+            })
+            .OrderByDescending(static summary => summary.SampleCount)
+            .ThenBy(static summary => summary.DisplayName, StringComparer.Ordinal)
+            .ToArray();
     }
 
     public async Task ExportTimelapseAsync(

@@ -31,17 +31,16 @@ public sealed class CaptureManifestScannerTests
     }
 
     [Fact]
-    public async Task ScansVersionThreeProcessTelemetry()
+    public async Task ScansVersionFourProcessTelemetry()
     {
         using var root = new TemporaryRoot();
         var paths = WriteChunk(root.Path, "chunk-telemetry");
         File.WriteAllText(
             paths.ManifestPath,
             File.ReadAllText(paths.ManifestPath)
-                .Replace("\"schemaVersion\": 2", "\"schemaVersion\": 3", StringComparison.Ordinal)
                 .Replace(
-                    "\"authorization\": {\"persistenceGeneration\": 7, \"targetEpoch\": 11},",
-                    "\"authorization\": {\"persistenceGeneration\": 7, \"targetEpoch\": 11},\n  \"application\": {\"processName\":\"Code.exe\",\"processId\":4242,\"cpuUsageBasisPoints\":1250,\"workingSetBytes\":536870912,\"privateMemoryBytes\":402653184},",
+                    "\"application\": null,",
+                    "\"application\": {\"processName\":\"Code.exe\",\"processId\":4242,\"cpuUsageBasisPoints\":1250,\"workingSetBytes\":536870912,\"privateMemoryBytes\":402653184},",
                     StringComparison.Ordinal));
 
         var chunk = Assert.Single(await CreateScanner(root.Path).ScanCommittedAsync());
@@ -84,7 +83,7 @@ public sealed class CaptureManifestScannerTests
         File.WriteAllText(
             legacy.ManifestPath,
             File.ReadAllText(legacy.ManifestPath)
-                .Replace("\"schemaVersion\": 2", "\"schemaVersion\": 1", StringComparison.Ordinal));
+                .Replace("\"schemaVersion\": 4", "\"schemaVersion\": 3", StringComparison.Ordinal));
         File.WriteAllText(
             extra.ManifestPath,
             File.ReadAllText(extra.ManifestPath)
@@ -103,6 +102,34 @@ public sealed class CaptureManifestScannerTests
         var chunks = await CreateScanner(root.Path).ScanCommittedAsync();
 
         Assert.Equal(["chunk-a", "chunk-b"], chunks.Select(static chunk => chunk.Id));
+    }
+
+    [Fact]
+    public async Task ScansContextChunkWithSamplesAndNoRetainedJpegs()
+    {
+        using var root = new TemporaryRoot();
+        var paths = WriteChunk(root.Path, "chunk-filtered");
+        File.Delete(paths.FramePath);
+        File.WriteAllText(
+            paths.ManifestPath,
+            File.ReadAllText(paths.ManifestPath)
+                .Replace("\"blackFrameCount\": 0", "\"blackFrameCount\": 1", StringComparison.Ordinal)
+                .Replace("\"retainedFrameCount\": 1", "\"retainedFrameCount\": 0", StringComparison.Ordinal)
+                .Replace("\"totalByteCount\": 4", "\"totalByteCount\": 0", StringComparison.Ordinal)
+                .Replace(
+                    "\"items\": [{\"id\":\"frame-000000\",\"index\":0,\"path\":\"frames/frame-000000.jpg\",\"offsetMilliseconds\":30000,\"byteCount\":4,\"sha256\":\""
+                        + Convert.ToHexString(SHA256.HashData([0xff, 0xd8, 0xff, 0xd9]))
+                        + "\"}]",
+                    "\"items\": []",
+                    StringComparison.Ordinal));
+
+        var chunk = Assert.Single(await CreateScanner(root.Path).ScanCommittedAsync());
+
+        Assert.Equal(2U, chunk.CapturedFrameCount);
+        Assert.Equal(1U, chunk.BlackFrameCount);
+        Assert.Equal(1U, chunk.DuplicateFrameCount);
+        Assert.Equal(0U, chunk.FrameCount);
+        Assert.Equal(0, chunk.FrameByteCount);
     }
 
     private static CaptureManifestScanner CreateScanner(string root) => new(
@@ -130,16 +157,20 @@ public sealed class CaptureManifestScannerTests
             manifestPath,
             $$"""
             {
-              "schemaVersion": 2,
+              "schemaVersion": 4,
               "captureScope": "{{captureScope}}",
               "chunkId": "{{chunkId}}",
               "startTimeUnixMs": {{Start.ToUnixTimeMilliseconds()}},
               "endTimeUnixMs": {{Start.AddMinutes(1).ToUnixTimeMilliseconds()}},
               "authorization": {"persistenceGeneration": 7, "targetEpoch": 11},
+              "application": null,
+              "contextSamples": [],
               "frames": {
                 "format": "jpeg",
                 "quality": 82,
-                "capturedFrameCount": 2,
+                "sampledFrameCount": 2,
+                "blackFrameCount": 0,
+                "duplicateFrameCount": 1,
                 "retainedFrameCount": 1,
                 "width": 1600,
                 "height": 900,

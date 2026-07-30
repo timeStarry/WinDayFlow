@@ -87,6 +87,11 @@
                     <SymbolIcon Symbol="ViewAll" />
                 </NavigationViewItem.Icon>
             </NavigationViewItem>
+            <NavigationViewItem AccessKey="I" Content="统计" Tag="statistics">
+                <NavigationViewItem.Icon>
+                    <SymbolIcon Symbol="ViewAll" />
+                </NavigationViewItem.Icon>
+            </NavigationViewItem>
             <NavigationViewItem AccessKey="C" Content="问答" Tag="chat">
                 <NavigationViewItem.Icon>
                     <SymbolIcon Symbol="Message" />

@@ -384,4 +384,60 @@ std::optional<CaptureTargetIdentity> ObserveWindowsCaptureAuthorization(
   return ObserveWindowsCaptureAuthorizationWithApi(api, expected);
 }
 
+std::optional<CaptureTargetIdentity> ObserveWindowsForegroundTargetForDisplay(
+    const CaptureTargetIdentity& expected_display) noexcept {
+  if (!IsValidExpectedDisplayWideTarget(expected_display)) {
+    return std::nullopt;
+  }
+
+  WindowsCaptureTargetObserverApi api;
+  try {
+    const HWND first_window = api.ReadForegroundWindow();
+    WindowOwner first_owner;
+    DisplayAnchor first_display;
+    if (first_window == nullptr || !ReadOwner(api, first_window, &first_owner) ||
+        !ReadDisplayAnchor(api, first_window, &first_display) ||
+        !MatchesExpectedDisplay(first_display, expected_display)) {
+      return std::nullopt;
+    }
+
+    HANDLE opened_process = api.OpenTargetProcess(
+        PROCESS_QUERY_LIMITED_INFORMATION, FALSE, first_owner.process_id);
+    if (opened_process == nullptr || opened_process == INVALID_HANDLE_VALUE) {
+      return std::nullopt;
+    }
+    ScopedProcessHandle process(api, opened_process);
+    uint64_t creation_time = 0;
+    if (api.ReadProcessId(process.get()) != first_owner.process_id ||
+        !ReadCreationTime(api, process.get(), &creation_time)) {
+      return std::nullopt;
+    }
+
+    const HWND second_window = api.ReadForegroundWindow();
+    WindowOwner second_owner;
+    DisplayAnchor second_display;
+    if (second_window != first_window ||
+        !ReadOwner(api, second_window, &second_owner) ||
+        second_owner != first_owner ||
+        !ReadDisplayAnchor(api, second_window, &second_display) ||
+        second_display.monitor != first_display.monitor ||
+        !DeviceKeysEqual(second_display.device_key, first_display.device_key) ||
+        !MatchesExpectedDisplay(second_display, expected_display) ||
+        !process.Close()) {
+      return std::nullopt;
+    }
+
+    return CaptureTargetIdentity{
+        HandleValue(second_window),
+        second_owner.process_id,
+        creation_time,
+        expected_display.target_epoch,
+        HandleValue(second_display.monitor),
+        std::move(second_display.device_key),
+        CaptureAuthorizationScope::kForegroundTarget};
+  } catch (...) {
+    return std::nullopt;
+  }
+}
+
 }  // namespace windayflow::capture

@@ -72,10 +72,6 @@ internal unsafe struct NativeCapturePrivacyContextV1
     public int ConsentGranted;
     public int SessionUnlocked;
     public int SecureDesktopClear;
-    public int RemoteSessionAllowed;
-    public int PresentationAllowed;
-    public int ApplicationAllowed;
-    public int WindowAllowed;
     public int StorageAvailable;
     public ulong PolicyRevision;
     public fixed uint Reserved[8];
@@ -84,25 +80,13 @@ internal unsafe struct NativeCapturePrivacyContextV1
 [StructLayout(LayoutKind.Sequential, Pack = 8)]
 internal unsafe struct NativeCaptureRuntimeAuthorizationV1
 {
-    internal const uint TargetPresent = 1U << 0;
-    internal const uint TargetDisplayPresent = 1U << 1;
-    internal const uint TargetDisplayWideScope = 1U << 2;
-
     public uint StructSize;
     public uint AbiVersion;
     public ulong RuntimePolicyRevision;
     public ulong TargetEpoch;
-    public ulong TargetWindowHandle;
-    public ulong TargetProcessCreationTime100ns;
-    public uint TargetProcessId;
-    public uint TargetFlags;
     public int ConsentGranted;
     public int SessionUnlocked;
     public int SecureDesktopClear;
-    public int RemoteSessionAllowed;
-    public int PresentationAllowed;
-    public int ApplicationAllowed;
-    public int WindowAllowed;
     public int StorageAvailable;
     public fixed uint Reserved[8];
     public ulong TargetDisplayMonitorHandle;
@@ -157,6 +141,32 @@ internal unsafe struct NativeCaptureEventV1
         return new NativeCaptureEventV1
         {
             StructSize = checked((uint)sizeof(NativeCaptureEventV1)),
+            AbiVersion = NativeCaptureAbiContract.AbiVersion,
+        };
+    }
+}
+
+[StructLayout(LayoutKind.Sequential, Pack = 8)]
+internal unsafe struct NativeCaptureHealthSnapshotV2
+{
+    public uint StructSize;
+    public uint AbiVersion;
+    public int State;
+    public int Reason;
+    public long LastSuccessfulSampleUnixMilliseconds;
+    public long LastRetainedFrameUnixMilliseconds;
+    public ulong SampledFrameCount;
+    public ulong BlackFrameCount;
+    public ulong DuplicateFrameCount;
+    public ulong RetainedFrameCount;
+    public ulong Revision;
+    public fixed uint Reserved[8];
+
+    public static NativeCaptureHealthSnapshotV2 Create()
+    {
+        return new NativeCaptureHealthSnapshotV2
+        {
+            StructSize = checked((uint)sizeof(NativeCaptureHealthSnapshotV2)),
             AbiVersion = NativeCaptureAbiContract.AbiVersion,
         };
     }
@@ -313,6 +323,13 @@ internal interface INativeCaptureApi
         uint detailUtf8Capacity,
         out uint detailUtf8Required);
 
+    NativeCaptureResult GetHealthSnapshot(
+        SafeCaptureHandle handle,
+        ref NativeCaptureHealthSnapshotV2 snapshot)
+    {
+        return NativeCaptureResult.NotImplemented;
+    }
+
     NativeCaptureResult Destroy(ref nuint handle);
 }
 
@@ -425,6 +442,11 @@ internal sealed class PInvokeNativeCaptureApi : INativeCaptureApi
             detailUtf8,
             detailUtf8Capacity,
             out detailUtf8Required);
+
+    public NativeCaptureResult GetHealthSnapshot(
+        SafeCaptureHandle handle,
+        ref NativeCaptureHealthSnapshotV2 snapshot) =>
+        NativeCaptureMethods.wdf_capture_get_health_snapshot(handle, ref snapshot);
 
     public NativeCaptureResult Destroy(ref nuint handle) =>
         NativeCaptureMethods.Destroy(ref handle);
@@ -561,6 +583,11 @@ internal static class NativeCaptureMethods
         [Out] byte[] detailUtf8,
         uint detailUtf8Capacity,
         out uint detailUtf8Required);
+
+    [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+    internal static extern NativeCaptureResult wdf_capture_get_health_snapshot(
+        SafeCaptureHandle handle,
+        ref NativeCaptureHealthSnapshotV2 snapshot);
 
     [DllImport(LibraryName, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true,
         EntryPoint = "wdf_capture_destroy")]

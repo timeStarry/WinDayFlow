@@ -33,7 +33,9 @@ public sealed class SqliteCaptureAnalysisStore :
         process_id,
         cpu_usage_basis_points,
         working_set_bytes,
-        private_memory_bytes
+        private_memory_bytes,
+        black_frame_count,
+        duplicate_frame_count
         """;
 
     private const string AnalysisJobColumns = """
@@ -144,7 +146,9 @@ public sealed class SqliteCaptureAnalysisStore :
                     process_id,
                     cpu_usage_basis_points,
                     working_set_bytes,
-                    private_memory_bytes)
+                    private_memory_bytes,
+                    black_frame_count,
+                    duplicate_frame_count)
                 VALUES (
                     $id,
                     $manifest_relative_path,
@@ -166,7 +170,9 @@ public sealed class SqliteCaptureAnalysisStore :
                     $process_id,
                     $cpu_usage_basis_points,
                     $working_set_bytes,
-                    $private_memory_bytes);
+                    $private_memory_bytes,
+                    $black_frame_count,
+                    $duplicate_frame_count);
                 """;
             AddCaptureChunkParameters(command.Parameters, chunk);
             try
@@ -429,20 +435,13 @@ public sealed class SqliteCaptureAnalysisStore :
         await using var command = connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = """
-            SELECT
-                EXISTS (
-                    SELECT 1
-                    FROM analysis_jobs
-                    WHERE capture_chunk_id = $capture_chunk_id
-                        AND analysis_version = $analysis_version
-                        AND input_fingerprint = $input_fingerprint
-                        AND state = $completed_state),
-                EXISTS (
-                    SELECT 1
-                    FROM analysis_jobs
-                    WHERE capture_chunk_id = $capture_chunk_id
-                        AND analysis_version = $analysis_version
-                        AND input_fingerprint <> $input_fingerprint);
+            SELECT EXISTS (
+                SELECT 1
+                FROM analysis_jobs
+                WHERE capture_chunk_id = $capture_chunk_id
+                    AND analysis_version = $analysis_version
+                    AND input_fingerprint = $input_fingerprint
+                    AND state = $completed_state);
             """;
         command.Parameters.AddWithValue("$capture_chunk_id", captureChunkId);
         command.Parameters.AddWithValue("$analysis_version", analysisVersion);
@@ -459,14 +458,8 @@ public sealed class SqliteCaptureAnalysisStore :
         }
 
         var hasExactFingerprint = reader.GetInt32(0) != 0;
-        var hasMismatchedFingerprint = reader.GetInt32(1) != 0;
         await reader.DisposeAsync().ConfigureAwait(false);
         await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-        if (hasMismatchedFingerprint)
-        {
-            throw new CaptureChunkConflictException(captureChunkId);
-        }
-
         return hasExactFingerprint;
     }
 
@@ -680,6 +673,8 @@ public sealed class SqliteCaptureAnalysisStore :
                 chunks.cpu_usage_basis_points,
                 chunks.working_set_bytes,
                 chunks.private_memory_bytes,
+                chunks.black_frame_count,
+                chunks.duplicate_frame_count,
                 members.source_fingerprint,
                 members.contribution_start_utc_ticks,
                 members.contribution_start_offset_minutes,
@@ -700,10 +695,10 @@ public sealed class SqliteCaptureAnalysisStore :
         {
             members.Add(new AnalysisWindowMember(
                 ReadCaptureChunk(reader),
-                new CaptureChunkFingerprint(reader.GetString(21)),
+                new CaptureChunkFingerprint(reader.GetString(23)),
                 new TimeRange(
-                    ReadTimestamp(reader.GetInt64(22), reader.GetInt32(23)),
-                    ReadTimestamp(reader.GetInt64(24), reader.GetInt32(25)))));
+                    ReadTimestamp(reader.GetInt64(24), reader.GetInt32(25)),
+                    ReadTimestamp(reader.GetInt64(26), reader.GetInt32(27)))));
         }
 
         return members;
@@ -811,6 +806,8 @@ public sealed class SqliteCaptureAnalysisStore :
             && left.FrameWidth == right.FrameWidth
             && left.FrameHeight == right.FrameHeight
             && left.FrameByteCount == right.FrameByteCount
+            && left.BlackFrameCount == right.BlackFrameCount
+            && left.DuplicateFrameCount == right.DuplicateFrameCount
             && left.PersistenceGeneration == right.PersistenceGeneration
             && left.TargetEpoch == right.TargetEpoch
             && left.ProcessTelemetry == right.ProcessTelemetry;
@@ -892,6 +889,12 @@ public sealed class SqliteCaptureAnalysisStore :
             parameters,
             "$private_memory_bytes",
             chunk.ProcessTelemetry?.PrivateMemoryBytes);
+        parameters.AddWithValue(
+            "$black_frame_count",
+            checked((long)chunk.BlackFrameCount));
+        parameters.AddWithValue(
+            "$duplicate_frame_count",
+            checked((long)chunk.DuplicateFrameCount));
     }
 
     private static void AddPendingJobParameters(
@@ -1628,7 +1631,9 @@ public sealed class SqliteCaptureAnalysisStore :
             ReadUtcTimestamp(reader.GetInt64(13)),
             ReadUtcTimestamp(reader.GetInt64(14)),
             (CaptureChunkAvailability)reader.GetInt32(15),
-            processTelemetry);
+            processTelemetry,
+            checked((uint)reader.GetInt64(21)),
+            checked((uint)reader.GetInt64(22)));
     }
 
     private static async Task<AnalysisJob?> ReadAnalysisJobByIdAsync(
@@ -1662,7 +1667,8 @@ public sealed class SqliteCaptureAnalysisStore :
             WHERE capture_chunk_id = $capture_chunk_id
                 AND provider_profile_id = $provider_profile_id
                 AND provider_profile_revision = $provider_profile_revision
-                AND analysis_version = $analysis_version;
+                AND analysis_version = $analysis_version
+                AND input_fingerprint = $input_fingerprint;
             """;
         command.Parameters.AddWithValue("$capture_chunk_id", definition.CaptureChunkId);
         command.Parameters.AddWithValue(
@@ -1672,6 +1678,7 @@ public sealed class SqliteCaptureAnalysisStore :
             "$provider_profile_revision",
             definition.ProviderProfileRevision);
         command.Parameters.AddWithValue("$analysis_version", definition.AnalysisVersion);
+        command.Parameters.AddWithValue("$input_fingerprint", definition.InputFingerprint);
         return await ReadSingleAnalysisJobAsync(command, cancellationToken).ConfigureAwait(false);
     }
 

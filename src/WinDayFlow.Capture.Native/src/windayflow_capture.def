@@ -17,4 +17,5 @@ EXPORTS
   wdf_capture_request_stop
   wdf_capture_wait_stopped
   wdf_capture_poll_event
+  wdf_capture_get_health_snapshot
   wdf_capture_destroy

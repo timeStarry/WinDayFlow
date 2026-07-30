@@ -80,6 +80,7 @@ public sealed record CaptureStatus
         CaptureState.Unavailable => false,
         CaptureState.Faulted => false,
         CaptureState.BlockedByConsent => false,
+        CaptureState.NeedsAttention => false,
         _ => false,
     };
 

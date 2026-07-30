@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using WinDayFlow.Application.Ai;
 using WinDayFlow.Application.Capture;
+using WinDayFlow.Application.Privacy;
 using WinDayFlow.Application.Settings;
 using WinDayFlow.Domain;
 
@@ -102,10 +103,15 @@ public sealed class AnalysisJobProcessor
     private readonly IAnalysisEvidenceExtractor _evidenceExtractor;
     private readonly IAnalysisResultCommitter _resultCommitter;
     private readonly AppSettingsService _settings;
-    private readonly AiAnalysisSendGate _sendGate;
+    private readonly AnalysisProviderSendGate _sendGate;
     private readonly AnalysisJobProcessorOptions _options;
     private readonly TimeProvider _timeProvider;
     private readonly IAnalysisWindowStore? _windowStore;
+    private readonly IAnalysisStageBindingStore? _stageBindingStore;
+    private readonly IProviderInvocationStore? _invocationStore;
+    private readonly ICaptureChunkFingerprintProvider? _fingerprintProvider;
+    private readonly IPrivacyScreeningService? _privacyScreeningService;
+    private readonly IEvidenceSendPolicy? _sendPolicy;
 
     public AnalysisJobProcessor(
         IAnalysisJobStore jobStore,
@@ -117,7 +123,13 @@ public sealed class AnalysisJobProcessor
         AppSettingsService settings,
         AnalysisJobProcessorOptions options,
         TimeProvider? timeProvider = null,
-        IAnalysisWindowStore? windowStore = null)
+        IAnalysisWindowStore? windowStore = null,
+        IAnalysisStageBindingStore? stageBindingStore = null,
+        IProviderInvocationStore? invocationStore = null,
+        ICaptureChunkFingerprintProvider? fingerprintProvider = null,
+        IPrivacyScreeningService? privacyScreeningService = null,
+        IEvidenceSendPolicy? sendPolicy = null,
+        AnalysisProviderSendGate? sendGate = null)
     {
         _jobStore = jobStore ?? throw new ArgumentNullException(nameof(jobStore));
         _chunkStore = chunkStore ?? throw new ArgumentNullException(nameof(chunkStore));
@@ -129,19 +141,24 @@ public sealed class AnalysisJobProcessor
         _resultCommitter = resultCommitter
             ?? throw new ArgumentNullException(nameof(resultCommitter));
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
-        _sendGate = AiAnalysisSendGate.GetFor(settings);
+        _sendGate = sendGate ?? new AnalysisProviderSendGate();
         _options = options ?? throw new ArgumentNullException(nameof(options));
         _timeProvider = timeProvider ?? TimeProvider.System;
         _windowStore = windowStore ?? jobStore as IAnalysisWindowStore;
+        _stageBindingStore = stageBindingStore;
+        _invocationStore = invocationStore;
+        _fingerprintProvider = fingerprintProvider;
+        _privacyScreeningService = privacyScreeningService;
+        _sendPolicy = sendPolicy;
     }
 
     public async Task<AnalysisJobProcessResult> ProcessNextAsync(
         CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        var profile = await GetRunnableProfileBeforeClaimAsync(cancellationToken)
+        var route = await GetRunnableRouteBeforeClaimAsync(cancellationToken)
             .ConfigureAwait(false);
-        if (profile is null)
+        if (route is null)
         {
             return new AnalysisJobProcessResult(AnalysisJobProcessStatus.NotReady);
         }
@@ -171,7 +188,8 @@ public sealed class AnalysisJobProcessor
                     .ConfigureAwait(false);
             }
 
-            profile = readiness.Profile!;
+            route = readiness.Route!;
+            var profile = route.Profile;
             var chunk = await _chunkStore
                 .GetAsync(current.CaptureChunkId, cancellationToken)
                 .ConfigureAwait(false);
@@ -210,6 +228,24 @@ public sealed class AnalysisJobProcessor
                         _options.RetryDelay,
                         cancellationToken)
                     .ConfigureAwait(false);
+            }
+
+            if (_stageBindingStore is not null)
+            {
+                if (!await WindowInputStillMatchesAsync(
+                        window,
+                        current,
+                        route,
+                        cancellationToken).ConfigureAwait(false))
+                {
+                    return await FailAsync(
+                            current,
+                            AnalysisJobErrorCode.ProviderRejected,
+                            AnalysisFailureDisposition.Terminal,
+                            _options.RetryDelay,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                }
             }
 
             current = await TransitionAsync(
@@ -321,7 +357,8 @@ public sealed class AnalysisJobProcessor
                     .ConfigureAwait(false);
             }
 
-            profile = readiness.Profile!;
+            route = readiness.Route!;
+            profile = route.Profile;
             current = await EnsureLeaseCoversAsync(
                     current,
                     profile.Profile.RequestTimeout,
@@ -330,6 +367,8 @@ public sealed class AnalysisJobProcessor
 
             AiAnalysisResponse? response = null;
             ClaimedJobReadiness? sendBlockedReadiness = null;
+            var sendBlockedByRule = false;
+            Guid? invocationId = null;
             try
             {
                 var provider = await _providerFactory
@@ -348,13 +387,57 @@ public sealed class AnalysisJobProcessor
                             .ConfigureAwait(false);
                         if (sendReadiness.Status == ClaimedJobReadinessStatus.Ready)
                         {
-                            EnsureProviderMatchesProfile(provider, sendReadiness.Profile!);
-                            analysisTask = provider.AnalyzeAsync(request, cancellationToken)
-                                ?? throw new AiProviderException(
-                                    AiProviderErrorCode.InvalidResponse,
-                                    "The AI provider returned no analysis task.",
-                                    Guid.Empty,
-                                    isRetryable: false);
+                            var sendRoute = sendReadiness.Route!;
+                            EnsureProviderMatchesProfile(provider, sendRoute.Profile);
+                            if (_stageBindingStore is not null
+                                && !await WindowInputStillMatchesAsync(
+                                    window,
+                                    current,
+                                    sendRoute,
+                                    cancellationToken).ConfigureAwait(false))
+                            {
+                                sendBlockedReadiness = new ClaimedJobReadiness(
+                                    ClaimedJobReadinessStatus.ProviderRevisionChanged,
+                                    sendRoute);
+                            }
+                            else if (!await TimelineSendAllowedAsync(
+                                    window,
+                                    current,
+                                    sendRoute,
+                                    cancellationToken).ConfigureAwait(false))
+                            {
+                                sendBlockedByRule = true;
+                            }
+                            else
+                            {
+                                if (_invocationStore is not null)
+                                {
+                                    invocationId = Guid.NewGuid();
+                                    await _invocationStore.StartAsync(
+                                            new ProviderInvocationStart(
+                                                invocationId.Value,
+                                                AnalysisStage.TimelineAnalysis,
+                                                sendRoute.Profile.Profile.Id,
+                                                sendRoute.Profile.Revision,
+                                                sendRoute.Binding.RouteRevision,
+                                                sendRoute.Profile.Profile.BaseEndpoint
+                                                    .GetLeftPart(UriPartial.Authority),
+                                                current.InputFingerprint,
+                                                request.Images.Count,
+                                                request.Images.Sum(static image =>
+                                                    (long)image.JpegBytes.Length),
+                                                GetUtcNow(),
+                                                request.CorrelationId),
+                                            cancellationToken)
+                                        .ConfigureAwait(false);
+                                }
+                                analysisTask = provider.AnalyzeAsync(request, cancellationToken)
+                                    ?? throw new AiProviderException(
+                                        AiProviderErrorCode.InvalidResponse,
+                                        "The AI provider returned no analysis task.",
+                                        Guid.Empty,
+                                        isRetryable: false);
+                            }
                         }
                         else
                         {
@@ -370,6 +453,16 @@ public sealed class AnalysisJobProcessor
                                 "The AI provider returned no analysis response.",
                                 Guid.Empty,
                                 isRetryable: false);
+                        await CompleteInvocationAsync(
+                                invocationId,
+                                ProviderInvocationOutcome.Succeeded,
+                                response.TokenUsage is { } usage
+                                    ? new ProviderInvocationUsage(
+                                        usage.PromptTokens,
+                                        usage.CompletionTokens)
+                                    : null)
+                            .ConfigureAwait(false);
+                        invocationId = null;
                     }
                 }
                 finally
@@ -379,10 +472,20 @@ public sealed class AnalysisJobProcessor
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
+                await CompleteInvocationAsync(
+                        invocationId,
+                        ProviderInvocationOutcome.Cancelled,
+                        usage: null)
+                    .ConfigureAwait(false);
                 throw;
             }
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
             {
+                await CompleteInvocationAsync(
+                        invocationId,
+                        ProviderInvocationOutcome.FailedRetryable,
+                        usage: null)
+                    .ConfigureAwait(false);
                 return await FailAsync(
                         current,
                         AnalysisJobErrorCode.OperationTimedOut,
@@ -394,6 +497,13 @@ public sealed class AnalysisJobProcessor
             catch (Exception exception)
             {
                 var mapped = MapProviderFailure(exception);
+                await CompleteInvocationAsync(
+                        invocationId,
+                        mapped.Disposition == AnalysisFailureDisposition.Retryable
+                            ? ProviderInvocationOutcome.FailedRetryable
+                            : ProviderInvocationOutcome.FailedTerminal,
+                        usage: null)
+                    .ConfigureAwait(false);
                 return await FailAsync(
                         current,
                         mapped.Code,
@@ -408,6 +518,17 @@ public sealed class AnalysisJobProcessor
                 return await FailForReadinessAsync(
                         current,
                         sendBlockedReadiness.Status,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+
+            if (sendBlockedByRule)
+            {
+                return await FailAsync(
+                        current,
+                        AnalysisJobErrorCode.EvidenceSendBlocked,
+                        AnalysisFailureDisposition.Retryable,
+                        _options.RetryDelay,
                         cancellationToken)
                     .ConfigureAwait(false);
             }
@@ -466,7 +587,30 @@ public sealed class AnalysisJobProcessor
             AnalysisResultCommitStatus commitStatus;
             try
             {
-                commitStatus = _resultCommitter is IAnalysisWindowResultCommitter windowCommitter
+                commitStatus = _resultCommitter is IAnalysisStageAwareWindowResultCommitter stageAwareWindowCommitter
+                    ? await stageAwareWindowCommitter
+                        .TryCommitWindowAsync(
+                            current.Lease!,
+                            current.ProviderProfileId,
+                            current.ProviderProfileRevision,
+                            readiness.Route!.Binding.RouteRevision,
+                            window,
+                            entries,
+                            GetUtcNow(),
+                            cancellationToken)
+                        .ConfigureAwait(false)
+                    : _resultCommitter is IAnalysisStageAwareResultCommitter stageAwareCommitter
+                        ? await stageAwareCommitter
+                            .TryCommitAsync(
+                                current.Lease!,
+                                current.ProviderProfileId,
+                                current.ProviderProfileRevision,
+                                readiness.Route!.Binding.RouteRevision,
+                                entries,
+                                GetUtcNow(),
+                                cancellationToken)
+                            .ConfigureAwait(false)
+                    : _resultCommitter is IAnalysisWindowResultCommitter windowCommitter
                     ? await windowCommitter
                         .TryCommitWindowAsync(
                             current.Lease!,
@@ -622,12 +766,93 @@ public sealed class AnalysisJobProcessor
         return new AggregateEvidence(references, selectedImages, normalizedContext);
     }
 
+    private async Task<bool> WindowInputStillMatchesAsync(
+        AnalysisWindowSnapshot window,
+        AnalysisJob current,
+        RunnableTimelineRoute route,
+        CancellationToken cancellationToken)
+    {
+        CaptureChunkFingerprint evidenceFingerprint;
+        if (_privacyScreeningService is null || _fingerprintProvider is null)
+        {
+            evidenceFingerprint = CaptureAnalysisIngestionService
+                .ComputeWindowFingerprint(window.Members);
+        }
+        else
+        {
+            var selections = new Dictionary<string, PrivacyEvidenceSelection>(
+                window.Members.Count,
+                StringComparer.Ordinal);
+            foreach (var member in window.Members)
+            {
+                var original = await _fingerprintProvider
+                    .ComputeAsync(member.Chunk, cancellationToken)
+                    .ConfigureAwait(false);
+                var selection = await _privacyScreeningService.PrepareAsync(
+                        member.Chunk,
+                        original,
+                        CaptureAnalysisIngestionService.CreatePrivacyOperationId(
+                            member.Chunk,
+                            original),
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                if (!selection.IsReady
+                    || selection.Fingerprint != member.SourceFingerprint)
+                {
+                    return false;
+                }
+                selections.Add(member.Chunk.Id, selection);
+            }
+            evidenceFingerprint = CaptureAnalysisIngestionService
+                .ComputeWindowFingerprint(window.Members, selections);
+        }
+
+        var expectedInput = CaptureAnalysisIngestionService.BindRouteFingerprint(
+            evidenceFingerprint,
+            route.Profile,
+            route.Binding);
+        return string.Equals(
+            expectedInput.Value,
+            current.InputFingerprint,
+            StringComparison.Ordinal);
+    }
+
+    private async Task<bool> TimelineSendAllowedAsync(
+        AnalysisWindowSnapshot window,
+        AnalysisJob current,
+        RunnableTimelineRoute route,
+        CancellationToken cancellationToken)
+    {
+        if (_sendPolicy is null)
+        {
+            return true;
+        }
+
+        foreach (var member in window.Members)
+        {
+            var decision = await _sendPolicy.EvaluateAsync(
+                    member.Chunk,
+                    AnalysisStage.TimelineAnalysis,
+                    route.Profile,
+                    route.Binding,
+                    member.SourceFingerprint,
+                    current.Id,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            if (!decision.IsAllowed)
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
     private static List<AiEvidenceImage> SelectImagesWithinBudget(
         List<AiEvidenceImage> images)
     {
         if (images.Count == 0)
         {
-            throw new InvalidDataException("The aggregate analysis window contains no evidence images.");
+            return [];
         }
 
         var ordered = images
@@ -802,44 +1027,53 @@ public sealed class AnalysisJobProcessor
         IReadOnlyList<AiEvidenceImage> Images,
         IReadOnlyList<AiAnalysisContextSlice> Context);
 
-    private async Task<AiProviderProfileSnapshot?> GetRunnableProfileBeforeClaimAsync(
+    private async Task<RunnableTimelineRoute?> GetRunnableRouteBeforeClaimAsync(
         CancellationToken cancellationToken)
     {
-        if (!_settings.Current.CloudAnalysisEnabled)
+        if (_stageBindingStore is null)
         {
             return null;
         }
 
-        var profile = await _profileStore
-            .GetActiveAsync(cancellationToken)
+        var binding = await _stageBindingStore
+            .GetAsync(AnalysisStage.TimelineAnalysis, cancellationToken)
             .ConfigureAwait(false);
-        return _settings.Current.CloudAnalysisEnabled
-            && profile is { IsComplete: true, IsValidated: true }
-                ? profile
-                : null;
+        if (!binding.Enabled || !binding.ProviderProfileId.HasValue)
+        {
+            return null;
+        }
+        var profile = await _profileStore
+            .GetAsync(binding.ProviderProfileId.Value, cancellationToken)
+            .ConfigureAwait(false);
+        if (profile is not { IsComplete: true })
+        {
+            return null;
+        }
+        var validation = await _stageBindingStore.GetValidationAsync(
+                profile.Profile.Id,
+                profile.Revision,
+                AnalysisStage.TimelineAnalysis,
+                cancellationToken)
+            .ConfigureAwait(false);
+        return validation is null ? null : new RunnableTimelineRoute(profile, binding);
     }
 
     private async Task<ClaimedJobReadiness> CheckClaimedJobReadinessAsync(
         AnalysisJob job,
         CancellationToken cancellationToken)
     {
-        var profile = await _profileStore
-            .GetActiveAsync(cancellationToken)
+        var route = await GetRunnableRouteBeforeClaimAsync(cancellationToken)
             .ConfigureAwait(false);
-        if (profile is null
-            || profile.Profile.Id != job.ProviderProfileId
-            || profile.Revision != job.ProviderProfileRevision
-            || !profile.IsComplete
-            || !profile.IsValidated)
+        if (route is null
+            || route.Profile.Profile.Id != job.ProviderProfileId
+            || route.Profile.Revision != job.ProviderProfileRevision)
         {
             return new ClaimedJobReadiness(
                 ClaimedJobReadinessStatus.ProviderRevisionChanged,
-                profile);
+                route);
         }
 
-        return !_settings.Current.CloudAnalysisEnabled
-            ? new ClaimedJobReadiness(ClaimedJobReadinessStatus.CloudAnalysisDisabled, profile)
-            : new ClaimedJobReadiness(ClaimedJobReadinessStatus.Ready, profile);
+        return new ClaimedJobReadiness(ClaimedJobReadinessStatus.Ready, route);
     }
 
     private Task<AnalysisJobProcessResult> FailForReadinessAsync(
@@ -1074,6 +1308,24 @@ public sealed class AnalysisJobProcessor
         return retryDelay > maximum ? maximum : retryDelay;
     }
 
+    private async Task CompleteInvocationAsync(
+        Guid? invocationId,
+        ProviderInvocationOutcome outcome,
+        ProviderInvocationUsage? usage)
+    {
+        if (!invocationId.HasValue || _invocationStore is null)
+        {
+            return;
+        }
+        await _invocationStore.CompleteAsync(
+                invocationId.Value,
+                outcome,
+                usage,
+                GetUtcNow(),
+                CancellationToken.None)
+            .ConfigureAwait(false);
+    }
+
     private DateTimeOffset GetUtcNow() => _timeProvider.GetUtcNow().ToUniversalTime();
 
     private enum ClaimedJobReadinessStatus
@@ -1085,7 +1337,11 @@ public sealed class AnalysisJobProcessor
 
     private sealed record ClaimedJobReadiness(
         ClaimedJobReadinessStatus Status,
-        AiProviderProfileSnapshot? Profile);
+        RunnableTimelineRoute? Route);
+
+    private sealed record RunnableTimelineRoute(
+        AiProviderProfileSnapshot Profile,
+        AnalysisStageBinding Binding);
 
     private sealed record ProviderFailure(
         AnalysisJobErrorCode Code,

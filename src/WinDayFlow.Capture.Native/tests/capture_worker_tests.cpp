@@ -12,6 +12,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -27,6 +28,7 @@ using windayflow::capture::CaptureCommandAdmissionResult;
 using windayflow::capture::CaptureAuthorizationScope;
 using windayflow::capture::CaptureEventQueue;
 using windayflow::capture::CaptureEventReadResult;
+using windayflow::capture::CaptureFrameWriteDisposition;
 using windayflow::capture::CaptureRuntimeOwner;
 using windayflow::capture::CaptureRuntimePauseResult;
 using windayflow::capture::CaptureRuntimeStopResult;
@@ -42,11 +44,13 @@ using windayflow::capture::CaptureWorkerCheckpointKind;
 using windayflow::capture::CaptureWorkerCheckpointSink;
 using windayflow::capture::CaptureWorkerConfiguration;
 using windayflow::capture::CaptureWorkerExitReason;
+using windayflow::capture::CaptureWorkerHealthSnapshot;
 using windayflow::capture::CaptureWorkerPublication;
 using windayflow::capture::ChunkManifest;
 using windayflow::capture::JpegFrameChunkWriterConfig;
 using windayflow::capture::PersistenceToken;
 using windayflow::capture::PrivacyContext;
+using windayflow::capture::ProcessTelemetrySample;
 using windayflow::capture::RuntimeAuthorization;
 
 constexpr uint32_t kTestTimeoutMs = 1'000;
@@ -318,6 +322,11 @@ class FakeBackend final : public CaptureWorkerBackend {
     return CaptureWorkerBackendResult::kOk;
   }
 
+  std::optional<ProcessTelemetrySample> ObserveApplicationContext(
+      const CaptureTargetIdentity&) noexcept override {
+    return context_sample;
+  }
+
   CaptureWorkerBackendResult BeginChunk(
       std::string_view artifact_id,
       const JpegFrameChunkWriterConfig& configuration) noexcept override {
@@ -336,7 +345,8 @@ class FakeBackend final : public CaptureWorkerBackend {
 
   CaptureWorkerBackendResult EncodeFrame(
       std::span<const uint8_t> top_down_bgra,
-      uint64_t) noexcept override {
+      uint64_t,
+      CaptureFrameWriteDisposition* disposition) noexcept override {
     if (top_down_bgra.size() != 16U) {
       return CaptureWorkerBackendResult::kInvalidFrame;
     }
@@ -348,6 +358,9 @@ class FakeBackend final : public CaptureWorkerBackend {
       static_cast<void>(
           gate_changed_.wait_for(lock, std::chrono::milliseconds(2'000),
                                  [this] { return first_encode_released_; }));
+    }
+    if (disposition != nullptr) {
+      *disposition = CaptureFrameWriteDisposition::kRetained;
     }
     return CaptureWorkerBackendResult::kOk;
   }
@@ -501,6 +514,7 @@ class FakeBackend final : public CaptureWorkerBackend {
   bool always_fail_rollback = false;
   bool block_first_encode = false;
   uint32_t black_frame_acquisitions = 0;
+  std::optional<ProcessTelemetrySample> context_sample;
   uint32_t blocked_steady_now_call = 0;
   std::atomic<CaptureWorkerBackendResult> acquire_result{
       CaptureWorkerBackendResult::kOk};
@@ -525,6 +539,7 @@ class FakeBackend final : public CaptureWorkerBackend {
   std::atomic<uint32_t> prepare_calls{0};
   std::atomic<uint32_t> steady_now_calls{0};
   std::atomic<uint32_t> shutdown_calls{0};
+  std::atomic<bool> authorization_invalidated{false};
 
  private:
   void AdvanceClocks(int64_t advance_ms) noexcept {
@@ -541,6 +556,8 @@ class FakeBackend final : public CaptureWorkerBackend {
         static_cast<void>(provisional_pause_runtime->RequestPause());
       }
       static_cast<void>(safety_.InvalidateAuthorizationAdmission());
+      authorization_invalidated.store(true, std::memory_order_release);
+      signals_.Notify();
     }
   }
 
@@ -1026,13 +1043,18 @@ bool TestBlackSurfaceFrameIsDiscardedBeforeEncoding() {
   if (!Expect(fixture.Authorize(1) && fixture.Start(std::move(sink)),
               "black-frame worker could not start") ||
       !Expect(fixture.backend.WaitForAcquireCount(1),
-              "black-frame worker did not inspect its first surface")) {
+              "black-frame worker did not inspect its first surface") ||
+      !Expect(checkpoints.WaitForSize(1),
+              "black-frame worker did not publish its sampling readiness")) {
     return false;
   }
 
-  const bool discarded_without_ready =
-      fixture.backend.begin_calls.load() == 0 &&
-      fixture.backend.encode_calls.load() == 0 && checkpoints.Values().empty();
+  const bool retained_context_without_jpeg =
+      fixture.backend.begin_calls.load() == 1 &&
+      fixture.backend.encode_calls.load() == 0 &&
+      checkpoints.Values() ==
+          std::vector<CaptureWorkerCheckpoint>{
+              {CaptureWorkerCheckpointKind::kReady, 0}};
   fixture.backend.steady_now_ms.store(1'250);
   fixture.backend.unix_now_ms.store(1'700'000'000'250);
   fixture.runtime.NotifyAuthorizationChanged();
@@ -1047,12 +1069,17 @@ bool TestBlackSurfaceFrameIsDiscardedBeforeEncoding() {
       fixture.runtime.WaitStopped(kTestTimeoutMs) ==
           CaptureRuntimeWaitResult::kStopped;
   const auto result = fixture.worker.last_result();
-  return Expect(discarded_without_ready,
-                "an empty black surface opened a chunk or published ready") &&
+  const CaptureWorkerHealthSnapshot health = fixture.worker.health_snapshot();
+  return Expect(retained_context_without_jpeg,
+                "a black sample did not retain its context interval") &&
          Expect(stopped && result.reason == CaptureWorkerExitReason::kStopped &&
                     result.encoded_frames == 1 &&
                     result.committed_chunks == 1,
-                "the useful frame after a black surface was not committed");
+                "the useful frame after a black surface was not committed") &&
+         Expect(health.sampled_frame_count == 2 &&
+                    health.black_frame_count == 1 &&
+                    health.retained_frame_count == 1,
+                "black-frame health counters were not projected");
 }
 
 bool TestFirstFramePublishesReadyExactlyOnce() {
@@ -1281,6 +1308,69 @@ bool TestProvisionalPauseRecoversAuthorizationLossAtCriticalStages() {
     }
   }
   return true;
+}
+
+bool TestDelayedPauseRecoversAuthorizationLossWithoutSealedPrefix() {
+  WorkerFixture fixture;
+  CheckpointLog checkpoints;
+  fixture.backend.fault_stage = FaultStage::kInitialize;
+  CaptureWorkerCheckpointSink sink = [&](const CaptureWorkerCheckpoint& value) {
+    return checkpoints.Push(value);
+  };
+
+  std::atomic<CaptureRuntimePauseResult> pause_result{
+      CaptureRuntimePauseResult::kNotRunning};
+  std::thread delayed_pause([&] {
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::milliseconds(kTestTimeoutMs);
+    while (!fixture.backend.authorization_invalidated.load(
+               std::memory_order_acquire) &&
+           std::chrono::steady_clock::now() < deadline) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    pause_result.store(fixture.runtime.RequestPause(),
+                       std::memory_order_release);
+  });
+
+  const bool started = fixture.Authorize(1) && fixture.Start(std::move(sink));
+  const bool paused = started && checkpoints.WaitForSize(1);
+  delayed_pause.join();
+  if (!Expect(started, "delayed-pause worker could not start") ||
+      !Expect(paused, "authorization loss outran its delayed pause") ||
+      !Expect(pause_result.load(std::memory_order_acquire) ==
+                  CaptureRuntimePauseResult::kPauseRequested,
+              "delayed authorization pause was not accepted")) {
+    return false;
+  }
+
+  const auto paused_values = checkpoints.Values();
+  if (!Expect(paused_values.size() == 1 &&
+                  paused_values[0].kind ==
+                      CaptureWorkerCheckpointKind::kPaused &&
+                  paused_values[0].pause_epoch == 1,
+              "delayed authorization pause emitted the wrong checkpoint") ||
+      !Expect(fixture.runtime.RequestPause() ==
+                  CaptureRuntimePauseResult::kAlreadyPaused,
+              "delayed authorization pause terminated the worker") ||
+      !Expect(fixture.events.size() == 0,
+              "delayed authorization pause published stale output") ||
+      !Expect(fixture.Block(2) && fixture.Authorize(3) && fixture.Resume(),
+              "delayed-pause worker did not accept a fresh token") ||
+      !Expect(checkpoints.WaitForSize(2),
+              "delayed-pause worker did not resume")) {
+    return false;
+  }
+
+  const bool stopped =
+      fixture.runtime.RequestStop() ==
+          CaptureRuntimeStopResult::kStopRequested &&
+      fixture.runtime.WaitStopped(kTestTimeoutMs) ==
+          CaptureRuntimeWaitResult::kStopped;
+  return Expect(stopped, "resumed delayed-pause worker did not stop") &&
+         Expect(fixture.worker.last_result().reason ==
+                    CaptureWorkerExitReason::kStopped,
+                "resumed delayed-pause worker reported authorization loss");
 }
 
 bool TestStopCommitsValidPartialChunk() {
@@ -1976,6 +2066,7 @@ int main() {
       !TestResumeWaitsForFreshFrameBeforeReady() ||
       !TestReadyCheckpointRunsAfterPermitRelease() ||
       !TestProvisionalPauseRecoversAuthorizationLossAtCriticalStages() ||
+      !TestDelayedPauseRecoversAuthorizationLossWithoutSealedPrefix() ||
       !TestStopCommitsValidPartialChunk() ||
       !TestAuthorizationPauseCommitsSealedPrefixAcrossGenerationChange() ||
       !TestPauseResumeUsesFreshGeneration() ||

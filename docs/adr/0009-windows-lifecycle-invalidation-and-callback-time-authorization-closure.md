@@ -121,8 +121,14 @@ native Block barrier and publishes FailClosed without sampling Windows. Other
 events cannot clear either hold. Session-available and power-resumed callbacks
 clear only their corresponding hold; they still create a new invalidation
 generation, require a new Block barrier, and require fresh sampling before a
-resolved observation may publish. An old observation is never reused as
-recovery evidence.
+resolved observation may publish. Because WTS can omit a matching available
+notification after an interactive automation or session transport disconnect,
+the low-frequency health refresh rechecks only the session decision while the
+session hold is active. An observed unlocked session synthesizes the same
+SessionAvailable invalidation path; it never republishes an old observation.
+FailClosed hold publications do not overwrite the independently sampled storage
+decision, preventing stable storage from creating a new invalidation every
+refresh.
 
 These holds are authorization safety state, not capture lifecycle commands.
 They do not decide whether a live session should evidence-Pause or perform a

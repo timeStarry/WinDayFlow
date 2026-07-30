@@ -1,6 +1,7 @@
 #ifndef WINDAYFLOW_CAPTURE_INSTANCE_CONTROLLER_H_
 #define WINDAYFLOW_CAPTURE_INSTANCE_CONTROLLER_H_
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -68,6 +69,8 @@ class CaptureInstanceController final {
                               char* detail_utf8,
                               uint32_t detail_utf8_capacity,
                               uint32_t* detail_utf8_required);
+  wdf_capture_result GetHealthSnapshot(
+      wdf_capture_health_snapshot_v2* snapshot) const noexcept;
   void Shutdown() noexcept;
 
   wdf_capture_state state() const noexcept;
@@ -117,6 +120,8 @@ class CaptureInstanceController final {
   const CaptureActivationMode activation_mode_;
   mutable std::mutex mutex_;
   wdf_capture_state state_ = WDF_CAPTURE_STATE_UNAVAILABLE;
+  wdf_capture_reason reason_ = WDF_CAPTURE_REASON_NONE;
+  std::atomic<uint64_t> state_revision_{1};
   std::shared_ptr<RunRecord> active_run_;
   uint64_t next_run_id_ = 1;
   bool run_id_exhausted_ = false;

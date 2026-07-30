@@ -6,7 +6,8 @@ public static class DevLiveCapturePrivacy
     public static WindowsCapturePrivacyMonitor CreateMonitor(
         INativeCapturePrivacySignalSink sink,
         string storageDirectory,
-        ulong minimumStorageHeadroomBytes)
+        ulong minimumStorageHeadroomBytes,
+        CaptureDiagnosticLog? diagnosticLog = null)
     {
         ArgumentNullException.ThrowIfNull(sink);
 
@@ -16,13 +17,15 @@ public static class DevLiveCapturePrivacy
         return new WindowsCapturePrivacyMonitor(
             sink,
             new DevLiveQaWindowsCapturePrivacySampler(baseSampler),
-            new WindowsCaptureWinEventSource());
+            new WindowsCaptureWinEventSource(),
+            diagnosticLog);
     }
 }
 
 internal sealed class DevLiveQaWindowsCapturePrivacySampler
     : IWindowsCapturePrivacySampler,
-      IWindowsCaptureStorageSampler
+      IWindowsCaptureStorageSampler,
+      IWindowsCaptureSessionSampler
 {
     private const string WindowsLockScreenExecutableName = "LockApp.exe";
 
@@ -54,6 +57,15 @@ internal sealed class DevLiveQaWindowsCapturePrivacySampler
     {
         return _inner is IWindowsCaptureStorageSampler storageSampler
             ? storageSampler.SampleStorageAsync(cancellationToken)
+            : ValueTask.FromResult(NativeCapturePolicyDecision.Unknown);
+    }
+
+    ValueTask<NativeCapturePolicyDecision>
+        IWindowsCaptureSessionSampler.SampleSessionAsync(
+            CancellationToken cancellationToken)
+    {
+        return _inner is IWindowsCaptureSessionSampler sessionSampler
+            ? sessionSampler.SampleSessionAsync(cancellationToken)
             : ValueTask.FromResult(NativeCapturePolicyDecision.Unknown);
     }
 

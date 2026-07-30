@@ -15,6 +15,7 @@ public sealed partial class ShellPage : Page
             ["daily"] = (typeof(DailyPage), "日报"),
             ["journal"] = (typeof(JournalPage), "日志"),
             ["weekly"] = (typeof(WeeklyPage), "周报"),
+            ["statistics"] = (typeof(StatisticsPage), "统计"),
             ["chat"] = (typeof(ChatPage), "问答"),
             ["settings"] = (typeof(SettingsPage), "设置"),
         };

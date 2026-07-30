@@ -85,16 +85,24 @@ internal interface IWindowsCaptureStorageSampler
         CancellationToken cancellationToken);
 }
 
+internal interface IWindowsCaptureSessionSampler
+{
+    ValueTask<NativeCapturePolicyDecision> SampleSessionAsync(
+        CancellationToken cancellationToken);
+}
+
 internal delegate bool TryResolveWindowsCaptureDisplayTarget(
     ulong windowHandle,
     out WindowsCaptureDisplayAnchor displayTarget);
 
 public sealed class WindowsCapturePrivacySampler
     : IWindowsCapturePrivacySampler,
-      IWindowsCaptureStorageSampler
+      IWindowsCaptureStorageSampler,
+      IWindowsCaptureSessionSampler
 {
     private readonly Func<NativeCapturePrivacySignals> _sampleBaseSignals;
     private readonly Func<NativeCapturePolicyDecision> _sampleStorage;
+    private readonly Func<NativeCapturePolicyDecision> _sampleSession;
     private readonly Func<WindowsCaptureTargetVerificationResult> _verifyTarget;
     private readonly Action _invalidateTargetObservation;
 
@@ -108,6 +116,7 @@ public sealed class WindowsCapturePrivacySampler
         var targetVerifier = new WindowsCaptureTargetVerifier();
         _sampleBaseSignals = privacyProbe.Sample;
         _sampleStorage = privacyProbe.SampleStorage;
+        _sampleSession = () => _sampleBaseSignals().SessionUnlocked;
         _verifyTarget = targetVerifier.Verify;
         _invalidateTargetObservation = targetVerifier.InvalidateObservation;
     }
@@ -120,6 +129,7 @@ public sealed class WindowsCapturePrivacySampler
         _sampleBaseSignals = sampleBaseSignals
             ?? throw new ArgumentNullException(nameof(sampleBaseSignals));
         _sampleStorage = () => _sampleBaseSignals().StorageAvailable;
+        _sampleSession = () => _sampleBaseSignals().SessionUnlocked;
         _verifyTarget = verifyTarget
             ?? throw new ArgumentNullException(nameof(verifyTarget));
         _invalidateTargetObservation = invalidateTargetObservation
@@ -170,6 +180,14 @@ public sealed class WindowsCapturePrivacySampler
     {
         cancellationToken.ThrowIfCancellationRequested();
         return ValueTask.FromResult(_sampleStorage());
+    }
+
+    ValueTask<NativeCapturePolicyDecision>
+        IWindowsCaptureSessionSampler.SampleSessionAsync(
+            CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return ValueTask.FromResult(_sampleSession());
     }
 }
 
@@ -261,6 +279,7 @@ public sealed class WindowsCapturePrivacyMonitor : IAsyncDisposable
     private readonly INativeCapturePrivacySignalSink _sink;
     private readonly IWindowsCapturePrivacySampler _sampler;
     private readonly IWindowsCaptureStorageSampler? _storageSampler;
+    private readonly IWindowsCaptureSessionSampler? _sessionSampler;
     private readonly IWindowsCaptureEventSource _eventSource;
     private readonly INativeCaptureApplicationPrivacyModeSource?
         _applicationPrivacyModeSource;
@@ -268,6 +287,7 @@ public sealed class WindowsCapturePrivacyMonitor : IAsyncDisposable
     private readonly Func<TimeSpan, CancellationToken, Task> _storageRefreshDelayAsync;
     private readonly TimeSpan _storageRefreshInterval;
     private readonly TryResolveWindowsCaptureDisplayTarget _resolveDisplayTarget;
+    private readonly CaptureDiagnosticLog? _diagnosticLog;
     private readonly CancellationTokenSource _workerCancellation = new();
     private readonly CancellationTokenSource _storageRefreshCancellation = new();
     private readonly Channel<byte> _workerWake =
@@ -349,6 +369,25 @@ public sealed class WindowsCapturePrivacyMonitor : IAsyncDisposable
         INativeCapturePrivacySignalSink sink,
         IWindowsCapturePrivacySampler sampler,
         IWindowsCaptureEventSource eventSource,
+        CaptureDiagnosticLog? diagnosticLog)
+        : this(
+            sink,
+            sampler,
+            eventSource,
+            static (delay, cancellationToken) =>
+                Task.Delay(delay, cancellationToken),
+            PInvokeWindowsCaptureTargetNativeApi.Instance.TryGetDisplayTarget,
+            StorageRefreshInterval,
+            static (delay, cancellationToken) =>
+                Task.Delay(delay, cancellationToken),
+            diagnosticLog)
+    {
+    }
+
+    internal WindowsCapturePrivacyMonitor(
+        INativeCapturePrivacySignalSink sink,
+        IWindowsCapturePrivacySampler sampler,
+        IWindowsCaptureEventSource eventSource,
         Func<TimeSpan, CancellationToken, Task> delayAsync)
         : this(
             sink,
@@ -405,11 +444,13 @@ public sealed class WindowsCapturePrivacyMonitor : IAsyncDisposable
         Func<TimeSpan, CancellationToken, Task> delayAsync,
         TryResolveWindowsCaptureDisplayTarget resolveDisplayTarget,
         TimeSpan storageRefreshInterval,
-        Func<TimeSpan, CancellationToken, Task> storageRefreshDelayAsync)
+        Func<TimeSpan, CancellationToken, Task> storageRefreshDelayAsync,
+        CaptureDiagnosticLog? diagnosticLog = null)
     {
         _sink = sink ?? throw new ArgumentNullException(nameof(sink));
         _sampler = sampler ?? throw new ArgumentNullException(nameof(sampler));
         _storageSampler = sampler as IWindowsCaptureStorageSampler;
+        _sessionSampler = sampler as IWindowsCaptureSessionSampler;
         _eventSource = eventSource
             ?? throw new ArgumentNullException(nameof(eventSource));
         _applicationPrivacyModeSource =
@@ -429,6 +470,7 @@ public sealed class WindowsCapturePrivacyMonitor : IAsyncDisposable
             ?? throw new ArgumentNullException(nameof(storageRefreshDelayAsync));
         _resolveDisplayTarget = resolveDisplayTarget
             ?? throw new ArgumentNullException(nameof(resolveDisplayTarget));
+        _diagnosticLog = diagnosticLog;
     }
 
     public Task Completion => _completion.Task;
@@ -793,6 +835,11 @@ public sealed class WindowsCapturePrivacyMonitor : IAsyncDisposable
             throw failure;
         }
 
+        _diagnosticLog?.Write(
+            CaptureDiagnosticEvent.PrivacyInvalidated,
+            new(CaptureDiagnosticField.Generation, generation),
+            new(CaptureDiagnosticField.Reason, (long)reason),
+            new(CaptureDiagnosticField.Holds, (long)_activeHolds));
     }
 
     private async Task RunStorageRefreshAsync()
@@ -803,6 +850,7 @@ public sealed class WindowsCapturePrivacyMonitor : IAsyncDisposable
             return;
         }
 
+        var sessionSampler = _sessionSampler;
         var cancellationToken = _storageRefreshCancellation.Token;
         try
         {
@@ -819,10 +867,10 @@ public sealed class WindowsCapturePrivacyMonitor : IAsyncDisposable
                     return;
                 }
 
-                NativeCapturePolicyDecision decision;
+                NativeCapturePolicyDecision storageDecision;
                 try
                 {
-                    decision = await storageSampler
+                    storageDecision = await storageSampler
                         .SampleStorageAsync(cancellationToken)
                         .ConfigureAwait(false);
                 }
@@ -835,12 +883,46 @@ public sealed class WindowsCapturePrivacyMonitor : IAsyncDisposable
                     when (WindowsCapturePrivacyProbe
                         .IsRecoverableNativeReadException(exception))
                 {
-                    decision = NativeCapturePolicyDecision.Unknown;
+                    storageDecision = NativeCapturePolicyDecision.Unknown;
                 }
 
-                if (!Enum.IsDefined(decision))
+                if (!Enum.IsDefined(storageDecision))
                 {
-                    decision = NativeCapturePolicyDecision.Unknown;
+                    storageDecision = NativeCapturePolicyDecision.Unknown;
+                }
+
+                var refreshSessionHold = false;
+                lock (_invalidationSync)
+                {
+                    refreshSessionHold = (_activeHolds
+                        & WindowsCapturePrivacyHold.SessionUnavailable) != 0;
+                }
+
+                var sessionDecision = NativeCapturePolicyDecision.Unknown;
+                if (refreshSessionHold && sessionSampler is not null)
+                {
+                    try
+                    {
+                        sessionDecision = await sessionSampler
+                            .SampleSessionAsync(cancellationToken)
+                            .ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException)
+                        when (cancellationToken.IsCancellationRequested)
+                    {
+                        return;
+                    }
+                    catch (Exception exception)
+                        when (WindowsCapturePrivacyProbe
+                            .IsRecoverableNativeReadException(exception))
+                    {
+                        sessionDecision = NativeCapturePolicyDecision.Unknown;
+                    }
+
+                    if (!Enum.IsDefined(sessionDecision))
+                    {
+                        sessionDecision = NativeCapturePolicyDecision.Unknown;
+                    }
                 }
 
                 var wakeWorker = false;
@@ -853,22 +935,33 @@ public sealed class WindowsCapturePrivacyMonitor : IAsyncDisposable
                         return;
                     }
 
-                    if (_lastStorageDecision < 0)
+                    var reason = WindowsCapturePrivacyInvalidationReason.None;
+                    if (_lastStorageDecision >= 0
+                        && _lastStorageDecision != (int)storageDecision)
+                    {
+                        _lastStorageDecision = (int)storageDecision;
+                        reason |= WindowsCapturePrivacyInvalidationReason
+                            .StorageHeadroomChanged;
+                    }
+
+                    if ((_activeHolds
+                            & WindowsCapturePrivacyHold.SessionUnavailable) != 0
+                        && sessionDecision == NativeCapturePolicyDecision.Allow)
+                    {
+                        _activeHolds &=
+                            ~WindowsCapturePrivacyHold.SessionUnavailable;
+                        reason |= WindowsCapturePrivacyInvalidationReason
+                            .SessionAvailable;
+                    }
+
+                    if (reason == WindowsCapturePrivacyInvalidationReason.None)
                     {
                         continue;
                     }
 
-                    if (_lastStorageDecision == (int)decision)
-                    {
-                        continue;
-                    }
-
-                    _lastStorageDecision = (int)decision;
                     try
                     {
-                        InvalidateWithoutWake(
-                            WindowsCapturePrivacyInvalidationReason
-                                .StorageHeadroomChanged);
+                        InvalidateWithoutWake(reason);
                     }
                     catch
                     {
@@ -1162,6 +1255,8 @@ public sealed class WindowsCapturePrivacyMonitor : IAsyncDisposable
                                 observation = WindowsCapturePrivacyObservation.FailClosed;
                             }
 
+                            LogObservation(generation, observation);
+
                             if (!IsTransientTargetObservation(observation))
                             {
                                 break;
@@ -1197,6 +1292,7 @@ public sealed class WindowsCapturePrivacyMonitor : IAsyncDisposable
                                         observation.Signals,
                                         CancellationToken.None)
                                     .ConfigureAwait(false);
+                                LogPublication(generation, failClosedPublished);
                                 if (failClosedPublished)
                                 {
                                     TryCommitPublishedObservation(
@@ -1240,6 +1336,13 @@ public sealed class WindowsCapturePrivacyMonitor : IAsyncDisposable
                                 break;
                             }
 
+                            _diagnosticLog?.Write(
+                                CaptureDiagnosticEvent.PrivacyRecoveryScheduled,
+                                new(CaptureDiagnosticField.Generation, generation),
+                                new(
+                                    CaptureDiagnosticField.RetryDelayMilliseconds,
+                                    (long)TransientTargetRecoveryRetryDelay
+                                        .TotalMilliseconds));
                             if (!await WaitForTransientTargetRetryAsync(
                                     generation,
                                     TransientTargetRecoveryRetryDelay,
@@ -1334,6 +1437,7 @@ public sealed class WindowsCapturePrivacyMonitor : IAsyncDisposable
                                 observation.Signals,
                                 CancellationToken.None)
                             .ConfigureAwait(false);
+                        LogPublication(generation, published);
                         if (published)
                         {
                             TryCommitPublishedObservation(generation, observation);
@@ -1412,6 +1516,7 @@ public sealed class WindowsCapturePrivacyMonitor : IAsyncDisposable
                     NativeCapturePrivacySignals.FailClosed,
                     CancellationToken.None)
                 .ConfigureAwait(false);
+            LogPublication(generation, published);
             if (published)
             {
                 TryCommitPublishedObservation(
@@ -1564,6 +1669,15 @@ public sealed class WindowsCapturePrivacyMonitor : IAsyncDisposable
     private async Task CloseWorkerForFaultAsync(
         WindowsCapturePrivacyMonitorFault fault)
     {
+        _diagnosticLog?.Write(
+            CaptureDiagnosticEvent.PrivacyMonitorFaulted,
+            new(CaptureDiagnosticField.Fault, (long)fault),
+            new(
+                CaptureDiagnosticField.Generation,
+                Volatile.Read(ref _latestGeneration)),
+            new(
+                CaptureDiagnosticField.SinkGeneration,
+                _sink.PrivacyObservationGeneration));
         var ownsTerminalTransition = false;
         try
         {
@@ -1869,8 +1983,11 @@ public sealed class WindowsCapturePrivacyMonitor : IAsyncDisposable
 
     private bool IsCurrentGeneration(long generation)
     {
-        return generation == Volatile.Read(ref _latestGeneration)
-            && generation == _sink.PrivacyObservationGeneration;
+        lock (_invalidationSync)
+        {
+            return generation == Volatile.Read(ref _latestGeneration)
+                && generation == _sink.PrivacyObservationGeneration;
+        }
     }
 
     private bool TryBeginTerminalTransitionUnderLock()
@@ -2198,7 +2315,12 @@ public sealed class WindowsCapturePrivacyMonitor : IAsyncDisposable
             Volatile.Write(ref _lastObservation, observation);
             Volatile.Write(ref _lastPublishedGeneration, generation);
             Volatile.Write(ref _lastProcessedGeneration, generation);
-            _lastStorageDecision = (int)observation.Signals.StorageAvailable;
+            if (_activeHolds == WindowsCapturePrivacyHold.None)
+            {
+                _lastStorageDecision =
+                    (int)observation.Signals.StorageAvailable;
+            }
+
             Interlocked.Increment(ref _displayRevalidationVersion);
             if (observation.Signals.Target.State
                 == NativeCaptureTargetIdentityState.Present)
@@ -2212,6 +2334,49 @@ public sealed class WindowsCapturePrivacyMonitor : IAsyncDisposable
                 }
             }
         }
+    }
+
+    private void LogObservation(
+        long generation,
+        WindowsCapturePrivacyObservation observation)
+    {
+        var signals = observation.Signals;
+        _diagnosticLog?.Write(
+            CaptureDiagnosticEvent.PrivacySampled,
+            new(CaptureDiagnosticField.Generation, generation),
+            new(CaptureDiagnosticField.TargetState, (long)signals.Target.State),
+            new(
+                CaptureDiagnosticField.DisplayState,
+                (long)observation.DisplayTarget.State),
+            new(
+                CaptureDiagnosticField.SessionUnlocked,
+                (long)signals.SessionUnlocked),
+            new(
+                CaptureDiagnosticField.SecureDesktopClear,
+                (long)signals.SecureDesktopClear),
+            new(
+                CaptureDiagnosticField.RemoteSession,
+                (long)signals.RemoteSession),
+            new(
+                CaptureDiagnosticField.PresentationMode,
+                (long)signals.PresentationMode),
+            new(
+                CaptureDiagnosticField.ApplicationAllowed,
+                (long)signals.ApplicationAllowed),
+            new(
+                CaptureDiagnosticField.WindowAllowed,
+                (long)signals.WindowAllowed),
+            new(
+                CaptureDiagnosticField.StorageAvailable,
+                (long)signals.StorageAvailable));
+    }
+
+    private void LogPublication(long generation, bool accepted)
+    {
+        _diagnosticLog?.Write(
+            CaptureDiagnosticEvent.PrivacyPublished,
+            new(CaptureDiagnosticField.Generation, generation),
+            new(CaptureDiagnosticField.Accepted, accepted ? 1 : 0));
     }
 
     private static bool IsObjectChange(WindowsCaptureWinEventChange change)
@@ -2293,10 +2458,16 @@ public sealed class WindowsCapturePrivacyMonitor : IAsyncDisposable
     private static bool IsTransientTargetObservation(
         WindowsCapturePrivacyObservation observation)
     {
-        return observation.Signals.Target.State
-                == NativeCaptureTargetIdentityState.Unknown
-            && observation.DisplayTarget.State
-                == WindowsCaptureDisplayTargetState.Unknown;
+        return observation.Signals.Target.State switch
+        {
+            NativeCaptureTargetIdentityState.Unknown =>
+                observation.DisplayTarget.State
+                    == WindowsCaptureDisplayTargetState.Unknown,
+            NativeCaptureTargetIdentityState.Absent =>
+                observation.DisplayTarget.State
+                    == WindowsCaptureDisplayTargetState.Absent,
+            _ => false,
+        };
     }
 
     internal static bool IsRecoverableTransientTargetObservation(

@@ -231,7 +231,7 @@ public sealed class CaptureExclusionRuleTests
     }
 
     [Fact]
-    public async Task DisabledDraftAndRenameDoNotInvalidateConsentButEnableDoes()
+    public async Task SendRuleChangesDoNotInvalidateConsentOrStopCapture()
     {
         var repository = new TestSettingsRepository();
         using var service = new AppSettingsService(
@@ -260,7 +260,7 @@ public sealed class CaptureExclusionRuleTests
 
         Assert.True(service.Current.CaptureEnabled);
         Assert.True(service.HasValidRecordingConsent);
-        Assert.Equal(1, service.Current.CapturePrivacy.Revision);
+        Assert.Equal(1, service.Current.Evidence.RulesRevision);
         Assert.Equal(2, renamed.Revision);
         await Assert.ThrowsAsync<CaptureExclusionRuleRevisionConflictException>(
             () => service.SetCaptureExclusionRuleEnabledAsync(
@@ -273,14 +273,14 @@ public sealed class CaptureExclusionRuleTests
             renamed.Revision,
             enabled: true);
 
-        Assert.False(service.Current.CaptureEnabled);
-        Assert.False(service.HasValidRecordingConsent);
-        Assert.Equal(2, service.Current.CapturePrivacy.Revision);
+        Assert.True(service.Current.CaptureEnabled);
+        Assert.True(service.HasValidRecordingConsent);
+        Assert.Equal(2, service.Current.Evidence.RulesRevision);
         Assert.Equal(3, enabled.Revision);
     }
 
     [Fact]
-    public async Task EnabledRuleMoveAndDeleteAdvancePrivacyAndRuleRevisions()
+    public async Task EnabledRuleMoveAndDeleteAdvanceSendRuleRevisions()
     {
         var repository = new TestSettingsRepository();
         using var service = new AppSettingsService(
@@ -290,7 +290,7 @@ public sealed class CaptureExclusionRuleTests
         var second = CreateApplicationRule("second.exe");
         await service.AddCaptureExclusionRuleAsync(first);
         await service.AddCaptureExclusionRuleAsync(second);
-        Assert.Equal(3, service.Current.CapturePrivacy.Revision);
+        Assert.Equal(3, service.Current.Evidence.RulesRevision);
         await service.GrantRecordingConsentAsync();
         await service.SetCaptureEnabledAsync(enabled: true);
 
@@ -300,13 +300,13 @@ public sealed class CaptureExclusionRuleTests
             newIndex: 0);
 
         Assert.Equal(2, moved.Revision);
-        Assert.Equal(second.Id, service.Current.CapturePrivacy.ExclusionRules[0].Id);
-        Assert.Equal(4, service.Current.CapturePrivacy.Revision);
-        Assert.False(service.Current.CaptureEnabled);
+        Assert.Equal(second.Id, service.Current.Evidence.SendRules[0].Id);
+        Assert.Equal(4, service.Current.Evidence.RulesRevision);
+        Assert.True(service.Current.CaptureEnabled);
         await Assert.ThrowsAsync<CaptureExclusionRuleRevisionConflictException>(
             () => service.DeleteCaptureExclusionRuleAsync(second.Id, expectedRevision: 1));
         await service.DeleteCaptureExclusionRuleAsync(second.Id, moved.Revision);
-        Assert.Equal(5, service.Current.CapturePrivacy.Revision);
+        Assert.Equal(5, service.Current.Evidence.RulesRevision);
     }
 
     private static CaptureExclusionRule CreateApplicationRule(string executableName)

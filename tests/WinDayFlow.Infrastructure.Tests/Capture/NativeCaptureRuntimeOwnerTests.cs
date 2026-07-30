@@ -693,6 +693,114 @@ public sealed class NativeCaptureRuntimeOwnerTests
         }
     }
 
+    [Theory]
+    [InlineData(CaptureReasonCode.SessionLocked)]
+    [InlineData(CaptureReasonCode.PolicyBlocked)]
+    public async Task AutomaticProtectionStopReconcilesAndAllowsFreshAdmission(
+        CaptureReasonCode reason)
+    {
+        var backend = new ScriptedRuntimeBackend();
+        var owner = await CreateAuthorizedOwnerAsync(backend);
+        try
+        {
+            var stale = await owner.TryIssueAdmissionAsync(
+                CaptureAdmissionOperation.Start);
+            Assert.NotNull(stale);
+            var previousGeneration = owner.InvalidationGeneration;
+            var restored = new TaskCompletionSource(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            owner.AuthorizationChanged += (_, eventArgs) =>
+            {
+                if (eventArgs.IsCaptureAuthorized
+                    && eventArgs.InvalidationGeneration > previousGeneration)
+                {
+                    restored.TrySetResult();
+                }
+            };
+
+            backend.RaiseStatus(
+                CaptureState.Stopped,
+                reason);
+
+            await restored.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            Assert.True(owner.IsCaptureAuthorized);
+            Assert.True(owner.InvalidationGeneration > previousGeneration);
+            await Assert.ThrowsAsync<CaptureRuntimeAdmissionRejectedException>(
+                () => owner.StartAsync(stale));
+
+            var fresh = await owner.TryIssueAdmissionAsync(
+                CaptureAdmissionOperation.Start);
+            Assert.NotNull(fresh);
+            await owner.StartAsync(fresh);
+            Assert.Equal(0, backend.StopCount);
+            Assert.Equal(1, backend.StartCount);
+        }
+        finally
+        {
+            await owner.DisposeAsync();
+        }
+    }
+
+    [Theory]
+    [InlineData(CaptureReasonCode.UserStopped)]
+    [InlineData(CaptureReasonCode.BackendFault)]
+    [InlineData(CaptureReasonCode.Shutdown)]
+    public async Task NonProtectionStoppedEventsDoNotReconcileAuthorization(
+        CaptureReasonCode reason)
+    {
+        var backend = new ScriptedRuntimeBackend();
+        var owner = await CreateAuthorizedOwnerAsync(backend);
+        try
+        {
+            var previousGeneration = owner.InvalidationGeneration;
+            var previousUpdateCount = backend.AuthorizationUpdateCount;
+
+            backend.RaiseStatus(CaptureState.Stopped, reason);
+
+            Assert.Equal(previousGeneration, owner.InvalidationGeneration);
+            Assert.Equal(previousUpdateCount, backend.AuthorizationUpdateCount);
+            Assert.True(owner.IsCaptureAuthorized);
+        }
+        finally
+        {
+            await owner.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public async Task ExplicitAndAutomaticStopShareOneReconciliation()
+    {
+        var backend = new ScriptedRuntimeBackend();
+        var owner = await CreateAuthorizedOwnerAsync(backend);
+        backend.BlockAuthorizationUpdate();
+        try
+        {
+            var previousUpdateCount = backend.AuthorizationUpdateCount;
+            backend.RaiseStatus(
+                CaptureState.Stopped,
+                CaptureReasonCode.SessionLocked);
+            await backend.AuthorizationUpdateStarted.WaitAsync(
+                TimeSpan.FromSeconds(2));
+
+            var explicitStop = owner.StopAsync();
+            Assert.False(explicitStop.IsCompleted);
+
+            backend.ReleaseAuthorizationUpdate();
+            await explicitStop.WaitAsync(TimeSpan.FromSeconds(2));
+
+            Assert.Equal(
+                previousUpdateCount + 1,
+                backend.AuthorizationUpdateCount);
+            Assert.Equal(1, backend.StopCount);
+            Assert.True(owner.IsCaptureAuthorized);
+        }
+        finally
+        {
+            backend.ReleaseAuthorizationUpdate();
+            await owner.DisposeAsync();
+        }
+    }
+
     private static NativeCaptureRuntimeOwner CreateOwner(
         ScriptedRuntimeBackend backend)
     {
@@ -718,16 +826,14 @@ public sealed class NativeCaptureRuntimeOwnerTests
 
     private static AppSettings CreateEnabledSettings()
     {
-        var privacy = CapturePrivacySettings.Default;
         return new AppSettings(
             AppThemePreference.System,
-            CaptureEnabled: true,
-            CloudAnalysisEnabled: false,
             new RecordingConsent(
                 AppSettingsService.CurrentRecordingConsentVersion,
-                new DateTimeOffset(2026, 7, 17, 0, 0, 0, TimeSpan.Zero),
-                privacy.Revision),
-            privacy);
+                new DateTimeOffset(2026, 7, 17, 0, 0, 0, TimeSpan.Zero)),
+            EvidenceSettings.Default,
+            CaptureIntervalSeconds: 10,
+            CaptureIntent.Recording);
     }
 
     private static NativeCapturePrivacySignals CreateAllowedSignals(ulong targetEpoch)
@@ -819,6 +925,8 @@ public sealed class NativeCaptureRuntimeOwnerTests
         public NativeCaptureResult DestroyResult { get; init; } =
             NativeCaptureResult.Ok;
 
+        public int AuthorizationUpdateCount { get; private set; }
+
         public int DestroyCount { get; private set; }
 
         public int IssueCount { get; private set; }
@@ -863,7 +971,9 @@ public sealed class NativeCaptureRuntimeOwnerTests
                 CaptureChunkCommittedEventArgs.WakeHint);
         }
 
-        public void RaiseStatus(CaptureState state)
+        public void RaiseStatus(
+            CaptureState state,
+            CaptureReasonCode? reason = null)
         {
             CaptureStatus previous;
             CaptureStatus current;
@@ -876,9 +986,9 @@ public sealed class NativeCaptureRuntimeOwnerTests
                     DateTimeOffset.UtcNow,
                     "test",
                     previous.Sequence + 1,
-                    state == CaptureState.Faulted
+                    reason ?? (state == CaptureState.Faulted
                         ? CaptureReasonCode.BackendFault
-                        : CaptureReasonCode.None,
+                        : CaptureReasonCode.None),
                     state == CaptureState.Faulted
                         ? CaptureErrorCode.NativeFailure
                         : CaptureErrorCode.None);
@@ -982,6 +1092,7 @@ public sealed class NativeCaptureRuntimeOwnerTests
             CancellationToken cancellationToken = default)
         {
             Operations.Add("Block");
+            AuthorizationUpdateCount++;
             AuthorizationUpdateToken = cancellationToken;
             if (_blockAuthorizationUpdate)
             {

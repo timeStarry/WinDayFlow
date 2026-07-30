@@ -32,73 +32,118 @@ public sealed class SqliteAiProviderProfileStore : IAiProviderProfileStore
             ?? throw new ArgumentNullException(nameof(credentialProtector));
     }
 
-    public async Task<AiProviderProfileSnapshot?> GetActiveAsync(
+    public async Task<IReadOnlyList<AiProviderProfileSnapshot>> ListAsync(
         CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
         await using var connection = await _connectionFactory
             .OpenConnectionAsync(cancellationToken)
             .ConfigureAwait(false);
-        var persisted = await ReadActiveAsync(
-                connection,
-                transaction: null,
-                cancellationToken)
+        await using var command = connection.CreateCommand();
+        command.CommandText = ProfileSelectSql + " ORDER BY lower(display_name), id;";
+        await using var reader = await command
+            .ExecuteReaderAsync(cancellationToken)
             .ConfigureAwait(false);
-        return persisted?.Snapshot;
+        var profiles = new List<AiProviderProfileSnapshot>();
+        while (await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            profiles.Add(MaterializePersistedProfile(reader).Snapshot);
+        }
+
+        return profiles;
     }
 
-    public async Task<AiProviderProfileSnapshot> SaveActiveAsync(
+    public async Task<AiProviderProfileSnapshot?> GetAsync(
+        Guid profileId,
+        CancellationToken cancellationToken = default)
+    {
+        ValidateProfileId(profileId);
+        cancellationToken.ThrowIfCancellationRequested();
+        await using var connection = await _connectionFactory
+            .OpenConnectionAsync(cancellationToken)
+            .ConfigureAwait(false);
+        return (await ReadByIdAsync(
+                connection,
+                transaction: null,
+                profileId,
+                cancellationToken)
+            .ConfigureAwait(false))?.Snapshot;
+    }
+
+    public async Task<AiProviderProfileSnapshot> CreateAsync(
         AiProviderProfile profile,
-        long? expectedRevision,
         AiProviderCredentialUpdate credentialUpdate,
         DateTimeOffset changedAtUtc,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(profile);
         ArgumentNullException.ThrowIfNull(credentialUpdate);
-        if (expectedRevision is <= 0)
-        {
-            throw new ArgumentOutOfRangeException(nameof(expectedRevision));
-        }
-
-        var endpoint = profile.BaseEndpoint.AbsoluteUri;
-        if (endpoint.Length > AiProviderProfile.MaximumEndpointLength)
-        {
-            throw new ArgumentException(
-                $"The AI provider endpoint cannot exceed {AiProviderProfile.MaximumEndpointLength} characters when persisted.",
-                nameof(profile));
-        }
-
         cancellationToken.ThrowIfCancellationRequested();
+        const long revision = 1;
+        ProtectedAiProviderCredential? protectedCredential = credentialUpdate.Kind switch
+        {
+            AiProviderCredentialUpdateKind.Preserve => (ProtectedAiProviderCredential?)null,
+            AiProviderCredentialUpdateKind.Replace => _credentialProtector.Protect(
+                credentialUpdate.GetReplacement(),
+                profile.Id,
+                revision,
+                profile.BaseEndpoint.AbsoluteUri),
+            AiProviderCredentialUpdateKind.Clear => (ProtectedAiProviderCredential?)null,
+            _ => throw new ArgumentOutOfRangeException(nameof(credentialUpdate)),
+        };
         var changedAtTicks = ToUtcTicks(changedAtUtc);
+
+        await using var connection = await _connectionFactory
+            .OpenConnectionAsync(cancellationToken)
+            .ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = InsertProfileSql;
+        AddProfileParameters(command.Parameters, profile);
+        command.Parameters.AddWithValue("$revision", revision);
+        command.Parameters.AddWithValue("$is_active", 0);
+        AddCredentialParameters(command.Parameters, protectedCredential);
+        command.Parameters.AddWithValue("$created_at_utc_ticks", changedAtTicks);
+        try
+        {
+            _ = await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (SqliteException exception) when (
+            exception.SqliteExtendedErrorCode is 1555 or 2067)
+        {
+            throw new AiProviderConfigurationConflictException();
+        }
+
+        return new AiProviderProfileSnapshot(
+            profile,
+            revision,
+            protectedCredential.HasValue,
+            validatedRevision: null,
+            validatedAtUtc: null);
+    }
+
+    public async Task<AiProviderProfileSnapshot> UpdateAsync(
+        AiProviderProfile profile,
+        long expectedRevision,
+        AiProviderCredentialUpdate credentialUpdate,
+        DateTimeOffset changedAtUtc,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(profile);
+        ArgumentNullException.ThrowIfNull(credentialUpdate);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(expectedRevision);
+        cancellationToken.ThrowIfCancellationRequested();
+
         await using var connection = await _connectionFactory
             .OpenConnectionAsync(cancellationToken)
             .ConfigureAwait(false);
         await using var transaction = connection.BeginTransaction(deferred: false);
-        var current = await ReadActiveAsync(connection, transaction, cancellationToken)
+        var current = await ReadByIdAsync(
+                connection,
+                transaction,
+                profile.Id,
+                cancellationToken)
             .ConfigureAwait(false);
-
-        if (current is null)
-        {
-            if (expectedRevision.HasValue)
-            {
-                throw new AiProviderConfigurationConflictException();
-            }
-
-            var created = await InsertFirstActiveAsync(
-                    connection,
-                    transaction,
-                    profile,
-                    credentialUpdate,
-                    changedAtTicks,
-                    cancellationToken)
-                .ConfigureAwait(false);
-            await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-            return created;
-        }
-
-        if (expectedRevision != current.Snapshot.Revision
-            || profile.Id != current.Snapshot.Profile.Id)
+        if (current is null || current.Snapshot.Revision != expectedRevision)
         {
             throw new AiProviderConfigurationConflictException();
         }
@@ -110,114 +155,80 @@ public sealed class SqliteAiProviderProfileStore : IAiProviderProfileStore
             return current.Snapshot;
         }
 
-        var nextRevision = checked(current.Snapshot.Revision + 1);
+        var nextRevision = checked(expectedRevision + 1);
         var protectedCredential = CreateUpdatedCredential(
             current,
             credentialUpdate,
             profile,
             nextRevision);
-        var updatedAtTicks = Math.Max(changedAtTicks, current.UpdatedAtUtcTicks);
-
-        await using (var command = connection.CreateCommand())
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            UPDATE ai_provider_profiles
+            SET display_name = $display_name,
+                kind = $kind,
+                base_endpoint = $base_endpoint,
+                model = $model,
+                request_timeout_ticks = $request_timeout_ticks,
+                revision = $next_revision,
+                api_key_ciphertext = $api_key_ciphertext,
+                api_key_salt = $api_key_salt,
+                api_key_protection_version = $api_key_protection_version,
+                validated_revision = NULL,
+                validated_at_utc_ticks = NULL,
+                updated_at_utc_ticks = $updated_at_utc_ticks
+            WHERE id = $id AND revision = $expected_revision;
+            """;
+        AddProfileParameters(command.Parameters, profile);
+        command.Parameters.AddWithValue("$next_revision", nextRevision);
+        command.Parameters.AddWithValue("$expected_revision", expectedRevision);
+        AddCredentialParameters(command.Parameters, protectedCredential);
+        command.Parameters.AddWithValue(
+            "$updated_at_utc_ticks",
+            Math.Max(ToUtcTicks(changedAtUtc), current.UpdatedAtUtcTicks));
+        if (await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) != 1)
         {
-            command.Transaction = transaction;
-            command.CommandText = """
-                UPDATE ai_provider_profiles
-                SET display_name = $display_name,
-                    kind = $kind,
-                    base_endpoint = $base_endpoint,
-                    model = $model,
-                    request_timeout_ticks = $request_timeout_ticks,
-                    revision = $next_revision,
-                    api_key_ciphertext = $api_key_ciphertext,
-                    api_key_salt = $api_key_salt,
-                    api_key_protection_version = $api_key_protection_version,
-                    validated_revision = NULL,
-                    validated_at_utc_ticks = NULL,
-                    updated_at_utc_ticks = $updated_at_utc_ticks
-                WHERE id = $id
-                    AND revision = $expected_revision
-                    AND is_active = 1;
-                """;
-            AddProfileParameters(command.Parameters, profile);
-            command.Parameters.AddWithValue("$next_revision", nextRevision);
-            command.Parameters.AddWithValue("$expected_revision", expectedRevision.Value);
-            AddCredentialParameters(command.Parameters, protectedCredential);
-            command.Parameters.AddWithValue("$updated_at_utc_ticks", updatedAtTicks);
-
-            if (await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) != 1)
-            {
-                throw new AiProviderConfigurationConflictException();
-            }
+            throw new AiProviderConfigurationConflictException();
         }
 
-        var saved = new AiProviderProfileSnapshot(
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+        return new AiProviderProfileSnapshot(
             profile,
             nextRevision,
             protectedCredential.HasValue,
             validatedRevision: null,
             validatedAtUtc: null);
-        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-        return saved;
     }
 
-    public async Task<AiProviderProfileSnapshot?> MarkValidatedAsync(
+    public async Task DeleteAsync(
         Guid profileId,
         long expectedRevision,
-        DateTimeOffset validatedAtUtc,
         CancellationToken cancellationToken = default)
     {
-        if (profileId == Guid.Empty)
-        {
-            throw new ArgumentException(
-                "AI provider validation requires a profile identifier.",
-                nameof(profileId));
-        }
-
+        ValidateProfileId(profileId);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(expectedRevision);
         cancellationToken.ThrowIfCancellationRequested();
-        var validatedAtTicks = ToUtcTicks(validatedAtUtc);
         await using var connection = await _connectionFactory
             .OpenConnectionAsync(cancellationToken)
             .ConfigureAwait(false);
-        await using var transaction = connection.BeginTransaction(deferred: false);
-
-        await using (var command = connection.CreateCommand())
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            DELETE FROM ai_provider_profiles
+            WHERE id = $id AND revision = $expected_revision;
+            """;
+        command.Parameters.AddWithValue("$id", FormatId(profileId));
+        command.Parameters.AddWithValue("$expected_revision", expectedRevision);
+        try
         {
-            command.Transaction = transaction;
-            command.CommandText = """
-                UPDATE ai_provider_profiles
-                SET validated_revision = revision,
-                    validated_at_utc_ticks = $validated_at_utc_ticks,
-                    updated_at_utc_ticks = MAX(
-                        updated_at_utc_ticks,
-                        $validated_at_utc_ticks)
-                WHERE id = $id
-                    AND revision = $expected_revision
-                    AND is_active = 1;
-                """;
-            command.Parameters.AddWithValue("$validated_at_utc_ticks", validatedAtTicks);
-            command.Parameters.AddWithValue("$id", FormatId(profileId));
-            command.Parameters.AddWithValue("$expected_revision", expectedRevision);
             if (await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) != 1)
             {
-                await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-                return null;
+                throw new AiProviderConfigurationConflictException();
             }
         }
-
-        var persisted = await ReadActiveAsync(connection, transaction, cancellationToken)
-            .ConfigureAwait(false);
-        if (persisted is null
-            || persisted.Snapshot.Profile.Id != profileId
-            || persisted.Snapshot.Revision != expectedRevision)
+        catch (SqliteException exception) when (exception.SqliteErrorCode == 19)
         {
-            throw new InvalidDataException(
-                "The validated AI provider profile could not be read back.");
+            throw new AiProviderProfileInUseException(profileId);
         }
-
-        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
-        return persisted.Snapshot;
     }
 
     internal async Task<string?> ReadApiKeyAsync(
@@ -231,9 +242,10 @@ public sealed class SqliteAiProviderProfileStore : IAiProviderProfileStore
         await using var connection = await _connectionFactory
             .OpenConnectionAsync(cancellationToken)
             .ConfigureAwait(false);
-        var persisted = await ReadActiveAsync(
+        var persisted = await ReadByIdAsync(
                 connection,
                 transaction: null,
+                snapshot.Profile.Id,
                 cancellationToken)
             .ConfigureAwait(false);
         if (persisted is null
@@ -442,6 +454,44 @@ public sealed class SqliteAiProviderProfileStore : IAiProviderProfileStore
         }
     }
 
+    private static async Task<PersistedProfile?> ReadByIdAsync(
+        SqliteConnection connection,
+        SqliteTransaction? transaction,
+        Guid profileId,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = ProfileSelectSql + " WHERE id = $id;";
+        command.Parameters.AddWithValue("$id", FormatId(profileId));
+        await using var reader = await command
+            .ExecuteReaderAsync(cancellationToken)
+            .ConfigureAwait(false);
+        if (!await reader.ReadAsync(cancellationToken).ConfigureAwait(false))
+        {
+            return null;
+        }
+
+        try
+        {
+            return MaterializePersistedProfile(reader);
+        }
+        catch (InvalidDataException)
+        {
+            throw;
+        }
+        catch (Exception exception) when (
+            exception is ArgumentException
+                or FormatException
+                or InvalidCastException
+                or OverflowException)
+        {
+            throw new InvalidDataException(
+                "The persisted AI provider profile is invalid.",
+                exception);
+        }
+    }
+
     private static PersistedProfile MaterializePersistedProfile(SqliteDataReader reader)
     {
         var ciphertext = reader.IsDBNull(7)
@@ -537,6 +587,70 @@ public sealed class SqliteAiProviderProfileStore : IAiProviderProfileStore
         parameters.AddWithValue("$model", profile.Model);
         parameters.AddWithValue("$request_timeout_ticks", profile.RequestTimeout.Ticks);
     }
+
+    private static void ValidateProfileId(Guid profileId)
+    {
+        if (profileId == Guid.Empty)
+        {
+            throw new ArgumentException(
+                "An AI provider profile identifier cannot be empty.",
+                nameof(profileId));
+        }
+    }
+
+    private const string ProfileSelectSql = """
+        SELECT
+            id,
+            display_name,
+            kind,
+            base_endpoint,
+            model,
+            request_timeout_ticks,
+            revision,
+            api_key_ciphertext,
+            api_key_salt,
+            api_key_protection_version,
+            validated_revision,
+            validated_at_utc_ticks,
+            created_at_utc_ticks,
+            updated_at_utc_ticks
+        FROM ai_provider_profiles
+        """;
+
+    private const string InsertProfileSql = """
+        INSERT INTO ai_provider_profiles(
+            id,
+            display_name,
+            kind,
+            base_endpoint,
+            model,
+            request_timeout_ticks,
+            revision,
+            is_active,
+            api_key_ciphertext,
+            api_key_salt,
+            api_key_protection_version,
+            validated_revision,
+            validated_at_utc_ticks,
+            created_at_utc_ticks,
+            updated_at_utc_ticks)
+        VALUES (
+            $id,
+            $display_name,
+            $kind,
+            $base_endpoint,
+            $model,
+            $request_timeout_ticks,
+            $revision,
+            $is_active,
+            $api_key_ciphertext,
+            $api_key_salt,
+            $api_key_protection_version,
+            NULL,
+            NULL,
+            $created_at_utc_ticks,
+            $created_at_utc_ticks);
+        """;
 
     private static void AddCredentialParameters(
         SqliteParameterCollection parameters,

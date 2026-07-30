@@ -19,6 +19,30 @@ public enum NativeCaptureCapabilities : ulong
     DisplayBoundCommandAdmission = 1UL << 10,
     CallbackTimeAuthorizationInvalidation = 1UL << 11,
     DisplayWideContinuousAuthorization = 1UL << 12,
+    HealthSnapshot = 1UL << 13,
+}
+
+public sealed record CaptureHealthSnapshot(
+    CaptureState NativeState,
+    CaptureReasonCode GateReason,
+    DateTimeOffset? LastSuccessfulSampleAt,
+    DateTimeOffset? LastRetainedFrameAt,
+    ulong SampledFrameCount,
+    ulong BlackFrameCount,
+    ulong DuplicateFrameCount,
+    ulong RetainedFrameCount,
+    ulong Revision)
+{
+    public static CaptureHealthSnapshot Empty { get; } = new(
+        CaptureState.Unavailable,
+        CaptureReasonCode.BackendUnavailable,
+        null,
+        null,
+        0,
+        0,
+        0,
+        0,
+        0);
 }
 
 public enum NativeCapturePolicyDecision
@@ -298,12 +322,14 @@ public readonly record struct NativeCaptureAbiLayout(
 
 public static class NativeCaptureAbiContract
 {
-    public const uint AbiVersion = 1;
+    public const uint AbiVersion = 2;
     public const int X64StructureSize = 80;
-    public const int X64RuntimeAuthorizationStructureSize = 224;
+    public const int PrivacyContextStructureSize = 64;
+    public const int X64RuntimeAuthorizationStructureSize = 184;
     public const int DisplayDeviceKeyUtf8Capacity = 96;
     public const int DisplayDeviceKeyUtf8MaximumLength = 93;
     public const int CommandAdmissionStructureSize = 64;
+    public const int HealthSnapshotStructureSize = 104;
 
     public const NativeCaptureCapabilities FoundationCapabilities =
         NativeCaptureCapabilities.PrivacyGuard
@@ -334,7 +360,8 @@ public static class NativeCaptureAbiContract
 
     public const NativeCaptureCapabilities DisplayWideContinuousCapabilities =
         RuntimeOwnerCapabilities
-        | NativeCaptureCapabilities.DisplayWideContinuousAuthorization;
+        | NativeCaptureCapabilities.DisplayWideContinuousAuthorization
+        | NativeCaptureCapabilities.HealthSnapshot;
 
     public static NativeCaptureAbiLayout GetManagedLayout()
     {

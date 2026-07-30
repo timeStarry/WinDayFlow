@@ -107,21 +107,52 @@ public sealed class AiProviderCredentialUpdate
 
 public interface IAiProviderProfileStore
 {
-    Task<AiProviderProfileSnapshot?> GetActiveAsync(
+    Task<IReadOnlyList<AiProviderProfileSnapshot>> ListAsync(
         CancellationToken cancellationToken = default);
 
-    Task<AiProviderProfileSnapshot> SaveActiveAsync(
+    Task<AiProviderProfileSnapshot?> GetAsync(
+        Guid profileId,
+        CancellationToken cancellationToken = default);
+
+    Task<AiProviderProfileSnapshot> CreateAsync(
         AiProviderProfile profile,
-        long? expectedRevision,
         AiProviderCredentialUpdate credentialUpdate,
         DateTimeOffset changedAtUtc,
         CancellationToken cancellationToken = default);
 
-    Task<AiProviderProfileSnapshot?> MarkValidatedAsync(
+    Task<AiProviderProfileSnapshot> UpdateAsync(
+        AiProviderProfile profile,
+        long expectedRevision,
+        AiProviderCredentialUpdate credentialUpdate,
+        DateTimeOffset changedAtUtc,
+        CancellationToken cancellationToken = default);
+
+    Task DeleteAsync(
         Guid profileId,
         long expectedRevision,
-        DateTimeOffset validatedAtUtc,
         CancellationToken cancellationToken = default);
+}
+
+public sealed class AiProviderProfileInUseException : Exception
+{
+    public AiProviderProfileInUseException(Guid profileId)
+        : this(profileId, [])
+    {
+    }
+
+    public AiProviderProfileInUseException(
+        Guid profileId,
+        IReadOnlyList<AnalysisStage> stages)
+        : base($"AI provider profile {profileId:D} is assigned to a processing stage.")
+    {
+        ProfileId = profileId;
+        Stages = stages?.Distinct().Order().ToArray()
+            ?? throw new ArgumentNullException(nameof(stages));
+    }
+
+    public Guid ProfileId { get; }
+
+    public IReadOnlyList<AnalysisStage> Stages { get; }
 }
 
 public interface IAiAnalysisProviderFactory

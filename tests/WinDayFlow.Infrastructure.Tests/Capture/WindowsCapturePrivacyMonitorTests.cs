@@ -262,6 +262,56 @@ public sealed class WindowsCapturePrivacyMonitorTests
     }
 
     [Fact]
+    public async Task SessionHoldRecoversFromPeriodicProbeWithoutAnAvailableEvent()
+    {
+        var sessionDecision = NativeCapturePolicyDecision.Block;
+        var sink = new FakePrivacySignalSink();
+        var sampler = new FakeStoragePrivacySampler(
+            static (call, _) => Task.FromResult(CreateObservation(
+                checked((ulong)call))),
+            static (_, _) => Task.FromResult(
+                NativeCapturePolicyDecision.Allow),
+            (_, _) => Task.FromResult(sessionDecision));
+        var source = new FakeEventSource();
+        var refreshWait = new ControlledStorageRefreshWait();
+        var monitor = new WindowsCapturePrivacyMonitor(
+            sink,
+            sampler,
+            source,
+            WindowsCapturePrivacyMonitor.StorageRefreshInterval,
+            refreshWait.WaitAsync);
+
+        await monitor.StartAsync();
+        _ = await sink.ReadUpdateAsync().WaitAsync(Timeout);
+        source.EmitChange(WindowsCaptureWinEventChange.SessionUnavailable);
+        var unavailable = await sink.ReadUpdateAsync().WaitAsync(Timeout);
+        Assert.Same(NativeCapturePrivacySignals.FailClosed, unavailable.Signals);
+        Assert.True(monitor.ActiveHolds.HasFlag(
+            WindowsCapturePrivacyHold.SessionUnavailable));
+
+        var blockedRefresh = await refreshWait.ReadAsync().WaitAsync(Timeout);
+        blockedRefresh.Release();
+        var recoveryRefresh = await refreshWait.ReadAsync().WaitAsync(Timeout);
+        Assert.Equal(2, sink.PrivacyObservationGeneration);
+        Assert.Equal(1, sampler.StorageSampleCount);
+        Assert.Equal(1, sampler.SessionSampleCount);
+
+        sessionDecision = NativeCapturePolicyDecision.Allow;
+        recoveryRefresh.Release();
+
+        var recovered = await sink.ReadUpdateAsync().WaitAsync(Timeout);
+        Assert.Equal(3, recovered.Generation);
+        Assert.Equal<ulong>(2, recovered.Signals.Target.TargetEpoch);
+        Assert.Equal(WindowsCapturePrivacyHold.None, monitor.ActiveHolds);
+        Assert.Equal(2, sampler.SampleCount);
+        Assert.Equal(2, sampler.StorageSampleCount);
+        Assert.Equal(2, sampler.SessionSampleCount);
+        Assert.True(monitor.ObservedInvalidationReasons.HasFlag(
+            WindowsCapturePrivacyInvalidationReason.SessionAvailable));
+        await monitor.DisposeAsync();
+    }
+
+    [Fact]
     public async Task DisposeCancelsAndAwaitsAnActiveStorageRefresh()
     {
         var storageEntered = CreateCompletionSource();
@@ -1093,6 +1143,74 @@ public sealed class WindowsCapturePrivacyMonitorTests
     }
 
     [Fact]
+    public async Task ForegroundAbsentRetryBudgetExhaustionRecoversWithoutAnotherWinEvent()
+    {
+        var absent = CreateAbsentTargetObservation();
+        var recovered = CreateObservation(84);
+        Assert.True(
+            WindowsCapturePrivacyMonitor
+                .IsRecoverableTransientTargetObservation(absent));
+        var sink = new FakePrivacySignalSink();
+        var sampler = new FakePrivacySampler((call, _) => Task.FromResult(
+            call switch
+            {
+                1 => CreateObservation(83),
+                <= 5 => absent,
+                6 => recovered,
+                _ => throw new InvalidOperationException(),
+            }));
+        var source = new FakeEventSource();
+        var retryWait = new ControlledRetryWait();
+        var monitor = new WindowsCapturePrivacyMonitor(
+            sink,
+            sampler,
+            source,
+            retryWait.WaitAsync);
+
+        await monitor.StartAsync();
+        _ = await sink.ReadUpdateAsync().WaitAsync(Timeout);
+        source.EmitChange(
+            WindowsCaptureWinEventChange.Foreground,
+            recovered.Signals.Target.WindowHandle);
+
+        var expectedDelays = new[]
+        {
+            TimeSpan.FromMilliseconds(50),
+            TimeSpan.FromMilliseconds(150),
+            TimeSpan.FromMilliseconds(350),
+        };
+        foreach (var expectedDelay in expectedDelays)
+        {
+            var retry = await retryWait.ReadAsync().WaitAsync(Timeout);
+            Assert.Equal(expectedDelay, retry.Delay);
+            retry.Release();
+        }
+
+        var blockedUpdate = await sink.ReadUpdateAsync().WaitAsync(Timeout);
+        Assert.Equal(2, blockedUpdate.Generation);
+        Assert.Same(absent.Signals, blockedUpdate.Signals);
+        Assert.Equal([1L, 2L], sink.UpdateAttemptGenerations);
+
+        var recoveryRetry = await retryWait.ReadAsync().WaitAsync(Timeout);
+        Assert.Equal(
+            WindowsCapturePrivacyMonitor.TransientTargetRecoveryRetryDelay,
+            recoveryRetry.Delay);
+        recoveryRetry.Release();
+
+        var recoveredUpdate = await sink.ReadUpdateAsync().WaitAsync(Timeout);
+        Assert.Equal(3, recoveredUpdate.Generation);
+        Assert.Same(recovered.Signals, recoveredUpdate.Signals);
+        Assert.Equal([1L, 2L, 3L], sink.UpdateAttemptGenerations);
+        Assert.Equal(6, sampler.InvalidationCount);
+        Assert.Equal(6, sampler.SampleCount);
+        Assert.True(monitor.ObservedInvalidationReasons.HasFlag(
+            WindowsCapturePrivacyInvalidationReason.TransientTargetRecovery));
+        Assert.False(monitor.Completion.IsFaulted);
+
+        await monitor.DisposeAsync();
+    }
+
+    [Fact]
     public async Task ExplicitBlockTargetUnknownDoesNotEnterSlowRecovery()
     {
         var blocked = CreateUnknownTargetObservation(
@@ -1907,6 +2025,65 @@ public sealed class WindowsCapturePrivacyMonitorTests
     }
 
     [Fact]
+    public async Task InFlightInvalidationDoesNotLookLikeGenerationDesynchronization()
+    {
+        var firstSampleEntered = CreateCompletionSource();
+        var releaseFirstSample = CreateCompletionSource();
+        var secondObservation = CreateObservation(92);
+        var sink = new FakePrivacySignalSink
+        {
+            BlockInvalidationCall = 2,
+        };
+        var sampler = new FakePrivacySampler(async (call, cancellationToken) =>
+        {
+            if (call == 1)
+            {
+                firstSampleEntered.TrySetResult();
+                await releaseFirstSample.Task.WaitAsync(cancellationToken);
+                return CreateObservation(91);
+            }
+
+            return secondObservation;
+        });
+        var source = new FakeEventSource();
+        var monitor = new WindowsCapturePrivacyMonitor(sink, sampler, source);
+        Task? invalidation = null;
+        try
+        {
+            await monitor.StartAsync();
+            await firstSampleEntered.Task.WaitAsync(Timeout);
+
+            invalidation = Task.Run(() => source.EmitChange(
+                WindowsCaptureWinEventChange.DesktopSwitch));
+            await sink.BlockedInvalidationAdvanced.Task.WaitAsync(Timeout);
+            releaseFirstSample.TrySetResult();
+
+            var prematureCompletion = await Task.WhenAny(
+                monitor.Completion,
+                Task.Delay(TimeSpan.FromMilliseconds(150)));
+            Assert.NotSame(monitor.Completion, prematureCompletion);
+
+            sink.ReleaseBlockedInvalidation();
+            await invalidation.WaitAsync(Timeout);
+            var update = await sink.ReadUpdateAsync().WaitAsync(Timeout);
+            Assert.Equal(2, update.Generation);
+            Assert.Same(secondObservation.Signals, update.Signals);
+            Assert.False(monitor.Completion.IsFaulted);
+        }
+        finally
+        {
+            releaseFirstSample.TrySetResult();
+            sink.ReleaseBlockedInvalidation();
+            if (invalidation is not null)
+            {
+                await invalidation.WaitAsync(Timeout);
+            }
+
+            await monitor.DisposeAsync();
+        }
+    }
+
+    [Fact]
     public async Task DisposeAppliesTheLastBarrierAndRejectsLateCallbacksIdempotently()
     {
         var sink = new FakePrivacySignalSink();
@@ -2415,6 +2592,23 @@ public sealed class WindowsCapturePrivacyMonitorTests
             WindowsCaptureDisplayTarget.Unknown);
     }
 
+    private static WindowsCapturePrivacyObservation CreateAbsentTargetObservation()
+    {
+        var signals = CreateBaseSignals();
+        return new WindowsCapturePrivacyObservation(
+            new NativeCapturePrivacySignals(
+                signals.SessionUnlocked,
+                signals.SecureDesktopClear,
+                signals.RemoteSession,
+                signals.PresentationMode,
+                signals.ApplicationAllowed,
+                signals.WindowAllowed,
+                signals.StorageAvailable,
+                NativeCaptureIdentitySnapshot.Absent,
+                NativeCaptureTargetIdentity.Absent),
+            WindowsCaptureDisplayTarget.Absent);
+    }
+
     private static WindowsCapturePrivacyObservation CreateObservation(
         ulong targetEpoch,
         NativeCaptureObservation executable,
@@ -2463,6 +2657,8 @@ public sealed class WindowsCapturePrivacyMonitorTests
             CreateCompletionSource();
         private readonly TaskCompletionSource _releaseUpdate =
             CreateCompletionSource();
+        private readonly TaskCompletionSource _releaseInvalidation =
+            CreateCompletionSource();
         private readonly HashSet<long> _publishedGenerations = [];
         private long _generation;
         private int _barrierCallCount;
@@ -2476,6 +2672,8 @@ public sealed class WindowsCapturePrivacyMonitorTests
         internal Exception? BarrierFailure { get; init; }
 
         internal int FailInvalidationCall { get; init; }
+
+        internal int BlockInvalidationCall { get; init; }
 
         internal Exception? InvalidationFailure { get; init; }
 
@@ -2495,6 +2693,9 @@ public sealed class WindowsCapturePrivacyMonitorTests
             CreateCompletionSource();
 
         internal TaskCompletionSource BlockedUpdateEntered { get; } =
+            CreateCompletionSource();
+
+        internal TaskCompletionSource BlockedInvalidationAdvanced { get; } =
             CreateCompletionSource();
 
         internal TaskCompletionSource TerminationProofRequested { get; } =
@@ -2561,7 +2762,14 @@ public sealed class WindowsCapturePrivacyMonitorTests
                 throw InvalidationFailure ?? new InvalidOperationException();
             }
 
-            return Interlocked.Increment(ref _generation);
+            var generation = Interlocked.Increment(ref _generation);
+            if (call == BlockInvalidationCall)
+            {
+                BlockedInvalidationAdvanced.TrySetResult();
+                _releaseInvalidation.Task.GetAwaiter().GetResult();
+            }
+
+            return generation;
         }
 
         public async Task ApplyPrivacyInvalidationAsync(
@@ -2659,6 +2867,11 @@ public sealed class WindowsCapturePrivacyMonitorTests
         {
             _releaseUpdate.TrySetResult();
         }
+
+        internal void ReleaseBlockedInvalidation()
+        {
+            _releaseInvalidation.TrySetResult();
+        }
     }
 
     private sealed class ControlledRetryWait
@@ -2731,7 +2944,8 @@ public sealed class WindowsCapturePrivacyMonitorTests
 
     private sealed class FakeStoragePrivacySampler
         : IWindowsCapturePrivacySampler,
-          IWindowsCaptureStorageSampler
+          IWindowsCaptureStorageSampler,
+          IWindowsCaptureSessionSampler
     {
         private readonly Func<
             int,
@@ -2741,9 +2955,14 @@ public sealed class WindowsCapturePrivacyMonitorTests
             int,
             CancellationToken,
             Task<NativeCapturePolicyDecision>> _sampleStorage;
+        private readonly Func<
+            int,
+            CancellationToken,
+            Task<NativeCapturePolicyDecision>> _sampleSession;
         private int _invalidationCount;
         private int _sampleCount;
         private int _storageSampleCount;
+        private int _sessionSampleCount;
 
         internal FakeStoragePrivacySampler(
             Func<
@@ -2753,11 +2972,18 @@ public sealed class WindowsCapturePrivacyMonitorTests
             Func<
                 int,
                 CancellationToken,
-                Task<NativeCapturePolicyDecision>> sampleStorage)
+                Task<NativeCapturePolicyDecision>> sampleStorage,
+            Func<
+                int,
+                CancellationToken,
+                Task<NativeCapturePolicyDecision>>? sampleSession = null)
         {
             _sample = sample ?? throw new ArgumentNullException(nameof(sample));
             _sampleStorage = sampleStorage
                 ?? throw new ArgumentNullException(nameof(sampleStorage));
+            _sampleSession = sampleSession
+                ?? ((_, _) => Task.FromResult(
+                    NativeCapturePolicyDecision.Unknown));
         }
 
         internal int InvalidationCount => Volatile.Read(ref _invalidationCount);
@@ -2766,6 +2992,9 @@ public sealed class WindowsCapturePrivacyMonitorTests
 
         internal int StorageSampleCount =>
             Volatile.Read(ref _storageSampleCount);
+
+        internal int SessionSampleCount =>
+            Volatile.Read(ref _sessionSampleCount);
 
         public void InvalidateTargetObservation()
         {
@@ -2786,6 +3015,14 @@ public sealed class WindowsCapturePrivacyMonitorTests
             var call = Interlocked.Increment(ref _storageSampleCount);
             return new ValueTask<NativeCapturePolicyDecision>(
                 _sampleStorage(call, cancellationToken));
+        }
+
+        public ValueTask<NativeCapturePolicyDecision> SampleSessionAsync(
+            CancellationToken cancellationToken)
+        {
+            var call = Interlocked.Increment(ref _sessionSampleCount);
+            return new ValueTask<NativeCapturePolicyDecision>(
+                _sampleSession(call, cancellationToken));
         }
     }
 

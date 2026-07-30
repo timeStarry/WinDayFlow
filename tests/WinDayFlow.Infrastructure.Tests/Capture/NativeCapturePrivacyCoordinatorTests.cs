@@ -99,7 +99,7 @@ public sealed class NativeCapturePrivacyCoordinatorTests
             new ulong[] { 2, 3 },
             target.Contexts.Select(static context => context.RuntimePolicyRevision));
         var applied = target.Contexts[^1];
-        Assert.Equal(7, settings.CapturePrivacy.Revision);
+        Assert.Equal(7, settings.Evidence.RulesRevision);
         Assert.True(coordinator.IsCaptureAuthorized);
     }
 
@@ -156,7 +156,7 @@ public sealed class NativeCapturePrivacyCoordinatorTests
     }
 
     [Fact]
-    public async Task InternalBarrierBlocksWithoutInventingConsentRevocation()
+    public async Task SendRuleRevisionDoesNotTouchRuntimeAuthorization()
     {
         var target = new TestPrivacyTarget();
         var initial = NativeCapturePrivacyContext.FailClosed(runtimePolicyRevision: 1);
@@ -167,26 +167,10 @@ public sealed class NativeCapturePrivacyCoordinatorTests
         target.Reset();
         var revised = CreateEnabledSettings(privacyRevision: 2);
 
-        await coordinator.PrepareAsync(settings, revised);
+        await CommitAsync(coordinator, settings, revised);
 
-        var barrier = Assert.Single(target.Authorizations);
-        Assert.Equal(
-            NativeCapturePolicyDecision.Allow,
-            barrier.PrivacyContext.ConsentGranted);
-        Assert.Equal(
-            NativeCapturePolicyDecision.Unknown,
-            barrier.PrivacyContext.ApplicationAllowed);
-        Assert.Equal(
-            NativeCaptureTargetIdentityState.Unknown,
-            barrier.Target.State);
-        Assert.False(
-            NativeCaptureRuntimeAuthorization.IsFullyAllowed(
-                barrier.PrivacyContext));
-        await coordinator.AbortedAsync(
-            settings,
-            revised,
-            settingsApplied: false,
-            new InvalidOperationException("test cleanup"));
+        Assert.Empty(target.Authorizations);
+        Assert.True(coordinator.IsCaptureAuthorized);
     }
 
     [Fact]
@@ -262,16 +246,15 @@ public sealed class NativeCapturePrivacyCoordinatorTests
 
         await coordinator.UpdateSignalsAsync(CopySignals(
             allowed,
-            remoteSession: NativeCaptureConditionState.Active));
+            storageAvailable: NativeCapturePolicyDecision.Block));
         Assert.False(coordinator.IsCaptureAuthorized);
         await coordinator.UpdateSignalsAsync(allowed);
 
         Assert.True(coordinator.IsCaptureAuthorized);
         Assert.Equal(
-            new ulong[] { 2, 3, 4, 5, 6 },
+            new ulong[] { 2, 3, 4, 5 },
             target.Contexts.Select(static context => context.RuntimePolicyRevision));
-        Assert.Equal(11, settings.RecordingConsent?.PrivacyRevision);
-        Assert.Equal(11, settings.CapturePrivacy.Revision);
+        Assert.Equal(11, settings.Evidence.RulesRevision);
     }
 
     [Fact]
@@ -326,14 +309,14 @@ public sealed class NativeCapturePrivacyCoordinatorTests
         await coordinator.PrepareAsync(disabled, enabled);
         var signalUpdate = coordinator.UpdateSignalsAsync(CopySignals(
             allowed,
-            remoteSession: NativeCaptureConditionState.Active));
+            storageAvailable: NativeCapturePolicyDecision.Block));
         await coordinator.CommittedAsync(disabled, enabled);
         await signalUpdate;
 
         Assert.False(coordinator.IsCaptureAuthorized);
         Assert.Equal(
             NativeCapturePolicyDecision.Block,
-            coordinator.LastAppliedContext.RemoteSessionAllowed);
+            coordinator.LastAppliedContext.StorageAvailable);
     }
 
     [Fact]
@@ -355,7 +338,7 @@ public sealed class NativeCapturePrivacyCoordinatorTests
         await target.UpdateStarted.WaitAsync(TimeSpan.FromSeconds(5));
         var blockedSignals = CopySignals(
             allowed,
-            remoteSession: NativeCaptureConditionState.Active);
+            storageAvailable: NativeCapturePolicyDecision.Block);
         var signalUpdate = coordinator.UpdateSignalsAsync(blockedSignals);
 
         target.ReleaseUpdate();
@@ -367,7 +350,7 @@ public sealed class NativeCapturePrivacyCoordinatorTests
                 NativeCapturePolicyDecision.Allow,
                 NativeCapturePolicyDecision.Block,
             },
-            target.Contexts.Select(static context => context.RemoteSessionAllowed));
+            target.Contexts.Select(static context => context.StorageAvailable));
         Assert.False(coordinator.IsCaptureAuthorized);
         await signalUpdate.WaitAsync(TimeSpan.FromSeconds(5));
     }
@@ -398,7 +381,7 @@ public sealed class NativeCapturePrivacyCoordinatorTests
         var signalUpdate = coordinator.UpdateSignalsAsync(
             CopySignals(
                 allowed,
-                presentationMode: NativeCaptureConditionState.Active),
+                secureDesktopClear: NativeCapturePolicyDecision.Block),
             cancellation.Token);
         await target.UpdateStarted.WaitAsync(TimeSpan.FromSeconds(5));
         cancellation.Cancel();
@@ -412,7 +395,7 @@ public sealed class NativeCapturePrivacyCoordinatorTests
 
         Assert.Equal(
             NativeCapturePolicyDecision.Block,
-            coordinator.LastAppliedContext.PresentationAllowed);
+            coordinator.LastAppliedContext.SecureDesktopClear);
         repository.ReleaseSave();
         await save.WaitAsync(TimeSpan.FromSeconds(5));
     }
@@ -432,7 +415,7 @@ public sealed class NativeCapturePrivacyCoordinatorTests
 
         var blockedSignals = CopySignals(
             allowed,
-            presentationMode: NativeCaptureConditionState.Active);
+            sessionUnlocked: NativeCapturePolicyDecision.Block);
         var block = coordinator.UpdateSignalsAsync(blockedSignals);
         await target.UpdateStarted.WaitAsync(TimeSpan.FromSeconds(5));
         var allow = coordinator.UpdateSignalsAsync(allowed);
@@ -446,11 +429,11 @@ public sealed class NativeCapturePrivacyCoordinatorTests
                 NativeCapturePolicyDecision.Block,
                 NativeCapturePolicyDecision.Allow,
             },
-            target.Contexts.Select(static context => context.PresentationAllowed));
+            target.Contexts.Select(static context => context.SessionUnlocked));
         Assert.True(coordinator.IsCaptureAuthorized);
         Assert.Equal(
             NativeCapturePolicyDecision.Allow,
-            coordinator.LastAppliedContext.PresentationAllowed);
+            coordinator.LastAppliedContext.SessionUnlocked);
     }
 
     [Fact]
@@ -479,8 +462,12 @@ public sealed class NativeCapturePrivacyCoordinatorTests
 
         Assert.Equal(previousRevision + 1, coordinator.LastAppliedContext.RuntimePolicyRevision);
         Assert.True(coordinator.LastPersistenceGeneration > previousGeneration);
-        Assert.Equal(secondTarget, coordinator.LastAppliedAuthorization.Target);
-        Assert.Equal(secondTarget, target.Authorizations[^1].Target);
+        var expectedDisplay = NativeCaptureTargetIdentity.DisplayWide(
+            secondTarget.TargetEpoch,
+            secondTarget.DisplayMonitorHandle,
+            secondTarget.DisplayDeviceKey!);
+        Assert.Equal(expectedDisplay, coordinator.LastAppliedAuthorization.Target);
+        Assert.Equal(expectedDisplay, target.Authorizations[^1].Target);
     }
 
     [Fact]
@@ -511,8 +498,12 @@ public sealed class NativeCapturePrivacyCoordinatorTests
             previousRevision + 1,
             coordinator.LastAppliedContext.RuntimePolicyRevision);
         Assert.True(coordinator.LastPersistenceGeneration > previousGeneration);
-        Assert.Equal(changedDisplayTarget, coordinator.LastAppliedAuthorization.Target);
-        Assert.Equal(changedDisplayTarget, target.Authorizations[^1].Target);
+        var expectedDisplay = NativeCaptureTargetIdentity.DisplayWide(
+            changedDisplayTarget.TargetEpoch,
+            changedDisplayTarget.DisplayMonitorHandle,
+            changedDisplayTarget.DisplayDeviceKey!);
+        Assert.Equal(expectedDisplay, coordinator.LastAppliedAuthorization.Target);
+        Assert.Equal(expectedDisplay, target.Authorizations[^1].Target);
     }
 
     [Fact]
@@ -829,7 +820,12 @@ public sealed class NativeCapturePrivacyCoordinatorTests
             target.Authorizations.Select(
                 static authorization =>
                     authorization.PrivacyContext.RuntimePolicyRevision));
-        Assert.Equal(changedTarget, target.Authorizations[0].Target);
+        Assert.Equal(
+            NativeCaptureTargetIdentity.DisplayWide(
+                changedTarget.TargetEpoch,
+                changedTarget.DisplayMonitorHandle,
+                changedTarget.DisplayDeviceKey!),
+            target.Authorizations[0].Target);
         Assert.Equal(
             NativeCapturePolicyDecision.Allow,
             target.Authorizations[0].PrivacyContext.ConsentGranted);
@@ -916,7 +912,7 @@ public sealed class NativeCapturePrivacyCoordinatorTests
         target.BlockNextUpdate();
         var update = coordinator.UpdateSignalsAsync(CopySignals(
             allowed,
-            remoteSession: NativeCaptureConditionState.Active));
+            storageAvailable: NativeCapturePolicyDecision.Block));
         await target.UpdateStarted.WaitAsync(TimeSpan.FromSeconds(5));
 
         var quiesce = coordinator.QuiesceAsync();
@@ -1018,7 +1014,7 @@ public sealed class NativeCapturePrivacyCoordinatorTests
         var thrown = await Assert.ThrowsAsync<InvalidOperationException>(
             () => coordinator.UpdateSignalsAsync(CopySignals(
                 allowed,
-                presentationMode: NativeCaptureConditionState.Active)));
+                sessionUnlocked: NativeCapturePolicyDecision.Block)));
 
         Assert.Same(nativeFailure, thrown);
         Assert.False(coordinator.IsCaptureAuthorized);
@@ -1062,7 +1058,7 @@ public sealed class NativeCapturePrivacyCoordinatorTests
         target.BlockNextUpdate();
         var signalUpdate = coordinator.UpdateSignalsAsync(CopySignals(
             allowed,
-            remoteSession: NativeCaptureConditionState.Active));
+            storageAvailable: NativeCapturePolicyDecision.Block));
         await target.UpdateStarted.WaitAsync(TimeSpan.FromSeconds(5));
 
         await Task.Run(coordinator.Dispose).WaitAsync(TimeSpan.FromSeconds(5));
@@ -1144,22 +1140,19 @@ public sealed class NativeCapturePrivacyCoordinatorTests
         CaptureApplicationPrivacyMode applicationPrivacyMode =
             CaptureApplicationPrivacyMode.ProtectByForegroundApplication)
     {
-        var privacy = new CapturePrivacySettings(
-            EvidenceRetentionDays: 30,
-            ExcludeSensitiveApplications: true,
-            PauseInRemoteSessions: true,
-            PauseDuringScreenSharing: true,
+        _ = applicationPrivacyMode;
+        var evidence = new EvidenceSettings(
+            EvidenceSettings.DefaultRetentionDays,
             privacyRevision,
-            applicationPrivacyMode);
+            EvidenceSettings.Default.SendRules);
         return new AppSettings(
             AppThemePreference.System,
-            CaptureEnabled: true,
-            CloudAnalysisEnabled: false,
             new RecordingConsent(
                 AppSettingsService.CurrentRecordingConsentVersion,
-                ConsentTime,
-                privacy.Revision),
-            privacy);
+                ConsentTime),
+            evidence,
+            CaptureIntervalSeconds: 10,
+            CaptureIntent.Recording);
     }
 
     private static AppSettings CreateDisabledConsentedSettings()
@@ -1167,10 +1160,10 @@ public sealed class NativeCapturePrivacyCoordinatorTests
         var enabled = CreateEnabledSettings();
         return new AppSettings(
             enabled.Theme,
-            CaptureEnabled: false,
-            enabled.CloudAnalysisEnabled,
             enabled.RecordingConsent,
-            enabled.CapturePrivacy);
+            enabled.Evidence,
+            enabled.CaptureIntervalSeconds,
+            CaptureIntent.Stopped);
     }
 
     private static async Task CommitAsync(
@@ -1210,26 +1203,29 @@ public sealed class NativeCapturePrivacyCoordinatorTests
     {
         return new AppSettings(
             settings.Theme,
-            CaptureEnabled: false,
-            settings.CloudAnalysisEnabled,
             RecordingConsent: null,
-            settings.CapturePrivacy);
+            settings.Evidence,
+            settings.CaptureIntervalSeconds,
+            CaptureIntent.Stopped);
     }
 
     private static NativeCapturePrivacySignals CopySignals(
         NativeCapturePrivacySignals source,
         NativeCaptureConditionState? remoteSession = null,
         NativeCaptureConditionState? presentationMode = null,
+        NativeCapturePolicyDecision? sessionUnlocked = null,
+        NativeCapturePolicyDecision? secureDesktopClear = null,
+        NativeCapturePolicyDecision? storageAvailable = null,
         NativeCaptureTargetIdentity? target = null)
     {
         return new NativeCapturePrivacySignals(
-            source.SessionUnlocked,
-            source.SecureDesktopClear,
+            sessionUnlocked ?? source.SessionUnlocked,
+            secureDesktopClear ?? source.SecureDesktopClear,
             remoteSession ?? source.RemoteSession,
             presentationMode ?? source.PresentationMode,
             source.ApplicationAllowed,
             source.WindowAllowed,
-            source.StorageAvailable,
+            storageAvailable ?? source.StorageAvailable,
             source.CaptureIdentity,
             target ?? source.Target);
     }

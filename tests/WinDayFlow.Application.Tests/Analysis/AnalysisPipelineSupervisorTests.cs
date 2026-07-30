@@ -191,23 +191,35 @@ public sealed class AnalysisPipelineSupervisorTests
         var chunks = scripts
             .Select((script, index) => CreateChunk(script.ChunkId, index))
             .ToArray();
+        var profile = CreateProfileSnapshot();
+        var bindingStore = new TestStageBindingStore(cloudEnabled, ProfileId);
         var jobs = chunks
-            .Select((chunk, index) => AnalysisJob.CreatePending(
-                CreateGuid(index + 1),
-                chunk.Id,
-                ProfileId,
-                providerProfileRevision: 1,
-                AnalysisJobProcessor.TimelinePromptVersion,
-                new string('A', 64),
-                maxAttempts: 3,
-                Now.AddMinutes(-5)))
+            .Select((chunk, index) =>
+            {
+                var sourceFingerprint = CreateFingerprint(chunk);
+                var windowFingerprint = CaptureAnalysisIngestionService
+                    .ComputeWindowFingerprint(
+                        [new AnalysisWindowMember(chunk, sourceFingerprint, chunk.Range)]);
+                var inputFingerprint = CaptureAnalysisIngestionService.BindRouteFingerprint(
+                    windowFingerprint,
+                    profile,
+                    bindingStore.Binding);
+                return AnalysisJob.CreatePending(
+                    CreateGuid(index + 1),
+                    chunk.Id,
+                    ProfileId,
+                    providerProfileRevision: 1,
+                    AnalysisJobProcessor.TimelinePromptVersion,
+                    inputFingerprint.Value,
+                    maxAttempts: 3,
+                    Now.AddMinutes(-5));
+            })
             .ToArray();
         var statuses = jobs
             .Select((job, index) => KeyValuePair.Create(job.Id, scripts[index].CommitStatus))
             .ToDictionary();
         var store = new TestPipelineStore(chunks, jobs, calls);
         var scanner = new TestManifestScanner(scannedChunks ?? [], calls);
-        var profile = CreateProfileSnapshot();
         var profileStore = new TestProfileStore(profile);
         var settings = new AppSettingsService(new TestSettingsRepository(cloudEnabled));
         await settings.InitializeAsync();
@@ -218,7 +230,8 @@ public sealed class AnalysisPipelineSupervisorTests
             new TestFingerprintProvider(),
             profileStore,
             settings,
-            timeProvider: new FixedTimeProvider(Now));
+            timeProvider: new FixedTimeProvider(Now),
+            stageBindingStore: bindingStore);
         var extractor = new TestEvidenceExtractor();
         var committer = new TestResultCommitter(statuses);
         var processor = new AnalysisJobProcessor(
@@ -236,7 +249,9 @@ public sealed class AnalysisPipelineSupervisorTests
                 TimeSpan.FromSeconds(1),
                 TimeSpan.FromMinutes(1),
                 "en-US"),
-            new FixedTimeProvider(Now));
+            new FixedTimeProvider(Now),
+            windowStore: store,
+            stageBindingStore: bindingStore);
         var supervisor = new AnalysisPipelineSupervisor(
             store,
             ingestion,
@@ -297,6 +312,12 @@ public sealed class AnalysisPipelineSupervisorTests
             validatedAtUtc: Now.AddMinutes(-1));
     }
 
+    private static CaptureChunkFingerprint CreateFingerprint(CaptureChunk chunk)
+    {
+        var hash = SHA256.HashData(Encoding.UTF8.GetBytes(chunk.Id));
+        return new CaptureChunkFingerprint(Convert.ToHexString(hash));
+    }
+
     private sealed record JobScript(
         string ChunkId,
         AnalysisResultCommitStatus CommitStatus);
@@ -327,7 +348,10 @@ public sealed class AnalysisPipelineSupervisorTests
         }
     }
 
-    private sealed class TestPipelineStore : ICaptureChunkStore, IAnalysisJobStore
+    private sealed class TestPipelineStore :
+        ICaptureChunkStore,
+        IAnalysisJobStore,
+        IAnalysisWindowStore
     {
         private readonly Dictionary<string, CaptureChunk> _chunks;
         private readonly Dictionary<Guid, AnalysisJob> _jobs;
@@ -402,6 +426,29 @@ public sealed class AnalysisPipelineSupervisorTests
             return Task.FromResult(new AnalysisJobEnqueueResult(pendingJob, Created: true));
         }
 
+        public Task<AnalysisJobEnqueueResult> EnqueueWindowAsync(
+            AnalysisJob pendingJob,
+            IReadOnlyList<AnalysisWindowMember> members,
+            CancellationToken cancellationToken = default) =>
+            EnqueueAsync(pendingJob, cancellationToken);
+
+        public Task<AnalysisWindowSnapshot?> GetWindowAsync(
+            Guid jobId,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!_jobs.TryGetValue(jobId, out var job)
+                || !_chunks.TryGetValue(job.CaptureChunkId, out var chunk))
+            {
+                return Task.FromResult<AnalysisWindowSnapshot?>(null);
+            }
+
+            return Task.FromResult<AnalysisWindowSnapshot?>(new AnalysisWindowSnapshot(
+                chunk.Range,
+                [new AnalysisWindowMember(chunk, CreateFingerprint(chunk), chunk.Range)],
+                []));
+        }
+
         public Task<AnalysisJob?> GetAsync(
             Guid jobId,
             CancellationToken cancellationToken = default)
@@ -418,25 +465,11 @@ public sealed class AnalysisPipelineSupervisorTests
             CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var matchingJobs = _jobs.Values.Where(job =>
-                string.Equals(
-                    job.CaptureChunkId,
-                    captureChunkId,
-                    StringComparison.Ordinal)
-                && string.Equals(
-                    job.AnalysisVersion,
-                    analysisVersion,
-                    StringComparison.Ordinal));
-            if (matchingJobs.Any(job => !string.Equals(
-                    job.InputFingerprint,
-                    inputFingerprint,
-                    StringComparison.Ordinal)))
-            {
-                throw new CaptureChunkConflictException(captureChunkId);
-            }
-
-            return Task.FromResult(matchingJobs.Any(job =>
-                job.State == AnalysisJobState.Completed));
+            return Task.FromResult(_jobs.Values.Any(job =>
+                string.Equals(job.CaptureChunkId, captureChunkId, StringComparison.Ordinal)
+                && string.Equals(job.AnalysisVersion, analysisVersion, StringComparison.Ordinal)
+                && string.Equals(job.InputFingerprint, inputFingerprint, StringComparison.Ordinal)
+                && job.State == AnalysisJobState.Completed));
         }
 
         public Task<AnalysisJob?> TryClaimNextAsync(
@@ -657,33 +690,99 @@ public sealed class AnalysisPipelineSupervisorTests
             CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var hash = SHA256.HashData(Encoding.UTF8.GetBytes(chunk.Id));
-            return Task.FromResult(new CaptureChunkFingerprint(Convert.ToHexString(hash)));
+            return Task.FromResult(CreateFingerprint(chunk));
         }
     }
 
     private sealed class TestProfileStore(AiProviderProfileSnapshot profile)
         : IAiProviderProfileStore
     {
-        public Task<AiProviderProfileSnapshot?> GetActiveAsync(
-            CancellationToken cancellationToken = default)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            return Task.FromResult<AiProviderProfileSnapshot?>(profile);
-        }
+        public Task<IReadOnlyList<AiProviderProfileSnapshot>> ListAsync(
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult<IReadOnlyList<AiProviderProfileSnapshot>>([profile]);
 
-        public Task<AiProviderProfileSnapshot> SaveActiveAsync(
+        public Task<AiProviderProfileSnapshot?> GetAsync(
+            Guid profileId,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult<AiProviderProfileSnapshot?>(
+                profile.Profile.Id == profileId ? profile : null);
+
+        public Task<AiProviderProfileSnapshot> CreateAsync(
             AiProviderProfile profile,
-            long? expectedRevision,
             AiProviderCredentialUpdate credentialUpdate,
             DateTimeOffset changedAtUtc,
             CancellationToken cancellationToken = default) => throw new NotSupportedException();
 
-        public Task<AiProviderProfileSnapshot?> MarkValidatedAsync(
+        public Task<AiProviderProfileSnapshot> UpdateAsync(
+            AiProviderProfile profile,
+            long expectedRevision,
+            AiProviderCredentialUpdate credentialUpdate,
+            DateTimeOffset changedAtUtc,
+            CancellationToken cancellationToken = default) => throw new NotSupportedException();
+
+        public Task DeleteAsync(
             Guid profileId,
             long expectedRevision,
-            DateTimeOffset validatedAtUtc,
             CancellationToken cancellationToken = default) => throw new NotSupportedException();
+    }
+
+    private sealed class TestStageBindingStore(bool enabled, Guid profileId)
+        : IAnalysisStageBindingStore
+    {
+        public AnalysisStageBinding Binding { get; } = new(
+            AnalysisStage.TimelineAnalysis,
+            enabled,
+            enabled ? profileId : null,
+            routeRevision: 1);
+
+        public Task<IReadOnlyList<AnalysisStageBinding>> ListAsync(
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult<IReadOnlyList<AnalysisStageBinding>>([Binding]);
+
+        public Task<AnalysisStageBinding> GetAsync(
+            AnalysisStage stage,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult(stage == AnalysisStage.TimelineAnalysis
+                ? Binding
+                : new AnalysisStageBinding(
+                    AnalysisStage.PrivacyInspection,
+                    enabled: false,
+                    providerProfileId: null,
+                    routeRevision: 1));
+
+        public Task<AnalysisStageBinding> SaveAsync(
+            AnalysisStage stage,
+            bool enabled,
+            Guid? providerProfileId,
+            long expectedRouteRevision,
+            PrivacyStageOptions? privacyOptions,
+            DateTimeOffset changedAtUtc,
+            CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+
+        public Task<ProviderStageValidation?> GetValidationAsync(
+            Guid requestedProfileId,
+            long profileRevision,
+            AnalysisStage stage,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult<ProviderStageValidation?>(
+                enabled
+                    && requestedProfileId == profileId
+                    && stage == AnalysisStage.TimelineAnalysis
+                        ? new ProviderStageValidation(
+                            requestedProfileId,
+                            profileRevision,
+                            stage,
+                            Now.ToUniversalTime())
+                        : null);
+
+        public Task<ProviderStageValidation> MarkValidatedAsync(
+            Guid requestedProfileId,
+            long profileRevision,
+            AnalysisStage stage,
+            DateTimeOffset validatedAtUtc,
+            CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
     }
 
     private sealed class TestEvidenceExtractor : IAnalysisEvidenceExtractor
@@ -785,11 +884,9 @@ public sealed class AnalysisPipelineSupervisorTests
 
     private sealed class TestSettingsRepository(bool cloudEnabled) : IAppSettingsRepository
     {
-        private AppSettings _current = new(
-            AppThemePreference.System,
-            CaptureEnabled: false,
-            CloudAnalysisEnabled: cloudEnabled,
-            RecordingConsent: null);
+        private AppSettings _current = AppSettings.Default;
+
+        private readonly bool _unusedCloudEnabled = cloudEnabled;
 
         public Task<AppSettings> GetAsync(CancellationToken cancellationToken = default)
         {

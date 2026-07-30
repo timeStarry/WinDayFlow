@@ -41,6 +41,9 @@ std::optional<CaptureTargetIdentity> ObserveWindowsCaptureTarget(
 std::optional<CaptureTargetIdentity> ObserveWindowsCaptureAuthorization(
     const CaptureTargetIdentity& expected) noexcept;
 
+std::optional<CaptureTargetIdentity> ObserveWindowsForegroundTargetForDisplay(
+    const CaptureTargetIdentity& expected_display) noexcept;
+
 }  // namespace windayflow::capture
 
 #endif  // WINDAYFLOW_WINDOWS_CAPTURE_TARGET_OBSERVER_H_

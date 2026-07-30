@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using WinDayFlow.Application.Ai;
 using WinDayFlow.Application.Capture;
+using WinDayFlow.Application.Privacy;
 using WinDayFlow.Application.Settings;
 using WinDayFlow.Domain;
 
@@ -76,6 +77,11 @@ public sealed class CaptureAnalysisIngestionService : IDisposable
     private readonly ICaptureChunkFingerprintProvider _fingerprintProvider;
     private readonly IAiProviderProfileStore _profileStore;
     private readonly AppSettingsService _settings;
+    private readonly IAnalysisStageBindingStore? _stageBindingStore;
+    private readonly ICaptureManifestContextSource? _contextSource;
+    private readonly ICaptureContextStore? _contextStore;
+    private readonly IPrivacyScreeningService? _privacyScreeningService;
+    private readonly ICaptureRuleObservationSource? _ruleObservations;
     private readonly CaptureAnalysisIngestionOptions _options;
     private readonly TimeProvider _timeProvider;
     private readonly SemaphoreSlim _gate = new(1, 1);
@@ -89,7 +95,11 @@ public sealed class CaptureAnalysisIngestionService : IDisposable
         IAiProviderProfileStore profileStore,
         AppSettingsService settings,
         CaptureAnalysisIngestionOptions? options = null,
-        TimeProvider? timeProvider = null)
+        TimeProvider? timeProvider = null,
+        IAnalysisStageBindingStore? stageBindingStore = null,
+        ICaptureContextStore? contextStore = null,
+        IPrivacyScreeningService? privacyScreeningService = null,
+        ICaptureRuleObservationSource? ruleObservations = null)
     {
         _manifestScanner = manifestScanner
             ?? throw new ArgumentNullException(nameof(manifestScanner));
@@ -99,6 +109,11 @@ public sealed class CaptureAnalysisIngestionService : IDisposable
             ?? throw new ArgumentNullException(nameof(fingerprintProvider));
         _profileStore = profileStore ?? throw new ArgumentNullException(nameof(profileStore));
         _settings = settings ?? throw new ArgumentNullException(nameof(settings));
+        _stageBindingStore = stageBindingStore;
+        _contextSource = manifestScanner as ICaptureManifestContextSource;
+        _contextStore = contextStore;
+        _privacyScreeningService = privacyScreeningService;
+        _ruleObservations = ruleObservations;
         _options = options ?? CaptureAnalysisIngestionOptions.Default;
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
@@ -128,12 +143,25 @@ public sealed class CaptureAnalysisIngestionService : IDisposable
                 if (result.Created)
                 {
                     createdChunkCount++;
+                    if (_contextSource is not null && _contextStore is not null)
+                    {
+                        var context = await _contextSource
+                            .ReadContextAsync(result.Chunk, cancellationToken)
+                            .ConfigureAwait(false);
+                        context = AttachRuleEvaluations(context);
+                        await _contextStore.ReplaceAsync(
+                                result.Chunk,
+                                context,
+                                _settings.Current.Evidence.SendRules,
+                                cancellationToken)
+                            .ConfigureAwait(false);
+                    }
                 }
             }
 
-            var profile = await GetRunnableProfileAsync(cancellationToken)
+            var route = await GetRunnableRouteAsync(cancellationToken)
                 .ConfigureAwait(false);
-            if (profile is null)
+            if (route is null)
             {
                 return new CaptureAnalysisIngestionResult(
                     chunks.Length,
@@ -156,9 +184,31 @@ public sealed class CaptureAnalysisIngestionService : IDisposable
                         .ConfigureAwait(false));
             }
 
+            var privacySelections = new Dictionary<string, PrivacyEvidenceSelection>(
+                persistedChunks.Count,
+                StringComparer.Ordinal);
             foreach (var chunk in persistedChunks)
             {
-                if (!await ProfileStillRunnableAsync(profile, cancellationToken)
+                var originalFingerprint = fingerprints[chunk.Id];
+                var selection = _privacyScreeningService is null
+                    ? new PrivacyEvidenceSelection(
+                        PrivacyEvidenceStatus.ReadyOriginal,
+                        originalFingerprint,
+                        chunk.ManifestPath,
+                        ScreeningId: null,
+                        ScreeningRevision: null)
+                    : await _privacyScreeningService.PrepareAsync(
+                            chunk,
+                            originalFingerprint,
+                            CreatePrivacyOperationId(chunk, originalFingerprint),
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                privacySelections.Add(chunk.Id, selection);
+            }
+
+            foreach (var chunk in persistedChunks)
+            {
+                if (!await RouteStillRunnableAsync(route, cancellationToken)
                     .ConfigureAwait(false))
                 {
                     return new CaptureAnalysisIngestionResult(
@@ -168,13 +218,31 @@ public sealed class CaptureAnalysisIngestionService : IDisposable
                         AnalysisReady: false);
                 }
 
-                var windowMembers = BuildWindowMembers(
+                var originalWindowMembers = BuildWindowMembers(
                     persistedChunks,
                     fingerprints,
                     chunk);
-                var fingerprint = _jobStore is IAnalysisWindowStore
-                    ? ComputeWindowFingerprint(windowMembers)
-                    : fingerprints[chunk.Id];
+                if (originalWindowMembers.Any(member =>
+                        !privacySelections[member.Chunk.Id].IsReady))
+                {
+                    continue;
+                }
+
+                var windowMembers = originalWindowMembers
+                    .Select(member => new AnalysisWindowMember(
+                        member.Chunk,
+                        privacySelections[member.Chunk.Id].Fingerprint!,
+                        member.ContributionRange))
+                    .ToArray();
+                var evidenceFingerprint = _jobStore is IAnalysisWindowStore
+                    ? ComputeWindowFingerprint(windowMembers, privacySelections)
+                    : privacySelections[chunk.Id].Fingerprint!;
+                var fingerprint = _stageBindingStore is null
+                    ? evidenceFingerprint
+                    : BindRouteFingerprint(
+                        evidenceFingerprint,
+                        route.Profile,
+                        route.Binding);
                 if (await _jobStore
                     .HasCompletedAnalysisAsync(
                         chunk.Id,
@@ -186,14 +254,23 @@ public sealed class CaptureAnalysisIngestionService : IDisposable
                     continue;
                 }
 
-                if (!await EvidenceStillMatchesAsync(chunk, cancellationToken)
-                    .ConfigureAwait(false))
+                var evidenceStable = true;
+                foreach (var member in originalWindowMembers)
+                {
+                    if (!await EvidenceStillMatchesAsync(member.Chunk, cancellationToken)
+                        .ConfigureAwait(false))
+                    {
+                        evidenceStable = false;
+                        break;
+                    }
+                }
+                if (!evidenceStable)
                 {
                     unstableChunkCount++;
                     continue;
                 }
 
-                if (!await ProfileStillRunnableAsync(profile, cancellationToken)
+                if (!await RouteStillRunnableAsync(route, cancellationToken)
                     .ConfigureAwait(false))
                 {
                     return new CaptureAnalysisIngestionResult(
@@ -204,7 +281,7 @@ public sealed class CaptureAnalysisIngestionService : IDisposable
                         unstableChunkCount);
                 }
 
-                var pendingJob = CreatePendingJob(chunk, profile, fingerprint);
+                var pendingJob = CreatePendingJob(chunk, route.Profile, fingerprint);
                 var result = _jobStore is IAnalysisWindowStore windowStore
                     ? await windowStore
                         .EnqueueWindowAsync(pendingJob, windowMembers, cancellationToken)
@@ -239,20 +316,69 @@ public sealed class CaptureAnalysisIngestionService : IDisposable
         }
     }
 
-    private async Task<AiProviderProfileSnapshot?> GetRunnableProfileAsync(
+    private IReadOnlyList<CaptureContextSample> AttachRuleEvaluations(
+        IReadOnlyList<CaptureContextSample> samples)
+    {
+        if (_ruleObservations is null || samples.Count == 0)
+        {
+            return samples;
+        }
+
+        return samples.Select(sample =>
+        {
+            var evaluation = _ruleObservations.FindAt(sample.SampledAt);
+            if (evaluation is null)
+            {
+                return sample;
+            }
+
+            var matches = sample.RuleMatches
+                .Concat(evaluation.RuleMatches)
+                .GroupBy(static match => match.RuleId)
+                .Select(static group => group.Last())
+                .OrderBy(static match => match.RuleId)
+                .ToArray();
+            return new CaptureContextSample(
+                sample.CaptureChunkId,
+                sample.Ordinal,
+                sample.SampledAt,
+                sample.Application,
+                matches,
+                evaluation.RuleSetRevision,
+                evaluation.ApplicationContextAvailable,
+                evaluation.WindowContextAvailable);
+        }).ToArray();
+    }
+
+    private async Task<RunnableTimelineRoute?> GetRunnableRouteAsync(
         CancellationToken cancellationToken)
     {
-        if (!_settings.Current.CloudAnalysisEnabled)
+        if (_stageBindingStore is null)
         {
             return null;
         }
 
-        var profile = await _profileStore
-            .GetActiveAsync(cancellationToken)
+        var binding = await _stageBindingStore
+            .GetAsync(AnalysisStage.TimelineAnalysis, cancellationToken)
             .ConfigureAwait(false);
-        return profile is { IsComplete: true, IsValidated: true }
-            ? profile
-            : null;
+        if (!binding.Enabled || !binding.ProviderProfileId.HasValue)
+        {
+            return null;
+        }
+        var profile = await _profileStore
+            .GetAsync(binding.ProviderProfileId.Value, cancellationToken)
+            .ConfigureAwait(false);
+        if (profile is not { IsComplete: true })
+        {
+            return null;
+        }
+        var validation = await _stageBindingStore.GetValidationAsync(
+                profile.Profile.Id,
+                profile.Revision,
+                AnalysisStage.TimelineAnalysis,
+                cancellationToken)
+            .ConfigureAwait(false);
+        return validation is null ? null : new RunnableTimelineRoute(profile, binding);
     }
 
     private AnalysisJob CreatePendingJob(
@@ -391,15 +517,96 @@ public sealed class CaptureAnalysisIngestionService : IDisposable
             Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonical.ToString()))));
     }
 
-    private async Task<bool> ProfileStillRunnableAsync(
-        AiProviderProfileSnapshot expected,
+    internal static CaptureChunkFingerprint ComputeWindowFingerprint(
+        IReadOnlyList<AnalysisWindowMember> members,
+        IReadOnlyDictionary<string, PrivacyEvidenceSelection> selections)
+    {
+        ArgumentNullException.ThrowIfNull(members);
+        ArgumentNullException.ThrowIfNull(selections);
+        if (members.Count == 0)
+        {
+            throw new ArgumentException(
+                "An aggregate input fingerprint requires window members.",
+                nameof(members));
+        }
+
+        var canonical = new StringBuilder("capture-analysis-private-window-v1\n");
+        foreach (var member in members)
+        {
+            if (!selections.TryGetValue(member.Chunk.Id, out var selection)
+                || !selection.IsReady
+                || selection.Fingerprint != member.SourceFingerprint)
+            {
+                throw new InvalidDataException(
+                    $"Capture chunk '{member.Chunk.Id}' has no matching privacy selection.");
+            }
+
+            canonical.Append(member.Chunk.Id).Append('\n')
+                .Append(member.SourceFingerprint.Value).Append('\n')
+                .Append(member.ContributionRange.Start.UtcDateTime.Ticks).Append('\n')
+                .Append(member.ContributionRange.End.UtcDateTime.Ticks).Append('\n')
+                .Append((int)selection.Status).Append('\n')
+                .Append(selection.ScreeningId?.ToString("N", CultureInfo.InvariantCulture) ?? "-")
+                .Append('\n')
+                .Append(selection.ScreeningRevision?.ToString(CultureInfo.InvariantCulture) ?? "-")
+                .Append('\n')
+                .Append(selection.ProviderProfileId?.ToString("N", CultureInfo.InvariantCulture) ?? "-")
+                .Append('\n')
+                .Append(selection.ProviderProfileRevision?.ToString(CultureInfo.InvariantCulture) ?? "-")
+                .Append('\n')
+                .Append(selection.PrivacyRouteRevision.ToString(CultureInfo.InvariantCulture))
+                .Append('\n');
+        }
+
+        return new CaptureChunkFingerprint(
+            Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonical.ToString()))));
+    }
+
+    private async Task<bool> RouteStillRunnableAsync(
+        RunnableTimelineRoute expected,
         CancellationToken cancellationToken)
     {
-        var current = await GetRunnableProfileAsync(cancellationToken)
+        var current = await GetRunnableRouteAsync(cancellationToken)
             .ConfigureAwait(false);
         return current is not null
-            && current.Profile.Id == expected.Profile.Id
-            && current.Revision == expected.Revision;
+            && current.Profile.Profile.Id == expected.Profile.Profile.Id
+            && current.Profile.Revision == expected.Profile.Revision
+            && current.Binding.RouteRevision == expected.Binding.RouteRevision;
+    }
+
+    internal static CaptureChunkFingerprint BindRouteFingerprint(
+        CaptureChunkFingerprint evidenceFingerprint,
+        AiProviderProfileSnapshot profile,
+        AnalysisStageBinding binding)
+    {
+        var canonical = string.Join(
+            '\n',
+            "timeline-route-v1",
+            evidenceFingerprint.Value,
+            profile.Profile.Id.ToString("N", CultureInfo.InvariantCulture),
+            profile.Revision.ToString(CultureInfo.InvariantCulture),
+            binding.RouteRevision.ToString(CultureInfo.InvariantCulture));
+        return new CaptureChunkFingerprint(
+            Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonical))));
+    }
+
+    internal sealed record RunnableTimelineRoute(
+        AiProviderProfileSnapshot Profile,
+        AnalysisStageBinding Binding);
+
+    internal static Guid CreatePrivacyOperationId(
+        CaptureChunk chunk,
+        CaptureChunkFingerprint fingerprint)
+    {
+        var canonical = string.Join(
+            '\n',
+            "privacy-screening-operation-v1",
+            chunk.Id,
+            fingerprint.Value);
+        var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(canonical));
+        bytes[6] = (byte)((bytes[6] & 0x0f) | 0x50);
+        bytes[8] = (byte)((bytes[8] & 0x3f) | 0x80);
+        return new Guid(bytes.AsSpan(0, 16), bigEndian: true);
     }
 
     private async Task<bool> EvidenceStillMatchesAsync(

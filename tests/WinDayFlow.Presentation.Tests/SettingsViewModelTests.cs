@@ -1,5 +1,3 @@
-using System.Collections.Specialized;
-using System.ComponentModel;
 using WinDayFlow.Application.Capture;
 using WinDayFlow.Application.Settings;
 using WinDayFlow.Presentation.Settings;
@@ -9,1361 +7,228 @@ namespace WinDayFlow.Presentation.Tests;
 
 public sealed class SettingsViewModelTests
 {
-    private static readonly DateTimeOffset ConsentTime =
-        new(2026, 7, 16, 5, 30, 0, TimeSpan.Zero);
-
     [Theory]
     [InlineData(CaptureState.Unavailable, "原生录制组件尚未接入。", false)]
     [InlineData(CaptureState.BlockedByConsent, "需要先查看并同意录制说明。", true)]
     [InlineData(CaptureState.Recording, "正在将屏幕活动记录到本地。", true)]
-    [InlineData(CaptureState.Paused, "录制已暂停。", true)]
-    [InlineData(CaptureState.Faulted, "录制组件发生错误。", true)]
+    [InlineData(CaptureState.Paused, "录制已由用户暂停。", true)]
     [InlineData(CaptureState.Stopped, "录制组件已就绪。", true)]
-    public async Task InitialStateProjectsSettingsAndCaptureStatus(
+    public async Task InitialStateProjectsV13Settings(
         CaptureState state,
-        string expectedAvailabilityText,
-        bool expectedBackendAvailable)
+        string expectedText,
+        bool backendAvailable)
     {
-        var stored = new AppSettings(
-            AppThemePreference.Dark,
-            CaptureEnabled: false,
-            CloudAnalysisEnabled: true,
-            RecordingConsent: null);
-        var repository = new TestSettingsRepository(stored);
-        using var settings = new AppSettingsService(repository);
-        await settings.InitializeAsync();
-        var capture = new TestCaptureService(state);
+        using var settings = await CreateSettingsAsync();
+        var capture = new TestCaptureService(settings, state);
         using var viewModel = new SettingsViewModel(settings, capture);
 
-        Assert.Equal(AppThemePreference.Dark, viewModel.Theme);
+        Assert.Equal(AppThemePreference.System, viewModel.Theme);
         Assert.False(viewModel.CaptureEnabled);
-        Assert.True(viewModel.CloudAnalysisEnabled);
         Assert.False(viewModel.HasValidRecordingConsent);
-        Assert.False(viewModel.HasOutdatedRecordingConsent);
-        Assert.Equal(CapturePrivacySettings.DefaultRetentionDays, viewModel.EvidenceRetentionDays);
-        Assert.True(viewModel.ExcludeSensitiveApplications);
-        Assert.True(viewModel.PauseInRemoteSessions);
-        Assert.True(viewModel.PauseDuringScreenSharing);
-        Assert.Equal(
-            CaptureApplicationPrivacyMode.ProtectByForegroundApplication,
-            viewModel.ApplicationPrivacyMode);
-        Assert.True(viewModel.IsForegroundApplicationProtectionEnabled);
-        Assert.False(viewModel.IsAllowAllApplicationsMode);
-        Assert.True(viewModel.CanChangeApplicationPrivacyMode);
-        Assert.True(viewModel.CanChangeApplicationProtection);
-        Assert.Contains(
-            "可选择“固定一个显示器并允许全部应用”",
-            viewModel.ApplicationPrivacyModeDetailText);
-        Assert.Contains("停止录制并要求重新同意", viewModel.ApplicationPrivacyModeDetailText);
-        Assert.Equal(1, viewModel.CapturePrivacyRevision);
-        Assert.True(viewModel.CanChangePrivacy);
-        Assert.True(viewModel.CanChangeCaptureInterval);
         Assert.Equal(10, viewModel.CaptureIntervalSeconds);
-        Assert.Equal(expectedBackendAvailable, viewModel.IsCaptureBackendAvailable);
-        Assert.False(viewModel.CanChangeCapture);
-        Assert.True(viewModel.CanGrantConsent);
-        Assert.False(viewModel.CanRevokeConsent);
-        Assert.Equal("尚未同意屏幕活动录制", viewModel.ConsentStatusText);
-        Assert.Equal("录制保持关闭；你仍可使用手工时间线。", viewModel.ConsentDetailText);
-        Assert.Equal(expectedAvailabilityText, viewModel.CaptureAvailabilityText);
+        Assert.Equal(EvidenceSettings.DefaultRetentionDays, viewModel.EvidenceRetentionDays);
+        Assert.Equal(1, viewModel.ExclusionRuleCount);
+        Assert.Equal(1, viewModel.EnabledExclusionRuleCount);
+        Assert.Equal(backendAvailable, viewModel.IsCaptureBackendAvailable);
+        Assert.Equal(expectedText, viewModel.CaptureAvailabilityText);
+        Assert.Contains("不会暂停或停止本地录制", viewModel.ExclusionEngineStatusText);
     }
 
     [Fact]
-    public async Task ChangingCaptureIntervalRestartsActiveCapture()
+    public async Task CaptureToggleDelegatesToCaptureServiceAndPersistsIntent()
     {
-        var repository = new TestSettingsRepository();
-        using var settings = new AppSettingsService(
-            repository,
-            new FixedTimeProvider(ConsentTime));
-        await settings.InitializeAsync();
+        using var settings = await CreateSettingsAsync();
         await settings.GrantRecordingConsentAsync();
-        await settings.SetCaptureEnabledAsync(enabled: true);
-        var capture = new TestCaptureService(CaptureState.Recording);
+        var capture = new TestCaptureService(settings, CaptureState.Stopped);
+        using var viewModel = new SettingsViewModel(settings, capture);
+
+        Assert.True(await viewModel.SetCaptureEnabledAsync(enabled: true));
+        Assert.Equal(1, capture.StartCalls);
+        Assert.Equal(CaptureIntent.Recording, settings.Current.CaptureIntent);
+        Assert.True(viewModel.CaptureEnabled);
+
+        Assert.True(await viewModel.SetCaptureEnabledAsync(enabled: false));
+        Assert.Equal(1, capture.StopCalls);
+        Assert.Equal(CaptureIntent.Stopped, settings.Current.CaptureIntent);
+    }
+
+    [Fact]
+    public async Task ChangingIntervalRestartsOnlyActiveRecording()
+    {
+        using var settings = await CreateSettingsAsync();
+        await settings.GrantRecordingConsentAsync();
+        await settings.SetCaptureIntentAsync(CaptureIntent.Recording);
+        var capture = new TestCaptureService(settings, CaptureState.Recording);
         using var viewModel = new SettingsViewModel(settings, capture);
 
         Assert.True(await viewModel.SetCaptureIntervalSecondsAsync(30));
 
+        Assert.Equal(1, capture.StopCalls);
+        Assert.Equal(1, capture.StartCalls);
         Assert.Equal(30, settings.Current.CaptureIntervalSeconds);
-        Assert.Equal(30, viewModel.CaptureIntervalSeconds);
-        Assert.True(settings.Current.CaptureEnabled);
-        Assert.Equal(1, capture.StopCount);
-        Assert.Equal(1, capture.StartCount);
-        Assert.Equal(CaptureState.Recording, capture.CurrentStatus.State);
+        Assert.Equal(CaptureIntent.Recording, settings.Current.CaptureIntent);
     }
 
     [Fact]
-    public async Task ThemeAndConsentChangesPersistAndRefreshProjection()
+    public async Task SendRuleMutationDoesNotTouchCaptureRuntime()
     {
-        var repository = new TestSettingsRepository();
-        using var settings = new AppSettingsService(
-            repository,
-            new FixedTimeProvider(ConsentTime));
-        await settings.InitializeAsync();
-        var capture = new TestCaptureService(CaptureState.Stopped);
-        using var viewModel = new SettingsViewModel(settings, capture);
-        var changedProperties = ObserveChanges(viewModel);
-
-        Assert.True(await viewModel.SetThemeAsync(AppThemePreference.Dark));
-        Assert.True(await viewModel.GrantRecordingConsentAsync());
-
-        Assert.Equal(AppThemePreference.Dark, settings.Current.Theme);
-        Assert.Equal(AppThemePreference.Dark, viewModel.Theme);
-        var consent = Assert.IsType<RecordingConsent>(
-            settings.Current.RecordingConsent);
-        Assert.Equal(
-            AppSettingsService.CurrentRecordingConsentVersion,
-            consent.PolicyVersion);
-        Assert.Equal(ConsentTime, consent.AcceptedAtUtc);
-        Assert.True(viewModel.HasValidRecordingConsent);
-        Assert.True(viewModel.CanChangeCapture);
-        Assert.False(viewModel.CanGrantConsent);
-        Assert.True(viewModel.CanRevokeConsent);
-        Assert.Equal("已同意当前录制说明", viewModel.ConsentStatusText);
-        Assert.StartsWith(
-            $"版本 {AppSettingsService.CurrentRecordingConsentVersion}",
-            viewModel.ConsentDetailText,
-            StringComparison.Ordinal);
-        Assert.Contains(nameof(SettingsViewModel.Theme), changedProperties);
-        Assert.Contains(
-            nameof(SettingsViewModel.HasValidRecordingConsent),
-            changedProperties);
-        Assert.Contains(nameof(SettingsViewModel.CanChangeCapture), changedProperties);
-        Assert.Equal(2, repository.SavedSettings.Count);
-        Assert.False(viewModel.HasError);
-    }
-
-    [Fact]
-    public async Task ExplicitExclusionEngineAvailabilityIsProjected()
-    {
-        var repository = new TestSettingsRepository();
-        using var settings = new AppSettingsService(repository);
-        await settings.InitializeAsync();
-        var capture = new TestCaptureService(CaptureState.Stopped);
-        using var viewModel = new SettingsViewModel(
-            settings,
-            capture,
-            isExclusionEngineAvailable: true);
-
-        Assert.True(viewModel.IsExclusionEngineAvailable);
-        Assert.Contains("监视器已就绪", viewModel.ExclusionEngineStatusText);
-    }
-
-    [Fact]
-    public async Task PrivacyChangePersistsFailClosedStateBeforeStoppingCapture()
-    {
-        var consent = CreateConsent();
-        var repository = new TestSettingsRepository(
-            new AppSettings(
-                AppThemePreference.System,
-                CaptureEnabled: true,
-                CloudAnalysisEnabled: false,
-                consent));
-        using var settings = new AppSettingsService(repository);
-        await settings.InitializeAsync();
-        var capture = new TestCaptureService(CaptureState.Recording)
-        {
-            StopOperation = _ =>
-            {
-                Assert.False(settings.Current.CaptureEnabled);
-                Assert.False(settings.HasValidRecordingConsent);
-                Assert.Equal(90, settings.Current.CapturePrivacy.EvidenceRetentionDays);
-                return Task.CompletedTask;
-            },
-        };
+        using var settings = await CreateSettingsAsync();
+        await settings.GrantRecordingConsentAsync();
+        await settings.SetCaptureIntentAsync(CaptureIntent.Recording);
+        var capture = new TestCaptureService(settings, CaptureState.Recording);
         using var viewModel = new SettingsViewModel(settings, capture);
 
-        Assert.True(await viewModel.SetCapturePrivacyAsync(
-            evidenceRetentionDays: 90,
-            excludeSensitiveApplications: false,
-            pauseInRemoteSessions: true,
-            pauseDuringScreenSharing: false));
-
-        Assert.Equal(1, capture.StopCount);
-        Assert.Equal(CaptureState.Stopped, capture.CurrentStatus.State);
-        Assert.False(settings.Current.CaptureEnabled);
-        Assert.False(settings.HasValidRecordingConsent);
-        Assert.True(viewModel.HasOutdatedRecordingConsent);
-        Assert.Equal(90, viewModel.EvidenceRetentionDays);
-        Assert.False(viewModel.ExcludeSensitiveApplications);
-        Assert.False(viewModel.PauseDuringScreenSharing);
-        Assert.Equal(2, viewModel.CapturePrivacyRevision);
-        Assert.Equal("录制说明或隐私选择已更新", viewModel.ConsentStatusText);
-        Assert.Single(repository.SavedSettings);
-    }
-
-    [Fact]
-    public async Task AllowAllApplicationsModePersistsFailClosedBeforeStoppingAndDisablesRuleEditing()
-    {
-        var consent = CreateConsent();
-        var repository = new TestSettingsRepository(
-            new AppSettings(
-                AppThemePreference.System,
-                CaptureEnabled: true,
-                CloudAnalysisEnabled: false,
-                consent));
-        using var settings = new AppSettingsService(repository);
-        await settings.InitializeAsync();
-        var capture = new TestCaptureService(CaptureState.Recording)
-        {
-            StopOperation = _ =>
-            {
-                Assert.False(settings.Current.CaptureEnabled);
-                Assert.False(settings.HasValidRecordingConsent);
-                Assert.Equal(
-                    CaptureApplicationPrivacyMode.AllowAllApplications,
-                    settings.Current.CapturePrivacy.ApplicationPrivacyMode);
-                return Task.CompletedTask;
-            },
-        };
-        using var viewModel = new SettingsViewModel(
-            settings,
-            capture,
-            isExclusionEngineAvailable: true);
-        var changedProperties = ObserveChanges(viewModel);
-
-        Assert.True(await viewModel.SetCaptureApplicationPrivacyModeAsync(
-            CaptureApplicationPrivacyMode.AllowAllApplications));
-
-        Assert.Equal(1, capture.StopCount);
-        Assert.Equal(CaptureState.Stopped, capture.CurrentStatus.State);
-        Assert.True(viewModel.IsAllowAllApplicationsMode);
-        Assert.False(viewModel.IsForegroundApplicationProtectionEnabled);
-        Assert.False(viewModel.CanChangeApplicationProtection);
-        Assert.False(viewModel.CanAddExclusionRule);
-        Assert.False(viewModel.CanChangeExclusionRules);
-        Assert.Equal(2, viewModel.CapturePrivacyRevision);
-        Assert.Contains("开始录制时固定", viewModel.ApplicationPrivacyModeDetailText);
-        Assert.Contains("焦点移到其他显示器", viewModel.ApplicationPrivacyModeDetailText);
-        Assert.Contains("其他显示器不会被录制", viewModel.ApplicationPrivacyModeDetailText);
-        Assert.Contains("未完成录制块", viewModel.ApplicationPrivacyModeDetailText);
-        Assert.Contains("等待录制完全停止", viewModel.ApplicationPrivacyModeDetailText);
-        Assert.Contains(
-            "将 WinDayFlow 窗口移到目标显示器",
-            viewModel.ApplicationPrivacyModeDetailText);
-        Assert.Contains("不会录制所有显示器", viewModel.ContinuousCaptureDisclosureText);
-        Assert.Contains("不会改换录制目标", viewModel.ContinuousCaptureDisclosureText);
-        Assert.Contains("等待录制完全停止", viewModel.ContinuousCaptureDisclosureText);
-        Assert.Contains("将 WinDayFlow 窗口移到目标显示器", viewModel.ContinuousCaptureDisclosureText);
-        Assert.Contains("在那里重新开始录制", viewModel.ContinuousCaptureDisclosureText);
-        Assert.DoesNotContain("激活窗口后重新开始", viewModel.ContinuousCaptureDisclosureText);
-        Assert.Contains("WinDayFlow 设置页", viewModel.ContinuousCaptureDisclosureText);
-        Assert.Contains("AI 提供方配置", viewModel.ContinuousCaptureDisclosureText);
-        Assert.Contains("敏感应用或自定义排除规则", viewModel.ContinuousCaptureDisclosureText);
-        Assert.Contains("睡眠或唤醒", viewModel.ContinuousCaptureDisclosureText);
-        Assert.Contains("存储不足或不可读", viewModel.ContinuousCaptureDisclosureText);
-        Assert.Contains("旧授权失效", viewModel.ContinuousCaptureDisclosureText);
-        Assert.Contains("当前模式下暂不生效", viewModel.SensitiveApplicationProtectionDetailText);
-        Assert.Contains("切回前台应用保护后恢复生效", viewModel.ExclusionEngineStatusText);
-        Assert.Contains("固定一个显示器并允许全部应用", viewModel.PrivacySummaryText);
-        Assert.Contains(nameof(SettingsViewModel.ApplicationPrivacyMode), changedProperties);
-        Assert.Contains(
-            nameof(SettingsViewModel.CanChangeApplicationProtection),
-            changedProperties);
-        Assert.Single(repository.SavedSettings);
-    }
-
-    [Fact]
-    public async Task ApplicationPrivacyModeStopFailureReportsPersistedFailClosedResult()
-    {
-        var consent = CreateConsent();
-        var repository = new TestSettingsRepository(
-            new AppSettings(
-                AppThemePreference.System,
-                CaptureEnabled: true,
-                CloudAnalysisEnabled: false,
-                consent));
-        using var settings = new AppSettingsService(repository);
-        await settings.InitializeAsync();
-        var capture = new TestCaptureService(CaptureState.Recording)
-        {
-            StopOperation = _ => throw new InvalidOperationException(
-                "Sensitive detail."),
-        };
-        using var viewModel = new SettingsViewModel(settings, capture);
-
-        Assert.False(await viewModel.SetCaptureApplicationPrivacyModeAsync(
-            CaptureApplicationPrivacyMode.AllowAllApplications));
-
-        Assert.Equal(1, capture.StopCount);
-        Assert.False(settings.Current.CaptureEnabled);
-        Assert.False(settings.HasValidRecordingConsent);
-        Assert.Equal(
-            CaptureApplicationPrivacyMode.AllowAllApplications,
-            settings.Current.CapturePrivacy.ApplicationPrivacyMode);
-        Assert.Equal(2, settings.Current.CapturePrivacy.Revision);
-        Assert.Single(repository.SavedSettings);
-        Assert.Equal(
-            "应用录制范围已保存，旧授权也已失效，但未能确认录制已停止。请退出 WinDayFlow 后重新打开，再重新同意并启用录制。",
-            viewModel.ErrorMessage);
-    }
-
-    [Fact]
-    public async Task PrivacyChangeStopFailureStillPersistsFailClosedSettings()
-    {
-        var consent = CreateConsent();
-        var initial = new AppSettings(
-            AppThemePreference.System,
-            CaptureEnabled: true,
-            CloudAnalysisEnabled: false,
-            consent);
-        var repository = new TestSettingsRepository(initial);
-        using var settings = new AppSettingsService(repository);
-        await settings.InitializeAsync();
-        var capture = new TestCaptureService(CaptureState.Recording)
-        {
-            StopOperation = _ => throw new InvalidOperationException("Sensitive detail."),
-        };
-        using var viewModel = new SettingsViewModel(settings, capture);
-
-        Assert.False(await viewModel.SetCapturePrivacyAsync(
-            evidenceRetentionDays: 7,
-            excludeSensitiveApplications: false,
-            pauseInRemoteSessions: false,
-            pauseDuringScreenSharing: false));
-
-        Assert.Equal(1, capture.StopCount);
-        Assert.False(settings.Current.CaptureEnabled);
-        Assert.False(settings.HasValidRecordingConsent);
-        Assert.Equal(7, settings.Current.CapturePrivacy.EvidenceRetentionDays);
-        Assert.False(settings.Current.CapturePrivacy.ExcludeSensitiveApplications);
-        Assert.Single(repository.SavedSettings);
-        Assert.Equal("无法更改录制状态，请稍后重试。", viewModel.ErrorMessage);
-    }
-
-    [Fact]
-    public async Task PrivacyChangeSaveFailureLeavesRuntimeAndSettingsConsistent()
-    {
-        var consent = CreateConsent();
-        var initial = new AppSettings(
-            AppThemePreference.System,
-            CaptureEnabled: true,
-            CloudAnalysisEnabled: false,
-            consent);
-        var repository = new TestSettingsRepository(initial)
-        {
-            SaveException = new InvalidOperationException("Sensitive storage detail."),
-        };
-        using var settings = new AppSettingsService(repository);
-        await settings.InitializeAsync();
-        var capture = new TestCaptureService(CaptureState.Recording);
-        using var viewModel = new SettingsViewModel(settings, capture);
-
-        Assert.False(await viewModel.SetCapturePrivacyAsync(
-            evidenceRetentionDays: 7,
-            excludeSensitiveApplications: false,
-            pauseInRemoteSessions: false,
-            pauseDuringScreenSharing: false));
-
-        Assert.Equal(0, capture.StopCount);
-        Assert.Equal(CaptureState.Recording, capture.CurrentStatus.State);
-        Assert.Equal(initial, settings.Current);
-        Assert.True(settings.HasValidRecordingConsent);
-        Assert.Empty(repository.SavedSettings);
-        Assert.Equal("无法更改录制状态，请稍后重试。", viewModel.ErrorMessage);
-    }
-
-    [Fact]
-    public async Task ExclusionRuleCrudRefreshesOrderedProjectionAndNotices()
-    {
-        var repository = new TestSettingsRepository(
-            CreateSettingsWithoutExclusionRules());
-        using var settings = new AppSettingsService(repository);
-        await settings.InitializeAsync();
-        var capture = new TestCaptureService(CaptureState.Stopped);
-        using var viewModel = new SettingsViewModel(settings, capture);
-
-        Assert.Empty(viewModel.ExclusionRules);
-        Assert.False(viewModel.HasExclusionRules);
-        Assert.False(viewModel.IsExclusionEngineAvailable);
-        Assert.Contains("尚未接入录制监视器", viewModel.ExclusionEngineStatusText);
-
-        Assert.True(await viewModel.AddExclusionRuleAsync(
-            "密码管理器",
+        var added = await viewModel.AddExclusionRuleAsync(
+            "Browser",
             enabled: true,
             CaptureExclusionRuleScope.Application,
-            ApplicationIdentityKind.ExecutableName,
-            "KeePassXC.exe",
-            windowTitleMatchKind: null,
-            pattern: null));
-        var applicationRule = Assert.Single(viewModel.ExclusionRules);
-        Assert.Equal("密码管理器", applicationRule.Name);
-        Assert.Equal("规则已启用", applicationRule.StatusText);
-        Assert.Contains("KeePassXC.exe", applicationRule.ConfiguredMatchSummaryText);
-        Assert.Equal("排除规则已添加。", viewModel.RuleMutationNoticeText);
-
-        Assert.True(await viewModel.AddExclusionRuleAsync(
-            "私密浏览",
-            enabled: false,
-            CaptureExclusionRuleScope.Window,
             ApplicationIdentityKind.ExecutableName,
             "browser.exe",
-            WindowTitleMatchKind.Contains,
-            "Private"));
-        var windowRule = viewModel.ExclusionRules[1];
-        Assert.Equal("2 条规则 · 1 条已启用", viewModel.ExclusionRuleSummaryText);
-        Assert.NotEqual(applicationRule.ToggleAutomationId, windowRule.ToggleAutomationId);
-        Assert.NotEqual(applicationRule.EditAutomationId, windowRule.EditAutomationId);
-        Assert.True(windowRule.CanMoveUp);
-        Assert.False(windowRule.CanMoveDown);
+            windowTitleMatchKind: null,
+            pattern: null);
 
-        Assert.True(await viewModel.UpdateExclusionRuleAsync(
-            windowRule,
-            "浏览器私密窗口",
-            CaptureExclusionRuleScope.Window,
-            ApplicationIdentityKind.ExecutableName,
-            "browser.exe",
-            WindowTitleMatchKind.StartsWith,
-            "Private"));
-        Assert.Equal("浏览器私密窗口", windowRule.Name);
-        Assert.Contains("开头匹配", windowRule.ConfiguredMatchSummaryText);
-        Assert.Equal("排除规则已保存。", viewModel.RuleMutationNoticeText);
-
-        Assert.True(await viewModel.SetExclusionRuleEnabledAsync(windowRule, enabled: true));
-        Assert.True(windowRule.IsEnabled);
-        Assert.Equal("2 条规则 · 2 条已启用", viewModel.ExclusionRuleSummaryText);
-
-        Assert.True(await viewModel.MoveExclusionRuleAsync(windowRule, offset: -1));
-        Assert.Same(windowRule, viewModel.ExclusionRules[0]);
-        Assert.False(windowRule.CanMoveUp);
-        Assert.True(windowRule.CanMoveDown);
-
-        Assert.True(await viewModel.DeleteExclusionRuleAsync(applicationRule));
-        Assert.Same(windowRule, Assert.Single(viewModel.ExclusionRules));
-        Assert.Equal("排除规则已删除。", viewModel.RuleMutationNoticeText);
-        viewModel.ClearRuleMutationNotice();
-        Assert.False(viewModel.HasRuleMutationNotice);
+        Assert.True(added);
+        Assert.Equal(0, capture.StopCalls);
+        Assert.Equal(CaptureIntent.Recording, settings.Current.CaptureIntent);
+        Assert.Equal(2, viewModel.ExclusionRuleCount);
+        Assert.Equal("不发送规则已添加。", viewModel.RuleMutationNoticeText);
     }
 
     [Fact]
-    public async Task EffectiveExclusionRuleChangePersistsClosedStateBeforeStoppingCapture()
+    public async Task WinDayFlowPresetCanBeDeleted()
     {
-        var repository = new TestSettingsRepository(
-            new AppSettings(
-                AppThemePreference.System,
-                CaptureEnabled: true,
-                CloudAnalysisEnabled: false,
-                CreateConsent(),
-                CreatePrivacyWithoutExclusionRules()));
-        using var settings = new AppSettingsService(repository);
-        await settings.InitializeAsync();
-        var capture = new TestCaptureService(CaptureState.Recording)
-        {
-            StopOperation = _ =>
-            {
-                Assert.False(settings.Current.CaptureEnabled);
-                Assert.False(settings.HasValidRecordingConsent);
-                Assert.Single(settings.Current.CapturePrivacy.ExclusionRules.Rules);
-                return Task.CompletedTask;
-            },
-        };
+        using var settings = await CreateSettingsAsync();
+        var capture = new TestCaptureService(settings, CaptureState.Stopped);
         using var viewModel = new SettingsViewModel(settings, capture);
+        var preset = Assert.Single(viewModel.ExclusionRules);
 
-        Assert.True(await viewModel.AddExclusionRuleAsync(
-            "密码管理器",
-            enabled: true,
-            CaptureExclusionRuleScope.Application,
-            ApplicationIdentityKind.ExecutableName,
-            "KeePassXC.exe",
-            windowTitleMatchKind: null,
-            pattern: null));
-
-        Assert.Equal(1, capture.StopCount);
-        Assert.Equal(CaptureState.Stopped, capture.CurrentStatus.State);
-        Assert.False(viewModel.CaptureEnabled);
-        Assert.Equal(2, viewModel.CapturePrivacyRevision);
-    }
-
-    [Fact]
-    public async Task DisabledExclusionRuleDraftDoesNotStopCaptureOrInvalidateConsent()
-    {
-        var repository = new TestSettingsRepository(
-            new AppSettings(
-                AppThemePreference.System,
-                CaptureEnabled: true,
-                CloudAnalysisEnabled: false,
-                CreateConsent(),
-                CreatePrivacyWithoutExclusionRules()));
-        using var settings = new AppSettingsService(repository);
-        await settings.InitializeAsync();
-        var capture = new TestCaptureService(CaptureState.Recording);
-        using var viewModel = new SettingsViewModel(settings, capture);
-
-        Assert.True(await viewModel.AddExclusionRuleAsync(
-            "稍后启用",
-            enabled: false,
-            CaptureExclusionRuleScope.Application,
-            ApplicationIdentityKind.ExecutableName,
-            "draft.exe",
-            windowTitleMatchKind: null,
-            pattern: null));
-
-        Assert.Equal(0, capture.StopCount);
-        Assert.True(viewModel.CaptureEnabled);
-        Assert.True(viewModel.HasValidRecordingConsent);
-        Assert.Equal(1, viewModel.CapturePrivacyRevision);
-        Assert.False(Assert.Single(viewModel.ExclusionRules).IsEnabled);
-    }
-
-    [Fact]
-    public async Task ExclusionRuleSaveFailureLeavesProjectionUnchanged()
-    {
-        var repository = new TestSettingsRepository(
-            CreateSettingsWithoutExclusionRules())
-        {
-            SaveException = new InvalidOperationException("Sensitive storage detail."),
-        };
-        using var settings = new AppSettingsService(repository);
-        await settings.InitializeAsync();
-        var capture = new TestCaptureService(CaptureState.Stopped);
-        using var viewModel = new SettingsViewModel(settings, capture);
-
-        Assert.False(await viewModel.AddExclusionRuleAsync(
-            "密码管理器",
-            enabled: true,
-            CaptureExclusionRuleScope.Application,
-            ApplicationIdentityKind.ExecutableName,
-            "KeePassXC.exe",
-            windowTitleMatchKind: null,
-            pattern: null));
+        Assert.True(await viewModel.DeleteExclusionRuleAsync(preset));
 
         Assert.Empty(viewModel.ExclusionRules);
-        Assert.False(viewModel.HasExclusionRules);
-        Assert.False(viewModel.HasRuleMutationNotice);
-        Assert.Equal("无法更改排除规则，请稍后重试。", viewModel.ErrorMessage);
-        Assert.Empty(repository.SavedSettings);
+        Assert.Empty(settings.Current.Evidence.SendRules.Rules);
     }
 
     [Fact]
-    public async Task GrantFailureUsesStableErrorAndCanBeCleared()
+    public async Task CaptureFailureIsPresentedWithoutChangingSettings()
     {
-        var repository = new TestSettingsRepository
+        using var settings = await CreateSettingsAsync();
+        await settings.GrantRecordingConsentAsync();
+        var capture = new TestCaptureService(settings, CaptureState.Stopped)
         {
-            SaveException = new InvalidOperationException("Sensitive storage detail."),
-        };
-        using var settings = new AppSettingsService(repository);
-        await settings.InitializeAsync();
-        var capture = new TestCaptureService(CaptureState.Stopped);
-        using var viewModel = new SettingsViewModel(settings, capture);
-
-        Assert.False(await viewModel.GrantRecordingConsentAsync());
-
-        Assert.False(settings.HasValidRecordingConsent);
-        Assert.True(viewModel.HasError);
-        Assert.Equal("无法保存设置，请稍后重试。", viewModel.ErrorMessage);
-
-        viewModel.ClearError();
-
-        Assert.False(viewModel.HasError);
-        Assert.Empty(viewModel.ErrorMessage);
-    }
-
-    [Fact]
-    public async Task RevokePersistsFailClosedStateBeforeStoppingCapture()
-    {
-        var consent = CreateConsent();
-        var repository = new TestSettingsRepository(
-            new AppSettings(
-                AppThemePreference.System,
-                CaptureEnabled: true,
-                CloudAnalysisEnabled: false,
-                consent));
-        using var settings = new AppSettingsService(repository);
-        await settings.InitializeAsync();
-        var capture = new TestCaptureService(CaptureState.Recording)
-        {
-            StopOperation = _ =>
-            {
-                Assert.False(settings.Current.CaptureEnabled);
-                Assert.Null(settings.Current.RecordingConsent);
-                return Task.CompletedTask;
-            },
-        };
-        using var viewModel = new SettingsViewModel(settings, capture);
-
-        Assert.True(await viewModel.RevokeRecordingConsentAsync());
-
-        Assert.Equal(1, capture.StopCount);
-        Assert.False(settings.Current.CaptureEnabled);
-        Assert.Null(settings.Current.RecordingConsent);
-        Assert.False(viewModel.HasValidRecordingConsent);
-        Assert.False(viewModel.CaptureEnabled);
-        Assert.True(viewModel.CanGrantConsent);
-        Assert.False(viewModel.CanRevokeConsent);
-        Assert.Equal(CaptureState.Stopped, capture.CurrentStatus.State);
-        Assert.Single(repository.SavedSettings);
-    }
-
-    [Fact]
-    public async Task RevokeStopFailureStillClearsConsentAndReportsCaptureError()
-    {
-        var consent = CreateConsent();
-        var repository = new TestSettingsRepository(
-            new AppSettings(
-                AppThemePreference.System,
-                CaptureEnabled: true,
-                CloudAnalysisEnabled: false,
-                consent));
-        using var settings = new AppSettingsService(repository);
-        await settings.InitializeAsync();
-        var capture = new TestCaptureService(CaptureState.Recording)
-        {
-            StopOperation = _ => throw new InvalidOperationException(
-                "Sensitive capture detail."),
-        };
-        using var viewModel = new SettingsViewModel(settings, capture);
-
-        Assert.False(await viewModel.RevokeRecordingConsentAsync());
-
-        Assert.Equal(1, capture.StopCount);
-        Assert.False(settings.Current.CaptureEnabled);
-        Assert.Null(settings.Current.RecordingConsent);
-        Assert.False(settings.HasValidRecordingConsent);
-        Assert.Single(repository.SavedSettings);
-        Assert.Equal("无法更改录制状态，请稍后重试。", viewModel.ErrorMessage);
-    }
-
-    [Fact]
-    public async Task RevokeSaveFailureLeavesRuntimeAndSettingsConsistent()
-    {
-        var consent = CreateConsent();
-        var initial = new AppSettings(
-            AppThemePreference.System,
-            CaptureEnabled: true,
-            CloudAnalysisEnabled: false,
-            consent);
-        var repository = new TestSettingsRepository(initial)
-        {
-            SaveException = new InvalidOperationException("Sensitive storage detail."),
-        };
-        using var settings = new AppSettingsService(repository);
-        await settings.InitializeAsync();
-        var capture = new TestCaptureService(CaptureState.Recording);
-        using var viewModel = new SettingsViewModel(settings, capture);
-
-        Assert.False(await viewModel.RevokeRecordingConsentAsync());
-
-        Assert.Equal(0, capture.StopCount);
-        Assert.Equal(CaptureState.Recording, capture.CurrentStatus.State);
-        Assert.Equal(initial, settings.Current);
-        Assert.True(settings.HasValidRecordingConsent);
-        Assert.Empty(repository.SavedSettings);
-        Assert.Equal("无法更改录制状态，请稍后重试。", viewModel.ErrorMessage);
-    }
-
-    [Fact]
-    public async Task CaptureEnableAndDisableUseSafeOperationOrder()
-    {
-        var repository = new TestSettingsRepository(
-            new AppSettings(
-                AppThemePreference.System,
-                CaptureEnabled: false,
-                CloudAnalysisEnabled: false,
-                CreateConsent()));
-        using var settings = new AppSettingsService(repository);
-        await settings.InitializeAsync();
-        var capture = new TestCaptureService(CaptureState.Stopped)
-        {
-            StartOperation = _ =>
-            {
-                Assert.True(settings.Current.CaptureEnabled);
-                return Task.CompletedTask;
-            },
-            StopOperation = _ =>
-            {
-                Assert.True(settings.Current.CaptureEnabled);
-                return Task.CompletedTask;
-            },
-        };
-        using var viewModel = new SettingsViewModel(settings, capture);
-
-        Assert.True(await viewModel.SetCaptureEnabledAsync(enabled: true));
-        Assert.True(settings.Current.CaptureEnabled);
-        Assert.Equal(CaptureState.Recording, capture.CurrentStatus.State);
-
-        Assert.True(await viewModel.SetCaptureEnabledAsync(enabled: false));
-        Assert.False(settings.Current.CaptureEnabled);
-        Assert.Equal(CaptureState.Stopped, capture.CurrentStatus.State);
-        Assert.Equal(1, capture.StartCount);
-        Assert.Equal(1, capture.StopCount);
-        Assert.Equal(2, repository.SavedSettings.Count);
-    }
-
-    [Fact]
-    public async Task CaptureStopFailureStillPersistsDisabledState()
-    {
-        var initial = new AppSettings(
-            AppThemePreference.System,
-            CaptureEnabled: true,
-            CloudAnalysisEnabled: false,
-            CreateConsent());
-        var repository = new TestSettingsRepository(initial);
-        using var settings = new AppSettingsService(repository);
-        await settings.InitializeAsync();
-        var stopFailure = new InvalidOperationException("Sensitive capture detail.");
-        var capture = new TestCaptureService(CaptureState.Recording)
-        {
-            StopOperation = _ =>
-            {
-                Assert.True(settings.Current.CaptureEnabled);
-                throw stopFailure;
-            },
-        };
-        using var viewModel = new SettingsViewModel(settings, capture);
-
-        Assert.False(await viewModel.SetCaptureEnabledAsync(enabled: false));
-
-        Assert.Equal(1, capture.StopCount);
-        Assert.Equal(CaptureState.Recording, capture.CurrentStatus.State);
-        Assert.False(settings.Current.CaptureEnabled);
-        Assert.False(viewModel.CaptureEnabled);
-        Assert.Collection(
-            repository.SavedSettings,
-            saved => Assert.False(saved.CaptureEnabled));
-        Assert.Equal(1, repository.SaveAttemptCount);
-        Assert.Equal("无法更改录制状态，请稍后重试。", viewModel.ErrorMessage);
-    }
-
-    [Fact]
-    public async Task CaptureDisableWaitsForDurableStopBeforePersistingState()
-    {
-        var initial = new AppSettings(
-            AppThemePreference.System,
-            CaptureEnabled: true,
-            CloudAnalysisEnabled: false,
-            CreateConsent());
-        var repository = new TestSettingsRepository(initial);
-        using var settings = new AppSettingsService(repository);
-        await settings.InitializeAsync();
-        var stopEntered = new TaskCompletionSource(
-            TaskCreationOptions.RunContinuationsAsynchronously);
-        var releaseStop = new TaskCompletionSource(
-            TaskCreationOptions.RunContinuationsAsynchronously);
-        var capture = new TestCaptureService(CaptureState.Recording)
-        {
-            StopOperation = async _ =>
-            {
-                stopEntered.TrySetResult();
-                await releaseStop.Task;
-            },
-        };
-        using var viewModel = new SettingsViewModel(settings, capture);
-
-        var mutation = viewModel.SetCaptureEnabledAsync(enabled: false);
-        await stopEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-
-        Assert.True(settings.Current.CaptureEnabled);
-        Assert.Equal(0, repository.SaveAttemptCount);
-        Assert.False(mutation.IsCompleted);
-
-        releaseStop.TrySetResult();
-        Assert.True(await mutation.WaitAsync(TimeSpan.FromSeconds(5)));
-        Assert.False(settings.Current.CaptureEnabled);
-        Assert.Equal(1, repository.SaveAttemptCount);
-    }
-
-    [Fact]
-    public async Task CaptureStopCancellationPersistsDisabledStateBeforePropagating()
-    {
-        var initial = new AppSettings(
-            AppThemePreference.System,
-            CaptureEnabled: true,
-            CloudAnalysisEnabled: false,
-            CreateConsent());
-        var repository = new TestSettingsRepository(initial);
-        using var settings = new AppSettingsService(repository);
-        await settings.InitializeAsync();
-        var stopEntered = new TaskCompletionSource(
-            TaskCreationOptions.RunContinuationsAsynchronously);
-        var capture = new TestCaptureService(CaptureState.Recording)
-        {
-            StopOperation = async token =>
-            {
-                Assert.True(settings.Current.CaptureEnabled);
-                stopEntered.TrySetResult();
-                await Task.Delay(Timeout.InfiniteTimeSpan, token);
-            },
-        };
-        using var viewModel = new SettingsViewModel(settings, capture);
-        using var cancellation = new CancellationTokenSource();
-
-        var mutation = viewModel.SetCaptureEnabledAsync(
-            enabled: false,
-            cancellation.Token);
-        await stopEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        cancellation.Cancel();
-
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => mutation);
-        Assert.Equal(1, capture.StopCount);
-        Assert.False(settings.Current.CaptureEnabled);
-        Assert.False(viewModel.CaptureEnabled);
-        Assert.Collection(
-            repository.SavedSettings,
-            saved => Assert.False(saved.CaptureEnabled));
-        Assert.Equal(1, repository.SaveAttemptCount);
-        Assert.False(viewModel.IsBusy);
-        Assert.False(viewModel.HasError);
-    }
-
-    [Fact]
-    public async Task CaptureStopAndDisablePersistenceFailuresAttemptBothOperations()
-    {
-        var initial = new AppSettings(
-            AppThemePreference.System,
-            CaptureEnabled: true,
-            CloudAnalysisEnabled: false,
-            CreateConsent());
-        var persistenceFailure = new InvalidOperationException("Sensitive storage detail.");
-        var repository = new TestSettingsRepository(initial)
-        {
-            SaveException = persistenceFailure,
-        };
-        using var settings = new AppSettingsService(repository);
-        await settings.InitializeAsync();
-        var stopFailure = new InvalidOperationException("Sensitive capture detail.");
-        var capture = new TestCaptureService(CaptureState.Recording)
-        {
-            StopOperation = _ => throw stopFailure,
-        };
-        using var viewModel = new SettingsViewModel(settings, capture);
-
-        Assert.False(await viewModel.SetCaptureEnabledAsync(enabled: false));
-
-        Assert.Equal(1, capture.StopCount);
-        Assert.Equal(1, repository.SaveAttemptCount);
-        Assert.Empty(repository.SavedSettings);
-        Assert.True(settings.Current.CaptureEnabled);
-        Assert.Equal("无法更改录制状态，请稍后重试。", viewModel.ErrorMessage);
-    }
-
-    [Fact]
-    public async Task CaptureStartFailureRollsBackPersistedEnablement()
-    {
-        var repository = new TestSettingsRepository(
-            new AppSettings(
-                AppThemePreference.System,
-                CaptureEnabled: false,
-                CloudAnalysisEnabled: false,
-                CreateConsent()));
-        using var settings = new AppSettingsService(repository);
-        await settings.InitializeAsync();
-        var capture = new TestCaptureService(CaptureState.Stopped)
-        {
-            StartOperation = _ =>
-            {
-                Assert.True(settings.Current.CaptureEnabled);
-                throw new InvalidOperationException("Sensitive capture detail.");
-            },
+            Failure = new InvalidOperationException("capture failed"),
         };
         using var viewModel = new SettingsViewModel(settings, capture);
 
         Assert.False(await viewModel.SetCaptureEnabledAsync(enabled: true));
 
-        Assert.Equal(1, capture.StartCount);
-        Assert.False(settings.Current.CaptureEnabled);
-        Assert.False(viewModel.CaptureEnabled);
-        Assert.Collection(
-            repository.SavedSettings,
-            saved => Assert.True(saved.CaptureEnabled),
-            saved => Assert.False(saved.CaptureEnabled));
-        Assert.Equal("无法更改录制状态，请稍后重试。", viewModel.ErrorMessage);
+        Assert.True(viewModel.HasError);
+        Assert.Equal(CaptureIntent.Stopped, settings.Current.CaptureIntent);
     }
 
-    [Fact]
-    public async Task CaptureStartCancellationRollsBackBeforePropagating()
+    private static async Task<AppSettingsService> CreateSettingsAsync()
     {
-        var repository = new TestSettingsRepository(
-            new AppSettings(
-                AppThemePreference.System,
-                CaptureEnabled: false,
-                CloudAnalysisEnabled: false,
-                CreateConsent()));
-        using var settings = new AppSettingsService(repository);
-        await settings.InitializeAsync();
-        var startEntered = new TaskCompletionSource(
-            TaskCreationOptions.RunContinuationsAsynchronously);
-        var capture = new TestCaptureService(CaptureState.Stopped)
-        {
-            StartOperation = async token =>
-            {
-                startEntered.TrySetResult();
-                await Task.Delay(Timeout.InfiniteTimeSpan, token);
-            },
-        };
-        using var viewModel = new SettingsViewModel(settings, capture);
-        using var cancellation = new CancellationTokenSource();
-
-        var mutation = viewModel.SetCaptureEnabledAsync(
-            enabled: true,
-            cancellation.Token);
-        await startEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        cancellation.Cancel();
-
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => mutation);
-        Assert.False(settings.Current.CaptureEnabled);
-        Assert.False(viewModel.IsBusy);
-        Assert.False(viewModel.HasError);
-        Assert.Collection(
-            repository.SavedSettings,
-            saved => Assert.True(saved.CaptureEnabled),
-            saved => Assert.False(saved.CaptureEnabled));
+        var service = new AppSettingsService(
+            new InMemorySettingsRepository(AppSettings.Default));
+        await service.InitializeAsync();
+        return service;
     }
 
-    [Fact]
-    public async Task EnabledCaptureCanBeDisabledWhenBackendBecomesUnavailable()
+    private sealed class TestCaptureService(
+        AppSettingsService settings,
+        CaptureState initialState) : ICaptureService
     {
-        var repository = new TestSettingsRepository(
-            new AppSettings(
-                AppThemePreference.System,
-                CaptureEnabled: true,
-                CloudAnalysisEnabled: false,
-                CreateConsent()));
-        using var settings = new AppSettingsService(repository);
-        await settings.InitializeAsync();
-        var capture = new TestCaptureService(CaptureState.Unavailable);
-        using var viewModel = new SettingsViewModel(settings, capture);
+        private ulong _sequence;
 
-        Assert.True(viewModel.CanChangeCapture);
-        Assert.True(await viewModel.SetCaptureEnabledAsync(enabled: false));
+        public CaptureStatus CurrentStatus { get; private set; } =
+            CreateStatus(initialState, 0);
 
-        Assert.False(viewModel.CaptureEnabled);
-        Assert.False(viewModel.CanChangeCapture);
-        Assert.Equal(0, capture.StopCount);
-        Assert.Single(repository.SavedSettings);
-    }
+        public Exception? Failure { get; init; }
 
-    [Fact]
-    public async Task ConcurrentMutationIsRejectedWithoutResettingBusyState()
-    {
-        var repository = new TestSettingsRepository
-        {
-            BlockFirstSave = true,
-        };
-        using var settings = new AppSettingsService(repository);
-        await settings.InitializeAsync();
-        var capture = new TestCaptureService(CaptureState.Stopped);
-        using var viewModel = new SettingsViewModel(settings, capture);
+        public int StartCalls { get; private set; }
 
-        var first = viewModel.SetThemeAsync(AppThemePreference.Dark);
-        await repository.FirstSaveStarted.WaitAsync(TimeSpan.FromSeconds(5));
+        public int StopCalls { get; private set; }
 
-        var second = await viewModel.GrantRecordingConsentAsync();
+        public event EventHandler<CaptureStatusChangedEventArgs>? StatusChanged;
 
-        Assert.False(second);
-        Assert.True(viewModel.IsBusy);
-        Assert.Equal("另一项设置操作正在进行，请稍候。", viewModel.ErrorMessage);
-
-        repository.ReleaseFirstSave();
-        Assert.True(await first);
-        Assert.False(viewModel.IsBusy);
-        Assert.Equal(AppThemePreference.Dark, viewModel.Theme);
-        Assert.False(viewModel.HasValidRecordingConsent);
-        Assert.Single(repository.SavedSettings);
-    }
-
-    [Fact]
-    public async Task CallerCancellationPropagatesAndResetsBusyState()
-    {
-        var repository = new TestSettingsRepository
-        {
-            WaitForFirstSaveCancellation = true,
-        };
-        using var settings = new AppSettingsService(repository);
-        await settings.InitializeAsync();
-        var capture = new TestCaptureService(CaptureState.Stopped);
-        using var viewModel = new SettingsViewModel(settings, capture);
-        using var cancellation = new CancellationTokenSource();
-
-        var mutation = viewModel.SetThemeAsync(
-            AppThemePreference.Dark,
-            cancellation.Token);
-        await repository.FirstSaveStarted.WaitAsync(TimeSpan.FromSeconds(5));
-        cancellation.Cancel();
-
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => mutation);
-        Assert.False(viewModel.IsBusy);
-        Assert.Equal(AppThemePreference.System, viewModel.Theme);
-        Assert.False(viewModel.HasError);
-        Assert.Empty(repository.SavedSettings);
-    }
-
-    [Fact]
-    public async Task DisposeCancelsMutationDetachesEventsAndRejectsFurtherWrites()
-    {
-        var repository = new TestSettingsRepository
-        {
-            WaitForFirstSaveCancellation = true,
-        };
-        using var settings = new AppSettingsService(repository);
-        await settings.InitializeAsync();
-        var capture = new TestCaptureService(CaptureState.Stopped);
-        var viewModel = new SettingsViewModel(settings, capture);
-        var changedProperties = ObserveChanges(viewModel);
-
-        var mutation = viewModel.SetThemeAsync(AppThemePreference.Dark);
-        await repository.FirstSaveStarted.WaitAsync(TimeSpan.FromSeconds(5));
-        Assert.Equal(1, capture.SubscriptionCount);
-
-        viewModel.Dispose();
-
-        Assert.False(await mutation);
-        Assert.False(viewModel.IsBusy);
-        Assert.Equal(0, capture.SubscriptionCount);
-        changedProperties.Clear();
-
-        Assert.False(await viewModel.GrantRecordingConsentAsync());
-        await settings.SetThemeAsync(AppThemePreference.Light);
-        capture.TransitionTo(CaptureState.Unavailable);
-
-        Assert.Empty(changedProperties);
-        Assert.Equal(AppThemePreference.Light, viewModel.Theme);
-    }
-
-    [Fact]
-    public async Task DisposeCancelsInFlightExclusionRuleWithoutPublishingProjectionOrNotice()
-    {
-        var repository = new TestSettingsRepository(
-            CreateSettingsWithoutExclusionRules())
-        {
-            WaitForFirstSaveCancellation = true,
-        };
-        using var settings = new AppSettingsService(repository);
-        await settings.InitializeAsync();
-        var capture = new TestCaptureService(CaptureState.Stopped);
-        var viewModel = new SettingsViewModel(settings, capture);
-        var collectionChanges = 0;
-        ((INotifyCollectionChanged)viewModel.ExclusionRules).CollectionChanged +=
-            (_, _) => collectionChanges++;
-
-        var mutation = viewModel.AddExclusionRuleAsync(
-            "密码管理器",
-            enabled: true,
-            CaptureExclusionRuleScope.Application,
-            ApplicationIdentityKind.ExecutableName,
-            "KeePassXC.exe",
-            windowTitleMatchKind: null,
-            pattern: null);
-        await repository.FirstSaveStarted.WaitAsync(TimeSpan.FromSeconds(5));
-
-        viewModel.Dispose();
-
-        Assert.False(await mutation);
-        Assert.Empty(viewModel.ExclusionRules);
-        Assert.False(viewModel.HasRuleMutationNotice);
-        Assert.Equal(0, collectionChanges);
-        Assert.Empty(repository.SavedSettings);
-    }
-
-    [Fact]
-    public async Task DisposedExclusionRuleMutationPreservesProjectionAndExistingNotice()
-    {
-        var repository = new TestSettingsRepository(
-            CreateSettingsWithoutExclusionRules());
-        using var settings = new AppSettingsService(repository);
-        await settings.InitializeAsync();
-        var capture = new TestCaptureService(CaptureState.Stopped);
-        var viewModel = new SettingsViewModel(settings, capture);
-
-        Assert.True(await viewModel.AddExclusionRuleAsync(
-            "稍后启用",
-            enabled: false,
-            CaptureExclusionRuleScope.Application,
-            ApplicationIdentityKind.ExecutableName,
-            "draft.exe",
-            windowTitleMatchKind: null,
-            pattern: null));
-        var item = Assert.Single(viewModel.ExclusionRules);
-        var notice = viewModel.RuleMutationNoticeText;
-        var changedProperties = ObserveChanges(viewModel);
-        var collectionChanges = 0;
-        ((INotifyCollectionChanged)viewModel.ExclusionRules).CollectionChanged +=
-            (_, _) => collectionChanges++;
-
-        viewModel.Dispose();
-        changedProperties.Clear();
-
-        Assert.False(await viewModel.DeleteExclusionRuleAsync(item));
-        Assert.Same(item, Assert.Single(viewModel.ExclusionRules));
-        Assert.Equal(notice, viewModel.RuleMutationNoticeText);
-        Assert.Empty(changedProperties);
-        Assert.Equal(0, collectionChanges);
-        Assert.Single(repository.SavedSettings);
-    }
-
-    [Fact]
-    public async Task DisposeDropsCaptureUpdateAlreadyQueuedForUiDispatch()
-    {
-        var repository = new TestSettingsRepository();
-        using var settings = new AppSettingsService(repository);
-        await settings.InitializeAsync();
-        var capture = new TestCaptureService(CaptureState.Stopped);
-        var dispatchContext = new QueuedSynchronizationContext();
-        var previousContext = SynchronizationContext.Current;
-        SettingsViewModel viewModel;
-        try
-        {
-            SynchronizationContext.SetSynchronizationContext(dispatchContext);
-            viewModel = new SettingsViewModel(settings, capture);
-        }
-        finally
-        {
-            SynchronizationContext.SetSynchronizationContext(previousContext);
-        }
-
-        var changedProperties = ObserveChanges(viewModel);
-        await Task.Run(() => capture.TransitionTo(CaptureState.Unavailable));
-        await dispatchContext.Posted.WaitAsync(TimeSpan.FromSeconds(5));
-
-        viewModel.Dispose();
-        dispatchContext.RunPostedCallback();
-
-        Assert.Empty(changedProperties);
-        Assert.Equal("原生录制组件尚未接入。", viewModel.CaptureAvailabilityText);
-    }
-
-    private static RecordingConsent CreateConsent()
-    {
-        return new RecordingConsent(
-            AppSettingsService.CurrentRecordingConsentVersion,
-            ConsentTime,
-            CapturePrivacySettings.Default.Revision);
-    }
-
-    private static AppSettings CreateSettingsWithoutExclusionRules()
-    {
-        return new AppSettings(
-            AppThemePreference.System,
-            CaptureEnabled: false,
-            CloudAnalysisEnabled: false,
-            RecordingConsent: null,
-            CreatePrivacyWithoutExclusionRules());
-    }
-
-    private static CapturePrivacySettings CreatePrivacyWithoutExclusionRules()
-    {
-        return new CapturePrivacySettings(
-            CapturePrivacySettings.DefaultRetentionDays,
-            ExcludeSensitiveApplications: true,
-            PauseInRemoteSessions: true,
-            PauseDuringScreenSharing: true,
-            CapturePrivacySettings.Default.Revision,
-            CaptureExclusionRuleSet.Empty);
-    }
-
-    private static HashSet<string> ObserveChanges(INotifyPropertyChanged source)
-    {
-        var properties = new HashSet<string>(StringComparer.Ordinal);
-        source.PropertyChanged += (_, args) =>
-        {
-            if (args.PropertyName is not null)
-            {
-                properties.Add(args.PropertyName);
-            }
-        };
-        return properties;
-    }
-
-    private sealed class TestSettingsRepository : IAppSettingsRepository
-    {
-        private readonly TaskCompletionSource _firstSaveStarted =
-            new(TaskCreationOptions.RunContinuationsAsynchronously);
-        private readonly TaskCompletionSource _releaseFirstSave =
-            new(TaskCreationOptions.RunContinuationsAsynchronously);
-        private AppSettings _settings;
-        private int _saveCallCount;
-
-        public TestSettingsRepository(AppSettings? settings = null)
-        {
-            _settings = settings ?? AppSettings.Default;
-        }
-
-        public bool BlockFirstSave { get; init; }
-
-        public bool WaitForFirstSaveCancellation { get; init; }
-
-        public Exception? SaveException { get; init; }
-
-        public Task FirstSaveStarted => _firstSaveStarted.Task;
-
-        public List<AppSettings> SavedSettings { get; } = [];
-
-        public int SaveAttemptCount => Volatile.Read(ref _saveCallCount);
-
-        public Task<AppSettings> GetAsync(CancellationToken cancellationToken = default)
+        public async Task StartAsync(CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            return Task.FromResult(_settings);
+            StartCalls++;
+            ThrowIfFailed();
+            await settings.SetCaptureIntentAsync(CaptureIntent.Recording, cancellationToken);
+            Transition(CaptureState.Recording);
         }
 
-        public async Task SaveAsync(
+        public async Task PauseAsync(CancellationToken cancellationToken = default)
+        {
+            await settings.SetCaptureIntentAsync(CaptureIntent.Paused, cancellationToken);
+            Transition(CaptureState.Paused);
+        }
+
+        public Task ResumeAsync(CancellationToken cancellationToken = default) =>
+            StartAsync(cancellationToken);
+
+        public async Task StopAsync(CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            StopCalls++;
+            ThrowIfFailed();
+            await settings.SetCaptureIntentAsync(CaptureIntent.Stopped, cancellationToken);
+            Transition(CaptureState.Stopped);
+        }
+
+        private void Transition(CaptureState state)
+        {
+            var previous = CurrentStatus;
+            CurrentStatus = CreateStatus(state, ++_sequence);
+            StatusChanged?.Invoke(
+                this,
+                new CaptureStatusChangedEventArgs(previous, CurrentStatus));
+        }
+
+        private void ThrowIfFailed()
+        {
+            if (Failure is not null)
+            {
+                throw Failure;
+            }
+        }
+
+        private static CaptureStatus CreateStatus(CaptureState state, ulong sequence) =>
+            state == CaptureState.Faulted
+                ? new CaptureStatus(
+                    state,
+                    DateTimeOffset.UtcNow,
+                    "录制组件发生错误。",
+                    sequence,
+                    ErrorCode: CaptureErrorCode.Unknown)
+                : new CaptureStatus(
+                    state,
+                    DateTimeOffset.UtcNow,
+                    Sequence: sequence);
+    }
+
+    private sealed class InMemorySettingsRepository(AppSettings initial)
+        : IAppSettingsRepository
+    {
+        private AppSettings _current = initial;
+
+        public Task<AppSettings> GetAsync(
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.FromResult(_current);
+        }
+
+        public Task SaveAsync(
             AppSettings expected,
             AppSettings proposed,
             CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var call = Interlocked.Increment(ref _saveCallCount);
-            if (call == 1)
-            {
-                _firstSaveStarted.TrySetResult();
-                if (WaitForFirstSaveCancellation)
-                {
-                    await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
-                }
-
-                if (BlockFirstSave)
-                {
-                    await _releaseFirstSave.Task.WaitAsync(cancellationToken);
-                }
-            }
-
-            if (SaveException is not null)
-            {
-                throw SaveException;
-            }
-
-            cancellationToken.ThrowIfCancellationRequested();
-            if (_settings != expected)
-            {
-                throw new AppSettingsConcurrencyException();
-            }
-
-            _settings = proposed;
-            SavedSettings.Add(proposed);
-        }
-
-        public void ReleaseFirstSave()
-        {
-            _releaseFirstSave.TrySetResult();
-        }
-    }
-
-    private sealed class TestCaptureService : ICaptureService
-    {
-        private static readonly DateTimeOffset StatusTime =
-            new(2026, 7, 16, 6, 0, 0, TimeSpan.Zero);
-        private EventHandler<CaptureStatusChangedEventArgs>? _statusChanged;
-
-        public TestCaptureService(CaptureState initialState)
-        {
-            CurrentStatus = CreateStatus(initialState);
-        }
-
-        public CaptureStatus CurrentStatus { get; private set; }
-
-        public Func<CancellationToken, Task>? StartOperation { get; init; }
-
-        public Func<CancellationToken, Task>? StopOperation { get; init; }
-
-        public int StartCount { get; private set; }
-
-        public int StopCount { get; private set; }
-
-        public int SubscriptionCount { get; private set; }
-
-        public event EventHandler<CaptureStatusChangedEventArgs>? StatusChanged
-        {
-            add
-            {
-                _statusChanged += value;
-                SubscriptionCount++;
-            }
-            remove
-            {
-                _statusChanged -= value;
-                SubscriptionCount--;
-            }
-        }
-
-        public async Task StartAsync(CancellationToken cancellationToken = default)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            StartCount++;
-            if (StartOperation is not null)
-            {
-                await StartOperation(cancellationToken);
-            }
-
-            TransitionTo(CaptureState.Recording);
-        }
-
-        public Task PauseAsync(CancellationToken cancellationToken = default)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            TransitionTo(CaptureState.Paused);
+            Assert.Equal(expected, _current);
+            _current = proposed;
             return Task.CompletedTask;
-        }
-
-        public Task ResumeAsync(CancellationToken cancellationToken = default)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            TransitionTo(CaptureState.Recording);
-            return Task.CompletedTask;
-        }
-
-        public async Task StopAsync(CancellationToken cancellationToken = default)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            StopCount++;
-            if (StopOperation is not null)
-            {
-                await StopOperation(cancellationToken);
-            }
-
-            TransitionTo(CaptureState.Stopped);
-        }
-
-        public void TransitionTo(CaptureState state)
-        {
-            var previous = CurrentStatus;
-            CurrentStatus = CreateStatus(state);
-            _statusChanged?.Invoke(
-                this,
-                new CaptureStatusChangedEventArgs(previous, CurrentStatus));
-        }
-
-        private static CaptureStatus CreateStatus(CaptureState state)
-        {
-            return new CaptureStatus(
-                state,
-                StatusTime,
-                Reason: state switch
-                {
-                    CaptureState.Unavailable => CaptureReasonCode.BackendUnavailable,
-                    CaptureState.Faulted => CaptureReasonCode.BackendFault,
-                    _ => CaptureReasonCode.None,
-                },
-                ErrorCode: state == CaptureState.Faulted
-                    ? CaptureErrorCode.Unknown
-                    : CaptureErrorCode.None);
-        }
-    }
-
-    private sealed class FixedTimeProvider(DateTimeOffset utcNow) : TimeProvider
-    {
-        public override TimeZoneInfo LocalTimeZone => TimeZoneInfo.Utc;
-
-        public override DateTimeOffset GetUtcNow() => utcNow;
-    }
-
-    private sealed class QueuedSynchronizationContext : SynchronizationContext
-    {
-        private readonly TaskCompletionSource _posted =
-            new(TaskCreationOptions.RunContinuationsAsynchronously);
-        private SendOrPostCallback? _callback;
-        private object? _state;
-
-        public Task Posted => _posted.Task;
-
-        public override void Post(SendOrPostCallback callback, object? state)
-        {
-            _callback = callback;
-            _state = state;
-            _posted.TrySetResult();
-        }
-
-        public void RunPostedCallback()
-        {
-            Assert.NotNull(_callback);
-            _callback(_state);
         }
     }
 }
