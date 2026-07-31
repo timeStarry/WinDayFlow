@@ -7,6 +7,7 @@ on:
 jobs:
   build:
     runs-on: windows-latest
+    timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@v4
@@ -31,7 +32,7 @@ jobs:
         run: dotnet build WinDayFlow.sln -c Release -p:Platform=x64 --no-restore
 
       - name: Test
-        run: dotnet test WinDayFlow.sln -c Release -p:Platform=x64 --no-build --collect:"XPlat Code Coverage"
+        run: dotnet test WinDayFlow.sln -c Release -p:Platform=x64 --no-build -m:1 --blame-hang --blame-hang-timeout 5m --collect:"XPlat Code Coverage"
 
       - name: Format
         run: dotnet format WinDayFlow.sln --verify-no-changes --no-restore
