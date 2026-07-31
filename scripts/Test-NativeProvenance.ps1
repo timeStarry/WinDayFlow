@@ -251,13 +251,37 @@ try {
         -Condition ($manifest.derivedFiles -is [System.Array]) `
         -Message 'manifest.derivedFiles must be a JSON array.'
     Assert-ProvenanceCondition `
-        -Condition ($manifest.derivedFiles.Count -eq 16) `
-        -Message 'manifest.derivedFiles must contain the sixteen reviewed derived files.'
+        -Condition ($manifest.derivedFiles.Count -eq 14) `
+        -Message 'manifest.derivedFiles must contain the fourteen active reviewed derived files.'
     Assert-ProvenanceCondition `
         -Condition ($ledgerRows.Count -eq $manifest.derivedFiles.Count) `
         -Message 'The Markdown provenance ledger must contain exactly the manifest derived files.'
 
     $null = Get-Command git -CommandType Application -ErrorAction Stop
+
+    $verifiedCommits = @(
+        $ledgerRows.Values |
+            ForEach-Object { [string]$_.Commit } |
+            Where-Object { $_ -cne 'WORKTREE (pending commit)' } |
+            Sort-Object -Unique
+    )
+    $isShallowRepository = (
+        & git -C $root rev-parse --is-shallow-repository 2>$null
+    ) -ceq 'true'
+    foreach ($verifiedCommit in $verifiedCommits) {
+        $commitObject = '{0}^{{commit}}' -f $verifiedCommit
+        $null = & git -C $root cat-file -e $commitObject 2>$null
+        if ($LASTEXITCODE -ne 0) {
+            $historyHint = if ($isShallowRepository) {
+                ' The repository is shallow; checkout the full history (for GitHub Actions, set fetch-depth: 0).'
+            }
+            else {
+                ' Fetch the missing commit before running provenance verification.'
+            }
+            throw [System.IO.InvalidDataException]::new(
+                "Last-verified commit is unavailable: $verifiedCommit.$historyHint")
+        }
+    }
 
     $localPaths = [System.Collections.Generic.HashSet[string]]::new(
         [System.StringComparer]::OrdinalIgnoreCase)

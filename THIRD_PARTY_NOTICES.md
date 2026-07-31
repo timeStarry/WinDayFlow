@@ -27,7 +27,7 @@ the pinned source:
 - `windows/runner/capture_pixel_buffer_test.cpp`
 - `windows/runner/capture_runtime_test.cpp`
 
-The corresponding local derived production files are:
+The active corresponding local derived production files are:
 
 - `src/WinDayFlow.Capture.Native/internal/pixel_buffer.h`
 - `src/WinDayFlow.Capture.Native/internal/pixel_buffer.cpp`
@@ -39,10 +39,12 @@ The corresponding local derived production files are:
 - `src/WinDayFlow.Capture.Native/internal/chunk_manifest.cpp`
 - `src/WinDayFlow.Capture.Native/internal/dxgi_desktop_frame_source.h`
 - `src/WinDayFlow.Capture.Native/internal/dxgi_desktop_frame_source.cpp`
-- `src/WinDayFlow.Capture.Native/internal/mf_h264_chunk_writer.h`
-- `src/WinDayFlow.Capture.Native/internal/mf_h264_chunk_writer.cpp`
 - `src/WinDayFlow.Capture.Native/internal/wic_bgra_scaler.h`
 - `src/WinDayFlow.Capture.Native/internal/wic_bgra_scaler.cpp`
+
+The retired `mf_h264_chunk_writer.h` and `mf_h264_chunk_writer.cpp` derived
+components remain covered by this notice and are retained in Git history for
+development revisions that used MP4 chunk storage.
 
 The corresponding derived native tests are
 `src/WinDayFlow.Capture.Native/tests/pixel_buffer_tests.cpp` and

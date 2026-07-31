@@ -74,7 +74,7 @@
     {
       "local": {
         "path": "src/WinDayFlow.Capture.Native/internal/atomic_chunk_store.h",
-        "sha256": "2EFB508275D7F183B774F310DB9CB5601D2033181689E8A8835E7F111715CD9E"
+        "sha256": "C6E1B51B8CB9B28A82BAA085E69D1597CC9BEDA64354DEA1CB2824F197D8F9A3"
       },
       "upstream": {
         "path": "windows/runner/capture_service.cpp",
@@ -85,7 +85,7 @@
     {
       "local": {
         "path": "src/WinDayFlow.Capture.Native/internal/atomic_chunk_store.cpp",
-        "sha256": "9F9F0EBCD34E8769396152A57E9AE275FC31D0929F4C52F2D050348EE35437CB"
+        "sha256": "25155FFFF0B3E47BEF2D07186D4611189B46D4D0F735B0D2B34BB1308136A955"
       },
       "upstream": {
         "path": "windows/runner/capture_service.cpp",
@@ -96,7 +96,7 @@
     {
       "local": {
         "path": "src/WinDayFlow.Capture.Native/internal/chunk_manifest.h",
-        "sha256": "D3BF80F1F359C0E8B3EA904E10588D034B85780F2C720BA4895A7C5FE247E045"
+        "sha256": "A543E9C59A7EBD41C7E168CA97C9D598B1F4619765FAD62CDE66DA8FC96A884D"
       },
       "upstream": {
         "path": "windows/runner/capture_service.cpp",
@@ -107,7 +107,7 @@
     {
       "local": {
         "path": "src/WinDayFlow.Capture.Native/internal/chunk_manifest.cpp",
-        "sha256": "2FEF2FAC5523B4C3206023948A3C63FC536C4C666CAC23D9781E5B459AC99119"
+        "sha256": "DCD858403E5B38940BB4606FD4BEB56FEC19580C20CA800F3F40247998DAB001"
       },
       "upstream": {
         "path": "windows/runner/capture_service.cpp",
@@ -130,28 +130,6 @@
       "local": {
         "path": "src/WinDayFlow.Capture.Native/internal/dxgi_desktop_frame_source.cpp",
         "sha256": "1C6F70182B11FC040C7E16A6151AF7BF3A650435E85EA8E08A47CE31A081BCEB"
-      },
-      "upstream": {
-        "path": "windows/runner/capture_service.cpp",
-        "sha256": "FF967B90A95EFAA608BF6CDC4AD985299313A5A058D61A397A63847C3CA4E8FD",
-        "pinnedCommit": "8b82f8a3b23cb29f2b86ee1a6eff19b9343e2e1e"
-      }
-    },
-    {
-      "local": {
-        "path": "src/WinDayFlow.Capture.Native/internal/mf_h264_chunk_writer.h",
-        "sha256": "E93746B6A4F1824FAADBF0DB75F8BA8B3D633CA5613E9289D0FEFEB89329E913"
-      },
-      "upstream": {
-        "path": "windows/runner/capture_service.cpp",
-        "sha256": "FF967B90A95EFAA608BF6CDC4AD985299313A5A058D61A397A63847C3CA4E8FD",
-        "pinnedCommit": "8b82f8a3b23cb29f2b86ee1a6eff19b9343e2e1e"
-      }
-    },
-    {
-      "local": {
-        "path": "src/WinDayFlow.Capture.Native/internal/mf_h264_chunk_writer.cpp",
-        "sha256": "657F58428EF22BDBF718C9FE103D5A9AFBB74E836B9E6B8AE61AA897A3953529"
       },
       "upstream": {
         "path": "windows/runner/capture_service.cpp",

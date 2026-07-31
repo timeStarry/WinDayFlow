@@ -10,6 +10,9 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Provenance verification compares derived files with historical commits.
+          fetch-depth: 0
 
       - name: Verify native provenance
         run: pwsh -NoLogo -NoProfile -File scripts/Test-NativeProvenance.ps1
