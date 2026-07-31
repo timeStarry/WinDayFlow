@@ -1,13 +1,13 @@
 using System.Runtime.InteropServices.WindowsRuntime;
 using System.Security.Cryptography;
 using System.Text.Json;
-using Windows.Foundation;
-using Windows.Graphics.Imaging;
-using Windows.Storage.Streams;
 using WinDayFlow.Application.Analysis;
 using WinDayFlow.Application.Capture;
 using WinDayFlow.Application.Privacy;
 using WinDayFlow.Domain;
+using Windows.Foundation;
+using Windows.Graphics.Imaging;
+using Windows.Storage.Streams;
 
 namespace WinDayFlow.App.Services;
 

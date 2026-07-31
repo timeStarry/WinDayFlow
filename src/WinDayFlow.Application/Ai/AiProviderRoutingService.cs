@@ -1,5 +1,5 @@
-using WinDayFlow.Application.Privacy;
 using WinDayFlow.Application.Analysis;
+using WinDayFlow.Application.Privacy;
 using WinDayFlow.Domain;
 
 namespace WinDayFlow.Application.Ai;

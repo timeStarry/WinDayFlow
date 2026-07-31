@@ -429,7 +429,7 @@ public sealed class NativeCapturePrivacyCoordinator
             CompletePreparedSettingsCommit();
         }
 
-        }
+    }
 
     public async Task AbortedAsync(
         AppSettings previous,
