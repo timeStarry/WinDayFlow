@@ -8,7 +8,7 @@ namespace WinDayFlow.Infrastructure.Tests.Settings;
 public sealed class SqliteAppSettingsRepositoryTests
 {
     [Fact]
-    public async Task V13SettingsRoundTripPreservesIntentConsentAndSendRules()
+    public async Task V14SettingsRoundTripPreservesIntentConsentAndSendRules()
     {
         using var database = new TemporaryDatabase();
         var factory = new SqliteConnectionFactory(database.DatabasePath);
@@ -38,6 +38,47 @@ public sealed class SqliteAppSettingsRepositoryTests
         await repository.SaveAsync(current, proposed);
 
         Assert.Equal(proposed, await repository.GetAsync());
+    }
+
+    [Fact]
+    public async Task UnlimitedEvidenceRetentionRoundTripsWithoutReplacingStoredDays()
+    {
+        using var database = new TemporaryDatabase();
+        var factory = new SqliteConnectionFactory(database.DatabasePath);
+        await new SqliteDatabaseInitializer(factory).InitializeAsync();
+        var repository = new SqliteAppSettingsRepository(factory);
+        var current = await repository.GetAsync();
+        var ninetyDays = new AppSettings(
+            current.Theme,
+            current.RecordingConsent,
+            current.Evidence.ChangeRetentionDays(90),
+            current.CaptureIntervalSeconds,
+            current.CaptureIntent);
+        await repository.SaveAsync(current, ninetyDays);
+        var unlimited = new AppSettings(
+            ninetyDays.Theme,
+            ninetyDays.RecordingConsent,
+            ninetyDays.Evidence.ChangeRetentionDays(
+                EvidenceSettings.UnlimitedRetentionDays),
+            ninetyDays.CaptureIntervalSeconds,
+            ninetyDays.CaptureIntent);
+
+        await repository.SaveAsync(ninetyDays, unlimited);
+
+        Assert.Equal(
+            EvidenceSettings.UnlimitedRetentionDays,
+            (await repository.GetAsync()).Evidence.RetentionDays);
+        await using var connection = await factory.OpenConnectionAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT evidence_retention_days, evidence_retention_unlimited
+            FROM app_settings
+            WHERE id = 1;
+            """;
+        await using var reader = await command.ExecuteReaderAsync();
+        Assert.True(await reader.ReadAsync());
+        Assert.Equal(90, reader.GetInt32(0));
+        Assert.Equal(1, reader.GetInt32(1));
     }
 
     [Fact]

@@ -236,6 +236,8 @@ public enum WindowsCapturePrivacyMonitorFault
     EventSourceDisposal = 8,
     PrivacyBarrierDisposal = 9,
     SinkTerminationDisposal = 10,
+    StorageRefreshWorker = 11,
+    DisplayRevalidationWorker = 12,
 }
 
 public sealed class WindowsCapturePrivacyMonitorException : Exception
@@ -984,7 +986,7 @@ public sealed class WindowsCapturePrivacyMonitor : IAsyncDisposable
         catch
         {
             await CloseWorkerForFaultAsync(
-                    WindowsCapturePrivacyMonitorFault.Worker)
+                    WindowsCapturePrivacyMonitorFault.StorageRefreshWorker)
                 .ConfigureAwait(false);
         }
     }
@@ -1026,7 +1028,7 @@ public sealed class WindowsCapturePrivacyMonitor : IAsyncDisposable
                     }
 
                     var completed = false;
-                    var wakeWorker = false;
+                    var rebindTarget = false;
                     lock (_invalidationSync)
                     {
                         if (Volatile.Read(ref _acceptCallbacks) == 0
@@ -1055,36 +1057,31 @@ public sealed class WindowsCapturePrivacyMonitor : IAsyncDisposable
                                 _pendingForegroundTargetWindowHandle = 0;
                                 completed = true;
                             }
-                            else if (comparison == DisplayComparison.Different
-                                || attempt
-                                    == DisplayRevalidationRetryDelays.Count)
+                            else if (comparison == DisplayComparison.Different)
                             {
                                 _pendingForegroundTargetWindowHandle =
                                     request.RequireCandidateMatch
                                         ? EncodeWindowHandle(
                                             request.WindowHandle)
                                         : 0;
-                                Interlocked.Increment(
-                                    ref _displayRevalidationVersion);
-                                try
-                                {
-                                    InvalidateWithoutWake(
-                                        MapReason(request.Change));
-                                }
-                                catch
-                                {
-                                    HandleCallbackFailureUnderLock();
-                                }
-
                                 completed = true;
-                                wakeWorker = true;
+                                rebindTarget = true;
+                            }
+                            else if (attempt
+                                == DisplayRevalidationRetryDelays.Count)
+                            {
+                                _pendingForegroundTargetWindowHandle = 0;
+                                completed = true;
                             }
                         }
                     }
 
-                    if (wakeWorker)
+                    if (rebindTarget)
                     {
-                        WakeWorker();
+                        await TryRebindPinnedDisplayTargetAsync(
+                                request,
+                                cancellationToken)
+                            .ConfigureAwait(false);
                     }
 
                     if (completed)
@@ -1101,11 +1098,127 @@ public sealed class WindowsCapturePrivacyMonitor : IAsyncDisposable
         catch
         {
             await CloseWorkerForFaultAsync(
-                    WindowsCapturePrivacyMonitorFault.Worker)
+                    WindowsCapturePrivacyMonitorFault.DisplayRevalidationWorker)
                 .ConfigureAwait(false);
         }
     }
 
+    private async Task TryRebindPinnedDisplayTargetAsync(
+        DisplayRevalidationRequest request,
+        CancellationToken cancellationToken)
+    {
+        long generation;
+        lock (_invalidationSync)
+        {
+            if (Volatile.Read(ref _acceptCallbacks) == 0
+                || Volatile.Read(ref _stopping) != 0
+                || IsTerminalTransitionStarted()
+                || !IsAllowAllApplicationsMode()
+                || request.Version
+                    != Volatile.Read(ref _displayRevalidationVersion))
+            {
+                return;
+            }
+
+            _sampler.InvalidateTargetObservation();
+            generation = Volatile.Read(ref _latestGeneration);
+        }
+
+        WindowsCapturePrivacyObservation observation;
+        try
+        {
+            observation = await _sampler
+                .SampleAsync(cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception exception)
+            when (IsRecoverableSampleException(exception))
+        {
+            CompletePinnedDisplayRevalidation(request);
+            return;
+        }
+
+        LogObservation(generation, observation);
+        if (IsTransientTargetObservation(observation)
+            || DoesNotMatchCurrentTargetCandidate(generation, observation))
+        {
+            CompletePinnedDisplayRevalidation(request);
+            return;
+        }
+
+        var requiresPrivacyBarrier = false;
+        lock (_invalidationSync)
+        {
+            if (!IsCurrentGeneration(generation)
+                || request.Version
+                    != Volatile.Read(ref _displayRevalidationVersion)
+                || Volatile.Read(ref _stopping) != 0
+                || IsTerminalTransitionStarted())
+            {
+                return;
+            }
+
+            requiresPrivacyBarrier = !HasSameHardGateSignals(
+                _lastObservation.Signals,
+                observation.Signals);
+            if (requiresPrivacyBarrier)
+            {
+                Interlocked.Increment(ref _displayRevalidationVersion);
+                InvalidateWithoutWake(MapReason(request.Change));
+            }
+        }
+
+        if (requiresPrivacyBarrier)
+        {
+            WakeWorker();
+            return;
+        }
+
+        var published = await _sink
+            .TryRebindTargetAsync(
+                generation,
+                observation.Signals,
+                CancellationToken.None)
+            .ConfigureAwait(false);
+        LogPublication(generation, published);
+        if (published)
+        {
+            TryCommitPublishedObservation(generation, observation);
+        }
+        else
+        {
+            CompletePinnedDisplayRevalidation(request);
+        }
+    }
+
+    private void CompletePinnedDisplayRevalidation(
+        DisplayRevalidationRequest request)
+    {
+        lock (_invalidationSync)
+        {
+            if (request.Version
+                != Volatile.Read(ref _displayRevalidationVersion))
+            {
+                return;
+            }
+
+            _pendingForegroundTargetWindowHandle = 0;
+            Interlocked.Increment(ref _displayRevalidationVersion);
+        }
+    }
+
+    private static bool HasSameHardGateSignals(
+        NativeCapturePrivacySignals left,
+        NativeCapturePrivacySignals right)
+    {
+        return left.SessionUnlocked == right.SessionUnlocked
+            && left.SecureDesktopClear == right.SecureDesktopClear
+            && left.RemoteSession == right.RemoteSession
+            && left.PresentationMode == right.PresentationMode
+            && left.ApplicationAllowed == right.ApplicationAllowed
+            && left.WindowAllowed == right.WindowAllowed
+            && left.StorageAvailable == right.StorageAvailable;
+    }
     private async Task RunWorkerAsync()
     {
         try
@@ -2164,14 +2277,11 @@ public sealed class WindowsCapturePrivacyMonitor : IAsyncDisposable
     {
         if (IsAllowAllApplicationsMode())
         {
-            if (IsDisplayWideCapturePinned())
+            if (notification.Change == WindowsCaptureWinEventChange.Foreground
+                || IsObjectChange(notification.Change))
             {
-                var displayWideDecision =
-                    ShouldInvalidatePinnedDisplayTargetUnderLock(notification);
-                if (displayWideDecision.HasValue)
-                {
-                    return displayWideDecision.Value;
-                }
+                _ = ShouldInvalidatePinnedDisplayTargetUnderLock(notification);
+                return false;
             }
 
             Interlocked.Increment(ref _displayRevalidationVersion);
@@ -2233,6 +2343,9 @@ public sealed class WindowsCapturePrivacyMonitor : IAsyncDisposable
                 if (candidateWindowHandle != 0)
                 {
                     _objectEventTargetWindowHandle = candidateWindowHandle;
+                    SchedulePinnedDisplayRevalidationUnderLock(
+                        notification.Change,
+                        notification.WindowHandle);
                 }
 
                 _pendingForegroundTargetWindowHandle = 0;
@@ -2246,13 +2359,34 @@ public sealed class WindowsCapturePrivacyMonitor : IAsyncDisposable
                 }
 
                 return false;
+            case WindowsCaptureWinEventChange.ObjectLocationChanged:
+                if (candidateWindowHandle != 0
+                    && candidateWindowHandle == _objectEventTargetWindowHandle)
+                {
+                    SchedulePinnedDisplayRevalidationUnderLock(
+                        notification.Change,
+                        notification.WindowHandle);
+                }
+
+                return false;
             case WindowsCaptureWinEventChange.ObjectCreated:
             case WindowsCaptureWinEventChange.ObjectNameChanged:
-            case WindowsCaptureWinEventChange.ObjectLocationChanged:
                 return false;
             default:
                 return null;
         }
+    }
+
+    private void SchedulePinnedDisplayRevalidationUnderLock(
+        WindowsCaptureWinEventChange change,
+        ulong windowHandle)
+    {
+        var version = Interlocked.Increment(ref _displayRevalidationVersion);
+        ScheduleDisplayRevalidationUnderLock(new DisplayRevalidationRequest(
+            version,
+            change,
+            windowHandle,
+            RequireCandidateMatch: true));
     }
 
     private DisplayComparison CompareAuthorizedDisplayUnderLock(

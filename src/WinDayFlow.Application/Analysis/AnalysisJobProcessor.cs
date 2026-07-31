@@ -496,7 +496,7 @@ public sealed class AnalysisJobProcessor
             }
             catch (Exception exception)
             {
-                var mapped = MapProviderFailure(exception);
+                var mapped = MapProviderFailure(exception, current.Attempt);
                 await CompleteInvocationAsync(
                         invocationId,
                         mapped.Disposition == AnalysisFailureDisposition.Retryable
@@ -509,7 +509,8 @@ public sealed class AnalysisJobProcessor
                         mapped.Code,
                         mapped.Disposition,
                         mapped.RetryDelay ?? _options.RetryDelay,
-                        cancellationToken)
+                        cancellationToken,
+                        mapped.Detail)
                     .ConfigureAwait(false);
             }
 
@@ -563,9 +564,12 @@ public sealed class AnalysisJobProcessor
                 return await FailAsync(
                         current,
                         AnalysisJobErrorCode.ProviderResponseInvalid,
-                        AnalysisFailureDisposition.Terminal,
+                        current.Attempt < 2
+                            ? AnalysisFailureDisposition.Retryable
+                            : AnalysisFailureDisposition.Terminal,
                         _options.RetryDelay,
-                        cancellationToken)
+                        cancellationToken,
+                        "semantic_validation_failed")
                     .ConfigureAwait(false);
             }
 
@@ -1027,6 +1031,14 @@ public sealed class AnalysisJobProcessor
         IReadOnlyList<AiEvidenceImage> Images,
         IReadOnlyList<AiAnalysisContextSlice> Context);
 
+    internal async Task<int> GetMaximumConcurrencyAsync(
+        CancellationToken cancellationToken = default)
+    {
+        var route = await GetRunnableRouteBeforeClaimAsync(cancellationToken)
+            .ConfigureAwait(false);
+        return route?.Profile.Profile.MaximumConcurrency ?? 1;
+    }
+
     private async Task<RunnableTimelineRoute?> GetRunnableRouteBeforeClaimAsync(
         CancellationToken cancellationToken)
     {
@@ -1156,12 +1168,13 @@ public sealed class AnalysisJobProcessor
         AnalysisJobErrorCode code,
         AnalysisFailureDisposition disposition,
         TimeSpan retryDelay,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? detail = null)
     {
         var failed = await _jobStore
             .TryFailAsync(
                 current.Lease!,
-                new AnalysisJobFailure(code),
+                new AnalysisJobFailure(code, detail),
                 disposition,
                 GetUtcNow(),
                 NormalizeRetryDelay(retryDelay),
@@ -1255,7 +1268,9 @@ public sealed class AnalysisJobProcessor
         };
     }
 
-    private static ProviderFailure MapProviderFailure(Exception exception)
+    private static ProviderFailure MapProviderFailure(
+        Exception exception,
+        int attempt)
     {
         if (exception is not AiProviderException providerFailure)
         {
@@ -1263,7 +1278,8 @@ public sealed class AnalysisJobProcessor
                 ? new ProviderFailure(
                     AnalysisJobErrorCode.OperationTimedOut,
                     AnalysisFailureDisposition.Retryable,
-                    RetryDelay: null)
+                    RetryDelay: null,
+                    Detail: null)
                 : new ProviderFailure(
                     exception is IOException
                         ? AnalysisJobErrorCode.ProviderUnavailable
@@ -1271,7 +1287,8 @@ public sealed class AnalysisJobProcessor
                     exception is IOException
                         ? AnalysisFailureDisposition.Retryable
                         : AnalysisFailureDisposition.Terminal,
-                    RetryDelay: null);
+                    RetryDelay: null,
+                    Detail: null);
         }
 
         var code = providerFailure.ErrorCode switch
@@ -1297,9 +1314,29 @@ public sealed class AnalysisJobProcessor
         return new ProviderFailure(
             code,
             providerFailure.IsRetryable
+                && (code != AnalysisJobErrorCode.ProviderResponseInvalid
+                    || attempt < 2)
                 ? AnalysisFailureDisposition.Retryable
                 : AnalysisFailureDisposition.Terminal,
-            providerFailure.RetryAfter);
+            providerFailure.RetryAfter,
+            ToFailureDetail(providerFailure.ResponseFailureKind));
+    }
+
+    private static string? ToFailureDetail(
+        AiProviderResponseFailureKind? responseFailureKind)
+    {
+        return responseFailureKind switch
+        {
+            AiProviderResponseFailureKind.ResponseTooLarge => "response_too_large",
+            AiProviderResponseFailureKind.InvalidEncoding => "invalid_encoding",
+            AiProviderResponseFailureKind.EnvelopeInvalid => "envelope_invalid",
+            AiProviderResponseFailureKind.CompletionIncomplete => "completion_incomplete",
+            AiProviderResponseFailureKind.StructuredContentInvalid =>
+                "structured_content_invalid",
+            AiProviderResponseFailureKind.SemanticValidationFailed =>
+                "semantic_validation_failed",
+            _ => null,
+        };
     }
 
     private static TimeSpan NormalizeRetryDelay(TimeSpan retryDelay)
@@ -1346,7 +1383,8 @@ public sealed class AnalysisJobProcessor
     private sealed record ProviderFailure(
         AnalysisJobErrorCode Code,
         AnalysisFailureDisposition Disposition,
-        TimeSpan? RetryDelay);
+        TimeSpan? RetryDelay,
+        string? Detail);
 
     private sealed class AnalysisLeaseLostException : Exception;
 }

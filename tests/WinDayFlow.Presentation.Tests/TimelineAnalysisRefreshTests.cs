@@ -144,7 +144,9 @@ public sealed class TimelineAnalysisRefreshTests
             Task.FromResult<IReadOnlyList<TimelineEntry>>([CreateEntry()]);
         explicitLoad.SetResult([]);
         await refresh;
-        await WaitUntilAsync(() => timelineStore.RequestCount == 3);
+        await WaitUntilAsync(
+            () => timelineStore.RequestCount == 3
+                && viewModel.Entries.Count == 1);
 
         Assert.False(viewModel.IsLoading);
         Assert.Equal("分析完成", Assert.Single(viewModel.Entries).Title);

@@ -376,7 +376,7 @@ public sealed class WindowsCapturePrivacyMonitorTests
 
         await monitor.StartAsync();
         await sink.BlockedBarrierEntered.Task.WaitAsync(Timeout);
-        source.EmitChange(WindowsCaptureWinEventChange.Foreground);
+        source.EmitChange(WindowsCaptureWinEventChange.DesktopSwitch);
 
         Assert.Equal(2, sink.PrivacyObservationGeneration);
         Assert.Equal(2, sampler.InvalidationCount);
@@ -392,39 +392,30 @@ public sealed class WindowsCapturePrivacyMonitorTests
     }
 
     [Fact]
-    public async Task LocationChangeStormInvalidatesEveryEventAndRecoversFromTheLatestGeneration()
+    public async Task LocationChangeStormDoesNotInvalidateContinuousCapture()
     {
-        var sink = new FakePrivacySignalSink
-        {
-            BlockBarrierCall = 2,
-        };
+        var sink = new FakePrivacySignalSink();
+        sink.SetApplicationPrivacyMode(
+            CaptureApplicationPrivacyMode.AllowAllApplications);
+        sink.SetCaptureState(CaptureState.Recording);
         var sampler = new FakePrivacySampler(
-            static (_, _) => Task.FromResult(CreateObservation(101)));
+            static (_, _) => Task.FromResult(CreateObservation(1)));
         var source = new FakeEventSource();
         var monitor = new WindowsCapturePrivacyMonitor(sink, sampler, source);
 
         await monitor.StartAsync();
-        await sink.BlockedBarrierEntered.Task.WaitAsync(Timeout);
+        _ = await sink.ReadUpdateAsync().WaitAsync(Timeout);
         for (var index = 0; index < 100; index++)
         {
             source.EmitChange(WindowsCaptureWinEventChange.ObjectLocationChanged);
         }
 
-        Assert.Equal(101, sink.PrivacyObservationGeneration);
-        Assert.Equal(0, sampler.SampleCount);
-        sink.ReleaseBlockedBarrier();
-
-        var update = await sink.ReadUpdateAsync().WaitAsync(Timeout);
-        Assert.Equal(101, update.Generation);
+        Assert.Equal(1, sink.PrivacyObservationGeneration);
         Assert.Equal(1, sampler.SampleCount);
-        Assert.Equal(101, sampler.InvalidationCount);
-        Assert.Equal(101, monitor.LastPublishedGeneration);
-        Assert.Equal<ulong>(
-            101,
-            monitor.LastObservation.Signals.Target.TargetEpoch);
-        Assert.True(
-            monitor.ObservedInvalidationReasons.HasFlag(
-                WindowsCapturePrivacyInvalidationReason.ObjectLocationChanged));
+        Assert.Equal(1, sampler.InvalidationCount);
+        Assert.Equal(1, monitor.LastPublishedGeneration);
+        Assert.False(monitor.ObservedInvalidationReasons.HasFlag(
+            WindowsCapturePrivacyInvalidationReason.ObjectLocationChanged));
         await monitor.DisposeAsync();
     }
 
@@ -434,6 +425,9 @@ public sealed class WindowsCapturePrivacyMonitorTests
         const ulong targetEpoch = 41;
         const ulong targetWindowHandle = targetEpoch + 100;
         var sink = new FakePrivacySignalSink();
+        sink.SetApplicationPrivacyMode(
+            CaptureApplicationPrivacyMode.AllowAllApplications);
+        sink.SetCaptureState(CaptureState.Recording);
         var sampler = new FakePrivacySampler(
             static (_, _) => Task.FromResult(CreateObservation(targetEpoch)));
         var source = new FakeEventSource();
@@ -463,11 +457,10 @@ public sealed class WindowsCapturePrivacyMonitorTests
             WindowsCaptureWinEventChange.ObjectNameChanged,
             targetWindowHandle);
 
-        var update = await sink.ReadUpdateAsync().WaitAsync(Timeout);
-        Assert.Equal(2, update.Generation);
-        Assert.Equal(2, sampler.InvalidationCount);
-        Assert.Equal(2, sampler.SampleCount);
-        Assert.True(monitor.ObservedInvalidationReasons.HasFlag(
+        Assert.Equal(1L, sink.PrivacyObservationGeneration);
+        Assert.Equal(1, sampler.InvalidationCount);
+        Assert.Equal(1, sampler.SampleCount);
+        Assert.False(monitor.ObservedInvalidationReasons.HasFlag(
             WindowsCapturePrivacyInvalidationReason.ObjectNameChanged));
         await monitor.DisposeAsync();
     }
@@ -480,7 +473,7 @@ public sealed class WindowsCapturePrivacyMonitorTests
     [InlineData(CaptureState.Resuming)]
     [InlineData(CaptureState.Stopping)]
     [InlineData(CaptureState.Faulted)]
-    public async Task AllowAllApplicationsPinnedStateIgnoresForegroundSwitch(
+    public async Task AllowAllApplicationsPinnedStateFollowsFocusedApplicationDisplay(
         CaptureState captureState)
     {
         var initial = CreateObservation(
@@ -518,20 +511,21 @@ public sealed class WindowsCapturePrivacyMonitorTests
             Resolve);
 
         await monitor.StartAsync();
-        var published = await sink.ReadUpdateAsync().WaitAsync(Timeout);
+        _ = await sink.ReadUpdateAsync().WaitAsync(Timeout);
         source.EmitChange(
             WindowsCaptureWinEventChange.Foreground,
             changed.Signals.Target.WindowHandle);
+        var published = await sink.ReadUpdateAsync().WaitAsync(Timeout);
 
-        Assert.Equal(0, resolverCalls);
+        Assert.Equal(2, resolverCalls);
         Assert.Equal(1, sink.PrivacyObservationGeneration);
-        Assert.Equal(1, sampler.InvalidationCount);
-        Assert.Equal(1, sampler.SampleCount);
+        Assert.Equal(2, sampler.InvalidationCount);
+        Assert.Equal(2, sampler.SampleCount);
         Assert.Equal(
-            initial.Signals.Target.TargetEpoch,
+            changed.Signals.Target.TargetEpoch,
             published.Signals.Target.TargetEpoch);
         Assert.Equal(
-            initial.DisplayTarget.MonitorHandle,
+            changed.DisplayTarget.MonitorHandle,
             monitor.LastObservation.DisplayTarget.MonitorHandle);
         Assert.False(monitor.ObservedInvalidationReasons.HasFlag(
             WindowsCapturePrivacyInvalidationReason.Foreground));
@@ -539,13 +533,12 @@ public sealed class WindowsCapturePrivacyMonitorTests
     }
 
     [Fact]
-    public async Task AllowAllApplicationsRecordingIgnoresLocationAndDestroyedEvents()
+    public async Task AllowAllApplicationsKeepsCaptureGenerationWhenFocusStaysOnSameDisplay()
     {
-        const ulong windowHandle = 101;
         var initial = CreateObservation(
             1,
             displayKey: @"\\.\DISPLAY1",
-            windowHandle: windowHandle,
+            windowHandle: 101,
             displayMonitorHandle: 201);
         var sink = new FakePrivacySignalSink();
         sink.SetApplicationPrivacyMode(
@@ -554,13 +547,129 @@ public sealed class WindowsCapturePrivacyMonitorTests
         var sampler = new FakePrivacySampler(
             (_, _) => Task.FromResult(initial));
         var source = new FakeEventSource();
+        var revalidated = CreateCompletionSource();
+        var resolverCalls = 0;
+        bool Resolve(ulong _, out WindowsCaptureDisplayAnchor display)
+        {
+            if (Interlocked.Increment(ref resolverCalls) == 2)
+            {
+                revalidated.TrySetResult();
+            }
+
+            display = new WindowsCaptureDisplayAnchor(
+                initial.DisplayTarget.MonitorHandle,
+                initial.DisplayTarget.DeviceKey!);
+            return true;
+        }
+
+        var monitor = new WindowsCapturePrivacyMonitor(
+            sink,
+            sampler,
+            source,
+            static (_, _) => Task.CompletedTask,
+            Resolve);
+
+        await monitor.StartAsync();
+        _ = await sink.ReadUpdateAsync().WaitAsync(Timeout);
+        source.EmitChange(
+            WindowsCaptureWinEventChange.Foreground,
+            windowHandle: 102);
+        await revalidated.Task.WaitAsync(Timeout);
+
+        Assert.Equal(2, resolverCalls);
+        Assert.Equal(1, sink.PrivacyObservationGeneration);
+        Assert.Equal(1, sampler.InvalidationCount);
+        Assert.Equal(1, sampler.SampleCount);
+        Assert.False(monitor.ObservedInvalidationReasons.HasFlag(
+            WindowsCapturePrivacyInvalidationReason.Foreground));
+        await monitor.DisposeAsync();
+    }
+    [Fact]
+    public async Task AllowAllApplicationsKeepsCurrentDisplayWhenFocusDisplayIsUnknown()
+    {
+        var initial = CreateObservation(
+            1,
+            displayKey: @"\\.\DISPLAY1",
+            windowHandle: 101,
+            displayMonitorHandle: 201);
+        var sink = new FakePrivacySignalSink();
+        sink.SetApplicationPrivacyMode(
+            CaptureApplicationPrivacyMode.AllowAllApplications);
+        sink.SetCaptureState(CaptureState.Recording);
+        var sampler = new FakePrivacySampler(
+            (_, _) => Task.FromResult(initial));
+        var source = new FakeEventSource();
+        var retriesCompleted = CreateCompletionSource();
+        var resolverCalls = 0;
+        bool Resolve(ulong _, out WindowsCaptureDisplayAnchor display)
+        {
+            if (Interlocked.Increment(ref resolverCalls)
+                == WindowsCapturePrivacyMonitor
+                    .DisplayRevalidationRetryDelays.Count)
+            {
+                retriesCompleted.TrySetResult();
+            }
+
+            display = default;
+            return false;
+        }
+
+        var monitor = new WindowsCapturePrivacyMonitor(
+            sink,
+            sampler,
+            source,
+            static (_, _) => Task.CompletedTask,
+            Resolve);
+
+        await monitor.StartAsync();
+        _ = await sink.ReadUpdateAsync().WaitAsync(Timeout);
+        source.EmitChange(
+            WindowsCaptureWinEventChange.Foreground,
+            windowHandle: 102);
+        await retriesCompleted.Task.WaitAsync(Timeout);
+
+        Assert.Equal(
+            WindowsCapturePrivacyMonitor.DisplayRevalidationRetryDelays.Count,
+            resolverCalls);
+        Assert.Equal(1, sink.PrivacyObservationGeneration);
+        Assert.Equal(1, sampler.InvalidationCount);
+        Assert.Equal(1, sampler.SampleCount);
+        Assert.Single(sink.Updates);
+        Assert.Equal(
+            initial.DisplayTarget.MonitorHandle,
+            monitor.LastObservation.DisplayTarget.MonitorHandle);
+        Assert.False(monitor.ObservedInvalidationReasons.HasFlag(
+            WindowsCapturePrivacyInvalidationReason.Foreground));
+        await monitor.DisposeAsync();
+    }
+    [Fact]
+    public async Task AllowAllApplicationsRecordingFollowsFocusedWindowMovedToAnotherDisplay()
+    {
+        const ulong windowHandle = 101;
+        var initial = CreateObservation(
+            1,
+            displayKey: @"\\.\DISPLAY1",
+            windowHandle: windowHandle,
+            displayMonitorHandle: 201);
+        var moved = CreateObservation(
+            2,
+            displayKey: @"\\.\DISPLAY2",
+            windowHandle: windowHandle,
+            displayMonitorHandle: 202);
+        var sink = new FakePrivacySignalSink();
+        sink.SetApplicationPrivacyMode(
+            CaptureApplicationPrivacyMode.AllowAllApplications);
+        sink.SetCaptureState(CaptureState.Recording);
+        var sampler = new FakePrivacySampler((call, _) => Task.FromResult(
+            call == 1 ? initial : moved));
+        var source = new FakeEventSource();
         var resolverCalls = 0;
         bool Resolve(ulong _, out WindowsCaptureDisplayAnchor display)
         {
             Interlocked.Increment(ref resolverCalls);
             display = new WindowsCaptureDisplayAnchor(
-                202,
-                @"\\.\DISPLAY2");
+                moved.DisplayTarget.MonitorHandle,
+                moved.DisplayTarget.DeviceKey!);
             return true;
         }
 
@@ -576,6 +685,8 @@ public sealed class WindowsCapturePrivacyMonitorTests
         source.EmitChange(
             WindowsCaptureWinEventChange.ObjectLocationChanged,
             windowHandle);
+        var published = await sink.ReadUpdateAsync().WaitAsync(Timeout);
+
         source.EmitChange(
             WindowsCaptureWinEventChange.ObjectDestroyed,
             windowHandle);
@@ -583,10 +694,13 @@ public sealed class WindowsCapturePrivacyMonitorTests
             WindowsCaptureWinEventChange.ObjectLocationChanged,
             windowHandle);
 
-        Assert.Equal(0, resolverCalls);
+        Assert.Equal(2, resolverCalls);
         Assert.Equal(1, sink.PrivacyObservationGeneration);
-        Assert.Equal(1, sampler.InvalidationCount);
-        Assert.Equal(1, sampler.SampleCount);
+        Assert.Equal(2, sampler.InvalidationCount);
+        Assert.Equal(2, sampler.SampleCount);
+        Assert.Equal(
+            moved.DisplayTarget.MonitorHandle,
+            published.Signals.Target.DisplayMonitorHandle);
         Assert.False(monitor.ObservedInvalidationReasons.HasFlag(
             WindowsCapturePrivacyInvalidationReason.ObjectLocationChanged));
         Assert.False(monitor.ObservedInvalidationReasons.HasFlag(
@@ -617,7 +731,20 @@ public sealed class WindowsCapturePrivacyMonitorTests
         var sampler = new FakePrivacySampler((call, _) => Task.FromResult(
             call == 1 ? initial : changed));
         var source = new FakeEventSource();
-        var monitor = new WindowsCapturePrivacyMonitor(sink, sampler, source);
+        bool Resolve(ulong _, out WindowsCaptureDisplayAnchor display)
+        {
+            display = new WindowsCaptureDisplayAnchor(
+                changed.DisplayTarget.MonitorHandle,
+                changed.DisplayTarget.DeviceKey!);
+            return true;
+        }
+
+        var monitor = new WindowsCapturePrivacyMonitor(
+            sink,
+            sampler,
+            source,
+            static (_, _) => Task.CompletedTask,
+            Resolve);
 
         await monitor.StartAsync();
         _ = await sink.ReadUpdateAsync().WaitAsync(Timeout);
@@ -627,14 +754,14 @@ public sealed class WindowsCapturePrivacyMonitorTests
             changed.Signals.Target.WindowHandle);
         var update = await sink.ReadUpdateAsync().WaitAsync(Timeout);
 
-        Assert.Equal(2, update.Generation);
+        Assert.Equal(1, update.Generation);
         Assert.Equal(
             changed.DisplayTarget.MonitorHandle,
             update.Signals.Target.DisplayMonitorHandle);
-        Assert.Equal(2, sink.PrivacyObservationGeneration);
+        Assert.Equal(1, sink.PrivacyObservationGeneration);
         Assert.Equal(2, sampler.InvalidationCount);
         Assert.Equal(2, sampler.SampleCount);
-        Assert.True(monitor.ObservedInvalidationReasons.HasFlag(
+        Assert.False(monitor.ObservedInvalidationReasons.HasFlag(
             WindowsCapturePrivacyInvalidationReason.Foreground));
         await monitor.DisposeAsync();
     }
@@ -1805,6 +1932,9 @@ public sealed class WindowsCapturePrivacyMonitorTests
         Assert.Equal("new-title", update.Signals.CaptureIdentity.WindowTitle);
         Assert.Single(sink.Updates);
         Assert.Equal(2, sampler.SampleCount);
+        Assert.True(SpinWait.SpinUntil(
+            () => monitor.LastPublishedGeneration == 2,
+            Timeout));
         Assert.Same(second.DisplayTarget, monitor.LastObservation.DisplayTarget);
         await monitor.DisposeAsync();
     }
@@ -2842,6 +2972,25 @@ public sealed class WindowsCapturePrivacyMonitorTests
             return true;
         }
 
+        public Task<bool> TryRebindTargetAsync(
+            long privacyObservationGeneration,
+            NativeCapturePrivacySignals signals,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (privacyObservationGeneration != PrivacyObservationGeneration)
+            {
+                return Task.FromResult(false);
+            }
+
+            lock (_sync)
+            {
+                Updates.Add((privacyObservationGeneration, signals));
+            }
+
+            _updates.Writer.TryWrite((privacyObservationGeneration, signals));
+            return Task.FromResult(true);
+        }
         public Task UpdateSignalsAsync(
             NativeCapturePrivacySignals signals,
             CancellationToken cancellationToken = default)

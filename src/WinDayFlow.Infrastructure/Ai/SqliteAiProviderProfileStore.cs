@@ -170,6 +170,7 @@ public sealed class SqliteAiProviderProfileStore : IAiProviderProfileStore
                 base_endpoint = $base_endpoint,
                 model = $model,
                 request_timeout_ticks = $request_timeout_ticks,
+                maximum_concurrency = $maximum_concurrency,
                 revision = $next_revision,
                 api_key_ciphertext = $api_key_ciphertext,
                 api_key_salt = $api_key_salt,
@@ -304,6 +305,7 @@ public sealed class SqliteAiProviderProfileStore : IAiProviderProfileStore
                 base_endpoint,
                 model,
                 request_timeout_ticks,
+                maximum_concurrency,
                 revision,
                 is_active,
                 api_key_ciphertext,
@@ -320,6 +322,7 @@ public sealed class SqliteAiProviderProfileStore : IAiProviderProfileStore
                 $base_endpoint,
                 $model,
                 $request_timeout_ticks,
+                $maximum_concurrency,
                 $revision,
                 1,
                 $api_key_ciphertext,
@@ -535,7 +538,8 @@ public sealed class SqliteAiProviderProfileStore : IAiProviderProfileStore
             (AiProviderKind)reader.GetInt32(2),
             new Uri(endpointText, UriKind.Absolute),
             reader.GetString(4),
-            TimeSpan.FromTicks(reader.GetInt64(5)));
+            TimeSpan.FromTicks(reader.GetInt64(5)),
+            reader.GetInt32(14));
         if (!string.Equals(
                 endpointText,
                 profile.BaseEndpoint.AbsoluteUri,
@@ -586,6 +590,7 @@ public sealed class SqliteAiProviderProfileStore : IAiProviderProfileStore
         parameters.AddWithValue("$base_endpoint", profile.BaseEndpoint.AbsoluteUri);
         parameters.AddWithValue("$model", profile.Model);
         parameters.AddWithValue("$request_timeout_ticks", profile.RequestTimeout.Ticks);
+        parameters.AddWithValue("$maximum_concurrency", profile.MaximumConcurrency);
     }
 
     private static void ValidateProfileId(Guid profileId)
@@ -613,7 +618,8 @@ public sealed class SqliteAiProviderProfileStore : IAiProviderProfileStore
             validated_revision,
             validated_at_utc_ticks,
             created_at_utc_ticks,
-            updated_at_utc_ticks
+            updated_at_utc_ticks,
+            maximum_concurrency
         FROM ai_provider_profiles
         """;
 
@@ -625,6 +631,7 @@ public sealed class SqliteAiProviderProfileStore : IAiProviderProfileStore
             base_endpoint,
             model,
             request_timeout_ticks,
+            maximum_concurrency,
             revision,
             is_active,
             api_key_ciphertext,
@@ -641,6 +648,7 @@ public sealed class SqliteAiProviderProfileStore : IAiProviderProfileStore
             $base_endpoint,
             $model,
             $request_timeout_ticks,
+            $maximum_concurrency,
             $revision,
             $is_active,
             $api_key_ciphertext,

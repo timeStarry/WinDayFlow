@@ -13,7 +13,7 @@ public sealed class SqliteAppSettingsMigrationTests
     private const string ProfileId = "72c1d90a-361e-42fa-bf7b-27e319d9c532";
 
     [Fact]
-    public async Task FreshDatabaseAppliesSchemaV13ExactlyOnce()
+    public async Task FreshDatabaseAppliesSchemaV15ExactlyOnce()
     {
         using var database = new TemporaryDatabase();
         var factory = new SqliteConnectionFactory(database.DatabasePath);
@@ -27,8 +27,8 @@ public sealed class SqliteAppSettingsMigrationTests
         command.CommandText = "SELECT COUNT(*), MAX(version) FROM schema_migrations;";
         await using var reader = await command.ExecuteReaderAsync();
         Assert.True(await reader.ReadAsync());
-        Assert.Equal(13, reader.GetInt32(0));
-        Assert.Equal(13, reader.GetInt32(1));
+        Assert.Equal(15, reader.GetInt32(0));
+        Assert.Equal(15, reader.GetInt32(1));
 
         var settings = await new SqliteAppSettingsRepository(factory).GetAsync();
         Assert.Equal(AppSettings.Default, settings);
@@ -52,6 +52,7 @@ public sealed class SqliteAppSettingsMigrationTests
         Assert.Equal(0L, await ScalarAsync(connection, "SELECT COUNT(*) FROM timeline_entries;"));
         Assert.Equal(0L, await ScalarAsync(connection, "SELECT is_active FROM ai_provider_profiles WHERE id = '" + ProfileId + "';"));
         Assert.Equal(4L, await ScalarAsync(connection, "SELECT length(api_key_ciphertext) FROM ai_provider_profiles WHERE id = '" + ProfileId + "';"));
+        Assert.Equal(1L, await ScalarAsync(connection, "SELECT maximum_concurrency FROM ai_provider_profiles WHERE id = '" + ProfileId + "';"));
 
         await using (var route = connection.CreateCommand())
         {

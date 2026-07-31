@@ -97,6 +97,31 @@ public sealed class SqliteStatisticsServiceTests
             () => service.GetAsync(StatisticsRange.All, cancellation.Token));
     }
 
+    [Fact]
+    public async Task GetAsyncSupportsExplicitHalfOpenRange()
+    {
+        using var root = new TemporaryRoot();
+        var factory = new SqliteConnectionFactory(root.DatabasePath);
+        await new SqliteDatabaseInitializer(factory).InitializeAsync();
+        await SeedCaptureAsync(factory, root.RootPath);
+        await SeedTimelineAsync(factory);
+        var service = new SqliteStatisticsService(
+            factory,
+            root.RootPath,
+            new FixedTimeProvider(Now));
+        var start = Now.Date.AddHours(8).AddMinutes(12);
+        var end = Now.Date.AddHours(8).AddMinutes(18);
+
+        var snapshot = await service.GetAsync(start, end);
+
+        Assert.Equal(StatisticsRange.Custom, snapshot.Range);
+        Assert.Equal(start, snapshot.RangeStart);
+        Assert.Equal(end, snapshot.RangeEnd);
+        Assert.Equal(TimeSpan.FromMinutes(6), snapshot.RecordedDuration);
+        Assert.Equal(TimeSpan.FromMinutes(6), snapshot.FocusedDuration);
+        Assert.Equal(1, snapshot.ActiveDayCount);
+    }
+
     private static async Task SeedCaptureAsync(
         SqliteConnectionFactory factory,
         string rootPath)

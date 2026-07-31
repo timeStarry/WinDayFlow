@@ -25,7 +25,7 @@
             Padding="{StaticResource PagePadding}"
             HorizontalScrollBarVisibility="Disabled"
             HorizontalScrollMode="Disabled"
-            VerticalScrollBarVisibility="Auto">
+            VerticalScrollBarVisibility="Visible">
             <StackPanel
                 MaxWidth="{StaticResource SettingsContentMaxWidth}"
                 HorizontalAlignment="Center"
@@ -236,6 +236,7 @@
                                     TextWrapping="Wrap" />
                             </StackPanel>
                             <Grid
+                                x:Name="DataFolderControlLayout"
                                 Grid.Column="1"
                                 ColumnSpacing="8">
                                 <Grid.ColumnDefinitions>
@@ -252,10 +253,11 @@
                                     Grid.Column="1"
                                     Width="40"
                                     Height="40"
+                                    Padding="0"
                                     Click="OnOpenDataFolder"
                                     AutomationProperties.Name="打开本地数据目录"
                                     ToolTipService.ToolTip="打开文件夹">
-                                    <SymbolIcon Symbol="Folder" />
+                                    <FontIcon FontSize="16" Glyph="&#xE8B7;" />
                                 </Button>
                             </Grid>
                         </Grid>
@@ -291,6 +293,7 @@
                                 AutomationProperties.Name="屏幕证据保留期限"
                                 IsEnabled="{x:Bind ViewModel.CanChangePrivacy, Mode=OneWay}"
                                 SelectionChanged="OnRetentionChanged">
+                                <ComboBoxItem Content="不自动清理" Tag="0" />
                                 <ComboBoxItem Content="7 天" Tag="7" />
                                 <ComboBoxItem Content="30 天" Tag="30" />
                                 <ComboBoxItem Content="90 天" Tag="90" />
@@ -311,11 +314,17 @@
 
                     <Border Style="{StaticResource SettingsGroupBorderStyle}">
                         <StackPanel Padding="20" Spacing="16">
-                            <Grid ColumnSpacing="20">
+                            <Grid
+                                x:Name="PrivacyHeaderLayout"
+                                ColumnSpacing="20">
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="*" />
                                     <ColumnDefinition Width="Auto" />
                                 </Grid.ColumnDefinitions>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                </Grid.RowDefinitions>
                                 <StackPanel Spacing="3">
                                     <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}" Text="隐私检查" />
                                     <TextBlock
@@ -324,6 +333,7 @@
                                         TextWrapping="Wrap" />
                                 </StackPanel>
                                 <ToggleSwitch
+                                    x:Name="PrivacyToggle"
                                     Grid.Column="1"
                                     AutomationProperties.Name="启用隐私检查"
                                     IsEnabled="{x:Bind RoutingViewModel.CanMutate, Mode=OneWay}"
@@ -338,12 +348,19 @@
                                 ItemsSource="{x:Bind RoutingViewModel.Profiles, Mode=OneWay}"
                                 PlaceholderText="选择供应商"
                                 SelectedItem="{x:Bind RoutingViewModel.PrivacyProvider, Mode=TwoWay}" />
-                            <Grid ColumnSpacing="12">
+                            <Grid
+                                x:Name="PrivacyPolicyLayout"
+                                ColumnSpacing="12">
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="*" />
                                     <ColumnDefinition Width="*" />
                                 </Grid.ColumnDefinitions>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                </Grid.RowDefinitions>
                                 <ComboBox
+                                    x:Name="PrivacyOnMatchPicker"
                                     HorizontalAlignment="Stretch"
                                     Header="检测到敏感内容"
                                     SelectedIndex="{x:Bind RoutingViewModel.PrivacyOnMatchIndex, Mode=TwoWay}">
@@ -353,6 +370,7 @@
                                     <x:String>需要复核</x:String>
                                 </ComboBox>
                                 <ComboBox
+                                    x:Name="PrivacyOnErrorPicker"
                                     Grid.Column="1"
                                     HorizontalAlignment="Stretch"
                                     Header="检查失败"
@@ -377,11 +395,17 @@
 
                     <Border Style="{StaticResource SettingsGroupBorderStyle}">
                         <StackPanel Padding="20" Spacing="16">
-                            <Grid ColumnSpacing="20">
+                            <Grid
+                                x:Name="TimelineHeaderLayout"
+                                ColumnSpacing="20">
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="*" />
                                     <ColumnDefinition Width="Auto" />
                                 </Grid.ColumnDefinitions>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                </Grid.RowDefinitions>
                                 <StackPanel Spacing="3">
                                     <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}" Text="时间线分析" />
                                     <TextBlock
@@ -390,6 +414,7 @@
                                         TextWrapping="Wrap" />
                                 </StackPanel>
                                 <ToggleSwitch
+                                    x:Name="TimelineToggle"
                                     Grid.Column="1"
                                     AutomationProperties.Name="启用时间线分析"
                                     IsEnabled="{x:Bind RoutingViewModel.CanMutate, Mode=OneWay}"
@@ -574,23 +599,25 @@
                                                                 x:Name="MoveExclusionRuleUpButton"
                                                                 Width="40"
                                                                 Height="40"
+                                                                Padding="0"
                                                                 Click="OnMoveExclusionRuleUp"
                                                                 AutomationProperties.AutomationId="{x:Bind MoveUpAutomationId, Mode=OneWay}"
                                                                 AutomationProperties.Name="{x:Bind MoveUpAutomationName, Mode=OneWay}"
                                                                 IsEnabled="{x:Bind CanMoveUp, Mode=OneWay}"
                                                                 ToolTipService.ToolTip="上移">
-                                                                <FontIcon Glyph="&#xE70E;" />
+                                                                <FontIcon FontSize="16" Glyph="&#xE70E;" />
                                                             </Button>
                                                             <Button
                                                                 x:Name="MoveExclusionRuleDownButton"
                                                                 Width="40"
                                                                 Height="40"
+                                                                Padding="0"
                                                                 Click="OnMoveExclusionRuleDown"
                                                                 AutomationProperties.AutomationId="{x:Bind MoveDownAutomationId, Mode=OneWay}"
                                                                 AutomationProperties.Name="{x:Bind MoveDownAutomationName, Mode=OneWay}"
                                                                 IsEnabled="{x:Bind CanMoveDown, Mode=OneWay}"
                                                                 ToolTipService.ToolTip="下移">
-                                                                <FontIcon Glyph="&#xE70D;" />
+                                                                <FontIcon FontSize="16" Glyph="&#xE70D;" />
                                                             </Button>
                                                         </StackPanel>
                                                         <StackPanel
@@ -603,20 +630,22 @@
                                                                 x:Name="EditExclusionRuleButton"
                                                                 Width="40"
                                                                 Height="40"
+                                                                Padding="0"
                                                                 Click="OnEditExclusionRule"
                                                                 AutomationProperties.AutomationId="{x:Bind EditAutomationId, Mode=OneWay}"
                                                                 AutomationProperties.Name="{x:Bind EditAutomationName, Mode=OneWay}"
                                                                 ToolTipService.ToolTip="编辑">
-                                                                <SymbolIcon Symbol="Edit" />
+                                                                <FontIcon FontSize="16" Glyph="&#xE70F;" />
                                                             </Button>
                                                             <Button
                                                                 Width="40"
                                                                 Height="40"
+                                                                Padding="0"
                                                                 Click="OnDeleteExclusionRule"
                                                                 AutomationProperties.AutomationId="{x:Bind DeleteAutomationId, Mode=OneWay}"
                                                                 AutomationProperties.Name="{x:Bind DeleteAutomationName, Mode=OneWay}"
                                                                 ToolTipService.ToolTip="删除">
-                                                                <SymbolIcon Symbol="Delete" />
+                                                                <FontIcon FontSize="16" Glyph="&#xE74D;" />
                                                             </Button>
                                                         </StackPanel>
                                                     </Grid>
@@ -647,11 +676,18 @@
                                 <RowDefinition Height="Auto" />
                                 <RowDefinition Height="Auto" />
                             </Grid.RowDefinitions>
-                            <Grid Padding="20" ColumnSpacing="20">
+                            <Grid
+                                x:Name="ProviderHeaderLayout"
+                                Padding="20"
+                                ColumnSpacing="20">
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="*" />
                                     <ColumnDefinition Width="Auto" />
                                 </Grid.ColumnDefinitions>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto" />
+                                    <RowDefinition Height="Auto" />
+                                </Grid.RowDefinitions>
                                 <StackPanel Spacing="3">
                                     <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}" Text="OpenAI-compatible 供应商" />
                                     <TextBlock
@@ -660,6 +696,7 @@
                                         TextWrapping="Wrap" />
                                 </StackPanel>
                                 <Button
+                                    x:Name="AddProviderButton"
                                     Grid.Column="1"
                                     Height="40"
                                     Click="OnAddProvider"
@@ -696,10 +733,10 @@
                                     </ListView.ItemContainerStyle>
                                     <ListView.ItemTemplate>
                                         <DataTemplate x:DataType="presentation:AiProviderProfileItemViewModel">
-                                            <Grid Padding="16" ColumnSpacing="16">
+                                            <Grid Padding="16" ColumnSpacing="12">
                                                 <Grid.ColumnDefinitions>
                                                     <ColumnDefinition Width="Auto" />
-                                                    <ColumnDefinition Width="*" />
+                                                    <ColumnDefinition Width="*" MinWidth="0" />
                                                     <ColumnDefinition Width="Auto" />
                                                 </Grid.ColumnDefinitions>
                                                 <Border
@@ -709,39 +746,77 @@
                                                     CornerRadius="4">
                                                     <FontIcon FontSize="18" Glyph="&#xE774;" />
                                                 </Border>
-                                                <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="2">
-                                                    <TextBlock FontWeight="SemiBold" Text="{x:Bind DisplayName}" TextTrimming="CharacterEllipsis" />
-                                                    <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="{x:Bind EndpointSummary}" TextTrimming="CharacterEllipsis" />
-                                                    <TextBlock Style="{StaticResource MetadataTextStyle}" Text="{x:Bind ValidationSummary}" TextWrapping="Wrap" />
+                                                <StackPanel
+                                                    Grid.Column="1"
+                                                    MinWidth="0"
+                                                    VerticalAlignment="Center"
+                                                    Spacing="2">
+                                                    <TextBlock
+                                                        FontWeight="SemiBold"
+                                                        Text="{x:Bind DisplayName}"
+                                                        TextTrimming="CharacterEllipsis" />
+                                                    <TextBlock
+                                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                                        Text="{x:Bind EndpointSummary}"
+                                                        TextTrimming="CharacterEllipsis" />
+                                                    <TextBlock
+                                                        Style="{StaticResource MetadataTextStyle}"
+                                                        Text="{x:Bind ValidationSummary}"
+                                                        TextTrimming="CharacterEllipsis" />
+                                                    <TextBlock
+                                                        Style="{StaticResource MetadataTextStyle}"
+                                                        Text="{x:Bind ConcurrencySummary}" />
                                                 </StackPanel>
-                                                <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="4">
+                                                <StackPanel
+                                                    Grid.Column="2"
+                                                    VerticalAlignment="Center"
+                                                    Orientation="Horizontal"
+                                                    Spacing="4">
                                                     <Button
                                                         Width="40"
                                                         Height="40"
-                                                        Click="OnValidateProviderPrivacy"
-                                                        ToolTipService.ToolTip="验证隐私检查">
-                                                        <FontIcon FontSize="16" Glyph="&#xE72E;" />
-                                                    </Button>
-                                                    <Button
-                                                        Width="40"
-                                                        Height="40"
-                                                        Click="OnValidateProviderTimeline"
-                                                        ToolTipService.ToolTip="验证时间线分析">
-                                                        <SymbolIcon Symbol="Sync" />
-                                                    </Button>
-                                                    <Button
-                                                        Width="40"
-                                                        Height="40"
+                                                        Padding="0"
                                                         Click="OnEditProvider"
-                                                        ToolTipService.ToolTip="编辑供应商">
-                                                        <SymbolIcon Symbol="Edit" />
+                                                        AutomationProperties.Name="编辑供应商"
+                                                        ToolTipService.ToolTip="编辑">
+                                                        <FontIcon FontSize="16" Glyph="&#xE70F;" />
                                                     </Button>
                                                     <Button
                                                         Width="40"
                                                         Height="40"
-                                                        Click="OnDeleteProvider"
-                                                        ToolTipService.ToolTip="删除供应商">
-                                                        <SymbolIcon Symbol="Delete" />
+                                                        Padding="0"
+                                                        AutomationProperties.Name="更多供应商操作"
+                                                        ToolTipService.ToolTip="更多操作">
+                                                        <FontIcon FontSize="16" Glyph="&#xE712;" />
+                                                        <Button.Flyout>
+                                                            <MenuFlyout Placement="BottomEdgeAlignedRight">
+                                                                <MenuFlyoutItem
+                                                                    Click="OnValidateProviderPrivacy"
+                                                                    Tag="{x:Bind Id}"
+                                                                    Text="验证隐私检查">
+                                                                    <MenuFlyoutItem.Icon>
+                                                                        <FontIcon Glyph="&#xE72E;" />
+                                                                    </MenuFlyoutItem.Icon>
+                                                                </MenuFlyoutItem>
+                                                                <MenuFlyoutItem
+                                                                    Click="OnValidateProviderTimeline"
+                                                                    Tag="{x:Bind Id}"
+                                                                    Text="验证时间线分析">
+                                                                    <MenuFlyoutItem.Icon>
+                                                                        <SymbolIcon Symbol="Sync" />
+                                                                    </MenuFlyoutItem.Icon>
+                                                                </MenuFlyoutItem>
+                                                                <MenuFlyoutSeparator />
+                                                                <MenuFlyoutItem
+                                                                    Click="OnDeleteProvider"
+                                                                    Tag="{x:Bind Id}"
+                                                                    Text="删除供应商">
+                                                                    <MenuFlyoutItem.Icon>
+                                                                        <SymbolIcon Symbol="Delete" />
+                                                                    </MenuFlyoutItem.Icon>
+                                                                </MenuFlyoutItem>
+                                                            </MenuFlyout>
+                                                        </Button.Flyout>
                                                     </Button>
                                                 </StackPanel>
                                             </Grid>
@@ -757,10 +832,52 @@
                 <StackPanel x:Name="AboutSection" Spacing="12" Visibility="Collapsed">
                     <TextBlock Style="{StaticResource SectionTitleTextStyle}" Text="关于" />
                     <Border Style="{StaticResource SettingsGroupBorderStyle}">
-                        <StackPanel Padding="20" Spacing="6">
-                            <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}" Text="WinDayFlow" />
-                            <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="本地优先的屏幕活动记录与时间线工具。" />
-                            <TextBlock Style="{StaticResource MetadataTextStyle}" Text="原始证据保存在本机；是否发送、如何处理以及使用哪个供应商由你决定。" TextWrapping="Wrap" />
+                        <StackPanel Padding="20" Spacing="16">
+                            <StackPanel Spacing="4">
+                                <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}" Text="WinDayFlow" />
+                                <TextBlock
+                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                    Text="更‘Windows’的原生 DayFlow 体验"
+                                    TextWrapping="Wrap" />
+                                <TextBlock
+                                    x:Name="AppVersionTextBlock"
+                                    Style="{StaticResource MetadataTextStyle}"
+                                    Text="版本" />
+                            </StackPanel>
+                            <TextBlock
+                                Style="{StaticResource MetadataTextStyle}"
+                                Text="原始证据保存在本机；是否发送、如何处理以及使用哪个供应商由你决定。"
+                                TextWrapping="Wrap" />
+                            <StackPanel Spacing="2">
+                                <TextBlock
+                                    Margin="0,4,0,2"
+                                    Style="{StaticResource BodyStrongTextBlockStyle}"
+                                    Text="项目与参考" />
+                                <HyperlinkButton
+                                    Padding="0,6"
+                                    NavigateUri="https://github.com/timeStarry/WinDayFlow">
+                                    <StackPanel Orientation="Horizontal" Spacing="8">
+                                        <FontIcon FontSize="16" Glyph="&#xE71B;" />
+                                        <TextBlock Text="WinDayFlow · GitHub 仓库" />
+                                    </StackPanel>
+                                </HyperlinkButton>
+                                <HyperlinkButton
+                                    Padding="0,6"
+                                    NavigateUri="https://github.com/JerryZLiu/Dayflow">
+                                    <StackPanel Orientation="Horizontal" Spacing="8">
+                                        <FontIcon FontSize="16" Glyph="&#xE71B;" />
+                                        <TextBlock Text="Dayflow · 原始产品参考" />
+                                    </StackPanel>
+                                </HyperlinkButton>
+                                <HyperlinkButton
+                                    Padding="0,6"
+                                    NavigateUri="https://github.com/liujiaqi7998/QiDayflow">
+                                    <StackPanel Orientation="Horizontal" Spacing="8">
+                                        <FontIcon FontSize="16" Glyph="&#xE71B;" />
+                                        <TextBlock Text="QiDayflow · Windows 实现参考" />
+                                    </StackPanel>
+                                </HyperlinkButton>
+                            </StackPanel>
                         </StackPanel>
                     </Border>
                 </StackPanel>
@@ -814,6 +931,16 @@
                         SmallChange="10"
                         SpinButtonPlacementMode="Compact"
                         Value="60" />
+                    <NumberBox
+                        x:Name="ProviderEditorConcurrencyNumberBox"
+                        MaxWidth="240"
+                        HorizontalAlignment="Left"
+                        Header="后台最大并发"
+                        Maximum="16"
+                        Minimum="1"
+                        SmallChange="1"
+                        SpinButtonPlacementMode="Compact"
+                        Value="1" />
                     <PasswordBox
                         x:Name="ProviderEditorApiKeyPasswordBox"
                         Header="API 密钥"

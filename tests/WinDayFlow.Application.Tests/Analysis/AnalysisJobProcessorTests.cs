@@ -172,6 +172,33 @@ public sealed class AnalysisJobProcessorTests
     }
 
     [Fact]
+    public async Task InvalidStructuredResponseRetriesOnceAndPersistsOnlySafeFailureKind()
+    {
+        using var harness = await CreateHarnessAsync(cloudEnabled: true);
+        harness.Provider.Failure = new AiProviderException(
+            AiProviderErrorCode.InvalidResponse,
+            "response payload must not be persisted",
+            Guid.NewGuid(),
+            isRetryable: true,
+            responseFailureKind: AiProviderResponseFailureKind.StructuredContentInvalid);
+
+        var first = await harness.Processor.ProcessNextAsync();
+
+        Assert.Equal(AnalysisJobProcessStatus.FailedRetryable, first.Status);
+        Assert.Equal("structured_content_invalid", harness.JobStore.Current.Failure?.Detail);
+
+        var second = await harness.Processor.ProcessNextAsync();
+
+        Assert.Equal(AnalysisJobProcessStatus.FailedTerminal, second.Status);
+        Assert.Equal(2, harness.Provider.CallCount);
+        Assert.Equal("structured_content_invalid", harness.JobStore.Current.Failure?.Detail);
+        Assert.DoesNotContain(
+            "payload",
+            harness.JobStore.Current.Failure?.Detail ?? string.Empty,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task ProviderRevisionChangedAfterRequestTerminatesBeforeCommit()
     {
         using var harness = await CreateHarnessAsync(cloudEnabled: true);
@@ -252,8 +279,9 @@ public sealed class AnalysisJobProcessorTests
 
         var result = await harness.Processor.ProcessNextAsync();
 
-        Assert.Equal(AnalysisJobProcessStatus.FailedTerminal, result.Status);
+        Assert.Equal(AnalysisJobProcessStatus.FailedRetryable, result.Status);
         Assert.Equal(AnalysisJobErrorCode.ProviderResponseInvalid, result.FailureCode);
+        Assert.Equal("semantic_validation_failed", harness.JobStore.Current.Failure?.Detail);
         Assert.Equal(0, harness.Committer.CallCount);
     }
 
@@ -288,9 +316,10 @@ public sealed class AnalysisJobProcessorTests
 
         var result = await harness.Processor.ProcessNextAsync();
 
-        Assert.Equal(AnalysisJobProcessStatus.FailedTerminal, result.Status);
+        Assert.Equal(AnalysisJobProcessStatus.FailedRetryable, result.Status);
         Assert.Equal(AnalysisJobErrorCode.ProviderResponseInvalid, result.FailureCode);
-        Assert.Equal(AnalysisJobState.FailedTerminal, harness.JobStore.Current.State);
+        Assert.Equal(AnalysisJobState.FailedRetryable, harness.JobStore.Current.State);
+        Assert.Equal("semantic_validation_failed", harness.JobStore.Current.Failure?.Detail);
         Assert.Empty(harness.Committer.Entries);
         Assert.Equal(0, harness.Committer.CallCount);
     }

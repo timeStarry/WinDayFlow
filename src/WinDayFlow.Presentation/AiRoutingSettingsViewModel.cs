@@ -114,6 +114,7 @@ public sealed partial class AiRoutingSettingsViewModel : ObservableObject, IDisp
         string baseEndpoint,
         string model,
         int requestTimeoutSeconds,
+        int maximumConcurrency,
         string? replacementApiKey,
         bool clearApiKey,
         CancellationToken cancellationToken = default) =>
@@ -134,6 +135,7 @@ public sealed partial class AiRoutingSettingsViewModel : ObservableObject, IDisp
                     requestTimeoutSeconds,
                     replacementApiKey,
                     clearApiKey,
+                    maximumConcurrency,
                     token);
             }
             else
@@ -148,6 +150,7 @@ public sealed partial class AiRoutingSettingsViewModel : ObservableObject, IDisp
                     model,
                     requestTimeoutSeconds,
                     replacementApiKey,
+                    maximumConcurrency,
                     token);
             }
             await ReloadAsync(token);
@@ -403,6 +406,7 @@ public sealed class AiProviderProfileItemViewModel
     public string BaseEndpoint => Snapshot.Profile.BaseEndpoint.AbsoluteUri;
     public string Model => Snapshot.Profile.Model;
     public int RequestTimeoutSeconds => checked((int)Snapshot.Profile.RequestTimeout.TotalSeconds);
+    public int MaximumConcurrency => Snapshot.Profile.MaximumConcurrency;
     public bool HasApiKey => Snapshot.HasApiKey;
     public bool PrivacyValidated { get; }
     public bool TimelineValidated { get; }
@@ -416,4 +420,5 @@ public sealed class AiProviderProfileItemViewModel
             : TimelineValidated
                 ? "已验证时间线分析"
                 : "尚未验证处理阶段";
+    public string ConcurrencySummary => $"后台最大并发 {MaximumConcurrency}";
 }

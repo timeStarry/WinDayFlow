@@ -107,31 +107,16 @@ public static class NativeCapturePrivacyPolicy
             && HasCurrentRecordingConsent(settings)
                 ? NativeCapturePolicyDecision.Allow
                 : NativeCapturePolicyDecision.Block;
-        var secureDesktopClear = IsWindowsLockScreen(signals.CaptureIdentity)
-            ? NativeCapturePolicyDecision.Block
-            : signals.SecureDesktopClear;
-
         return new NativeCapturePrivacyContext(
             consentGranted,
             signals.SessionUnlocked,
-            secureDesktopClear,
+            signals.SecureDesktopClear,
             NativeCapturePolicyDecision.Allow,
             NativeCapturePolicyDecision.Allow,
             NativeCapturePolicyDecision.Allow,
             NativeCapturePolicyDecision.Allow,
             signals.StorageAvailable,
             runtimePolicyRevision);
-    }
-
-    private static bool IsWindowsLockScreen(
-        NativeCaptureIdentitySnapshot identity)
-    {
-        var executable = identity.ExecutableNameObservation;
-        return executable.State == NativeCaptureObservationState.Present
-            && string.Equals(
-                executable.Value,
-                "LockApp.exe",
-                StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool HasCurrentRecordingConsent(AppSettings settings)

@@ -11,6 +11,13 @@ public static class AiAnalysisContract
     public const int MaximumImages = 32;
     public const int MaximumContextSlices = 2_048;
     public const int MaximumActivities = 32;
+    public const int MaximumTitleLength = 160;
+    public const int MaximumSummaryLength = 2_000;
+    public const int MaximumTags = 12;
+    public const int MaximumTagLength = 64;
+    public const int MaximumApplications = 16;
+    public const int MaximumApplicationIdLength = 256;
+    public const int MaximumFrameIdLength = 128;
 }
 
 public sealed class AiEvidenceImage

@@ -92,6 +92,10 @@ class CaptureInstanceController final {
       uint64_t expected_run_id = 0) noexcept;
   bool OnWorkerCheckpoint(uint64_t run_id,
                           const CaptureWorkerCheckpoint& checkpoint) noexcept;
+  static bool IsSupersededPauseCheckpointAccepted(
+      uint64_t checkpoint_pause_epoch,
+      uint64_t expected_pause_epoch,
+      wdf_capture_state state) noexcept;
   void OnWorkerExited(uint64_t run_id,
                       CaptureWorkerRunResult result) noexcept;
   bool PublishStateUnderLock(wdf_capture_state state,

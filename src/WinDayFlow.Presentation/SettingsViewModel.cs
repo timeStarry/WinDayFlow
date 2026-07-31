@@ -138,7 +138,10 @@ public sealed partial class SettingsViewModel : ObservableObject, IDisposable
         }
     }
 
-    public string RetentionSummaryText => $"屏幕证据保留 {EvidenceRetentionDays} 天";
+    public string RetentionSummaryText => EvidenceRetentionDays
+        == EvidenceSettings.UnlimitedRetentionDays
+            ? "屏幕证据不自动清理"
+            : $"屏幕证据保留 {EvidenceRetentionDays} 天";
 
     public string PrivacySummaryText => EnabledExclusionRuleCount == 0
         ? "本地录制持续独立运行；隐私检查和阶段供应商由用户分别配置"

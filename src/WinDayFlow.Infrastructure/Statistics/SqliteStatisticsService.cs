@@ -27,7 +27,7 @@ public sealed class SqliteStatisticsService : IStatisticsService
         StatisticsRange range,
         CancellationToken cancellationToken = default)
     {
-        if (!Enum.IsDefined(range))
+        if (!Enum.IsDefined(range) || range == StatisticsRange.Custom)
         {
             throw new ArgumentOutOfRangeException(nameof(range));
         }
@@ -35,6 +35,38 @@ public sealed class SqliteStatisticsService : IStatisticsService
         cancellationToken.ThrowIfCancellationRequested();
         var end = _timeProvider.GetLocalNow();
         var start = GetStart(range, end);
+        return await GetAsyncCore(range, start, end, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    public async Task<StatisticsSnapshot> GetAsync(
+        DateTimeOffset rangeStart,
+        DateTimeOffset rangeEnd,
+        CancellationToken cancellationToken = default)
+    {
+        if (rangeEnd <= rangeStart)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(rangeEnd),
+                rangeEnd,
+                "The statistics range end must be later than its start.");
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        return await GetAsyncCore(
+                StatisticsRange.Custom,
+                rangeStart,
+                rangeEnd,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private async Task<StatisticsSnapshot> GetAsyncCore(
+        StatisticsRange range,
+        DateTimeOffset start,
+        DateTimeOffset end,
+        CancellationToken cancellationToken)
+    {
         await using var connection = await _connectionFactory
             .OpenConnectionAsync(cancellationToken)
             .ConfigureAwait(false);

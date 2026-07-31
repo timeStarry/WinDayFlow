@@ -38,7 +38,9 @@ public sealed class SqliteAiProviderProfileStoreTests
             Now.AddMinutes(2));
         Assert.Equal(created, noOp);
 
-        var changedProfile = CreateProfile(displayName: "Updated provider");
+        var changedProfile = CreateProfile(
+            displayName: "Updated provider",
+            maximumConcurrency: 4);
         var changed = await store.UpdateAsync(
             changedProfile,
             noOp.Revision,
@@ -46,6 +48,8 @@ public sealed class SqliteAiProviderProfileStoreTests
             Now.AddMinutes(3));
         Assert.Equal(2, changed.Revision);
         Assert.True(changed.HasApiKey);
+        Assert.Equal(4, changed.Profile.MaximumConcurrency);
+        Assert.Equal(changed, await store.GetAsync(ProfileId));
 
         var handler = new CredentialObservingHandler();
         var providerFactory = new OpenAiCompatibleProviderFactory(
@@ -284,7 +288,8 @@ public sealed class SqliteAiProviderProfileStoreTests
     private static AiProviderProfile CreateProfile(
         Uri? endpoint = null,
         string displayName = "Primary provider",
-        string model = "vision-model")
+        string model = "vision-model",
+        int maximumConcurrency = 1)
     {
         return new AiProviderProfile(
             ProfileId,
@@ -292,7 +297,8 @@ public sealed class SqliteAiProviderProfileStoreTests
             AiProviderKind.OpenAiCompatible,
             endpoint ?? new Uri("https://api.example.com/v1"),
             model,
-            TimeSpan.FromMilliseconds(12_345));
+            TimeSpan.FromMilliseconds(12_345),
+            maximumConcurrency);
     }
 
     private static async Task<SaveAttempt> TrySaveAsync(

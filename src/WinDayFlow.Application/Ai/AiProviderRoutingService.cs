@@ -71,6 +71,7 @@ public sealed class AiProviderRoutingService
         string model,
         int requestTimeoutSeconds,
         string? apiKey,
+        int maximumConcurrency = 1,
         CancellationToken cancellationToken = default)
     {
         var profile = CreateProfile(
@@ -78,7 +79,8 @@ public sealed class AiProviderRoutingService
             displayName,
             baseEndpoint,
             model,
-            requestTimeoutSeconds);
+            requestTimeoutSeconds,
+            maximumConcurrency);
         var credential = string.IsNullOrEmpty(apiKey)
             ? AiProviderCredentialUpdate.Clear
             : AiProviderCredentialUpdate.Replace(apiKey);
@@ -100,6 +102,7 @@ public sealed class AiProviderRoutingService
         int requestTimeoutSeconds,
         string? replacementApiKey,
         bool clearApiKey,
+        int maximumConcurrency = 1,
         CancellationToken cancellationToken = default)
     {
         if (clearApiKey && !string.IsNullOrEmpty(replacementApiKey))
@@ -122,7 +125,8 @@ public sealed class AiProviderRoutingService
             displayName,
             baseEndpoint,
             model,
-            requestTimeoutSeconds);
+            requestTimeoutSeconds,
+            maximumConcurrency);
         var credential = clearApiKey
             ? AiProviderCredentialUpdate.Clear
             : string.IsNullOrEmpty(replacementApiKey)
@@ -135,6 +139,11 @@ public sealed class AiProviderRoutingService
             _ => current.HasApiKey,
         };
         EnsureComplete(profile, hasApiKey);
+        var preservedValidations = credential.Kind == AiProviderCredentialUpdateKind.Preserve
+            && HasEquivalentValidatedConfiguration(current.Profile, profile)
+                ? await GetExistingValidationsAsync(current, cancellationToken)
+                    .ConfigureAwait(false)
+                : [];
         AiProviderProfileSnapshot updated;
         using (await _sendGate.EnterAsync(cancellationToken).ConfigureAwait(false))
         {
@@ -145,6 +154,16 @@ public sealed class AiProviderRoutingService
                     UtcNow(),
                     cancellationToken)
                 .ConfigureAwait(false);
+            foreach (var validation in preservedValidations)
+            {
+                _ = await _bindingStore.MarkValidatedAsync(
+                        updated.Profile.Id,
+                        updated.Revision,
+                        validation.Stage,
+                        validation.ValidatedAtUtc,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
         }
         _scheduler?.RequestRun();
         return updated;
@@ -327,7 +346,8 @@ public sealed class AiProviderRoutingService
         string displayName,
         string baseEndpoint,
         string model,
-        int requestTimeoutSeconds)
+        int requestTimeoutSeconds,
+        int maximumConcurrency)
     {
         if (!Uri.TryCreate(baseEndpoint, UriKind.Absolute, out var endpoint))
         {
@@ -340,7 +360,8 @@ public sealed class AiProviderRoutingService
             AiProviderKind.OpenAiCompatible,
             endpoint,
             model,
-            TimeSpan.FromSeconds(requestTimeoutSeconds));
+            TimeSpan.FromSeconds(requestTimeoutSeconds),
+            maximumConcurrency);
     }
 
     private static void EnsureComplete(AiProviderProfile profile, bool hasApiKey)
@@ -354,6 +375,41 @@ public sealed class AiProviderRoutingService
                 isRetryable: false);
         }
     }
+
+    private async Task<IReadOnlyList<ProviderStageValidation>> GetExistingValidationsAsync(
+        AiProviderProfileSnapshot profile,
+        CancellationToken cancellationToken)
+    {
+        var validations = new List<ProviderStageValidation>(2);
+        foreach (var stage in new[]
+                 {
+                     AnalysisStage.PrivacyInspection,
+                     AnalysisStage.TimelineAnalysis,
+                 })
+        {
+            var validation = await _bindingStore.GetValidationAsync(
+                    profile.Profile.Id,
+                    profile.Revision,
+                    stage,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            if (validation is not null)
+            {
+                validations.Add(validation);
+            }
+        }
+
+        return validations;
+    }
+
+    private static bool HasEquivalentValidatedConfiguration(
+        AiProviderProfile current,
+        AiProviderProfile proposed) =>
+        current.Id == proposed.Id
+        && current.Kind == proposed.Kind
+        && current.BaseEndpoint == proposed.BaseEndpoint
+        && string.Equals(current.Model, proposed.Model, StringComparison.Ordinal)
+        && current.RequestTimeout == proposed.RequestTimeout;
 
     private DateTimeOffset UtcNow() => _timeProvider.GetUtcNow().ToUniversalTime();
 }

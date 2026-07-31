@@ -169,6 +169,8 @@ public sealed class CaptureDiagnosticLog
             CaptureDiagnosticEvent.PrivacyInvalidated => "privacy_invalidated",
             CaptureDiagnosticEvent.PrivacySampled => "privacy_sampled",
             CaptureDiagnosticEvent.PrivacyPublished => "privacy_published",
+            CaptureDiagnosticEvent.PrivacyDecisionEvaluated =>
+                "privacy_decision_evaluated",
             CaptureDiagnosticEvent.PrivacyRecoveryScheduled =>
                 "privacy_recovery_scheduled",
             CaptureDiagnosticEvent.PrivacyMonitorFaulted =>
@@ -207,6 +209,8 @@ public sealed class CaptureDiagnosticLog
             CaptureDiagnosticField.Outcome => "outcome",
             CaptureDiagnosticField.ErrorCode => "errorCode",
             CaptureDiagnosticField.SinkGeneration => "sinkGeneration",
+            CaptureDiagnosticField.ConsentGranted => "consentGranted",
+            CaptureDiagnosticField.CaptureAllowed => "captureAllowed",
             _ => null,
         };
 }
@@ -221,6 +225,7 @@ internal enum CaptureDiagnosticEvent
     BackendStatusChanged = 6,
     StopReconciliationStarted = 7,
     StopReconciliationCompleted = 8,
+    PrivacyDecisionEvaluated = 9,
 }
 
 internal enum CaptureDiagnosticField
@@ -246,6 +251,8 @@ internal enum CaptureDiagnosticField
     Outcome = 19,
     ErrorCode = 20,
     SinkGeneration = 21,
+    ConsentGranted = 22,
+    CaptureAllowed = 23,
 }
 
 internal enum CaptureDiagnosticOutcome

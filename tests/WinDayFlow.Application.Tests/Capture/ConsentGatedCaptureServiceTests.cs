@@ -463,7 +463,7 @@ public sealed class ConsentGatedCaptureServiceTests
     }
 
     [Fact]
-    public async Task BackendFaultStopDoesNotRestartAfterAuthorizationRecovers()
+    public async Task BackendFaultStopRestartsOnceThenRemainsStopped()
     {
         using var settings = await CreateConsentedSettingsAsync();
         var authorization = new ControlledRuntimeAuthorization(
@@ -474,15 +474,22 @@ public sealed class ConsentGatedCaptureServiceTests
             settings,
             authorization);
 
-        authorization.SetCaptureAuthorized(authorized: false);
         backend.TransitionTo(
             CaptureState.Stopped,
             reason: CaptureReasonCode.BackendFault);
-        authorization.SetCaptureAuthorized(authorized: true);
+        await backend.StartCompleted.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(1, authorization.IssueCount);
+        Assert.Equal(1, backend.StartCount);
+        Assert.Equal(CaptureState.Recording, service.CurrentStatus.State);
+
+        backend.TransitionTo(
+            CaptureState.Stopped,
+            reason: CaptureReasonCode.BackendFault);
         await Task.Delay(TimeSpan.FromMilliseconds(100));
 
-        Assert.Equal(0, authorization.IssueCount);
-        Assert.Equal(0, backend.StartCount);
+        Assert.Equal(1, authorization.IssueCount);
+        Assert.Equal(1, backend.StartCount);
         Assert.Equal(CaptureState.Stopped, service.CurrentStatus.State);
     }
 

@@ -98,7 +98,7 @@ public sealed class NativeCapturePrivacyPolicyTests
     }
 
     [Fact]
-    public void WindowsLockScreenIsAlwaysBlocked()
+    public void LockAppIdentityDoesNotOverridePositiveSystemGates()
     {
         var signals = new NativeCapturePrivacySignals(
             NativeCapturePolicyDecision.Allow,
@@ -119,7 +119,34 @@ public sealed class NativeCapturePrivacyPolicyTests
             signals,
             runtimePolicyRevision: 6);
 
-        Assert.Equal(NativeCapturePolicyDecision.Block, context.SecureDesktopClear);
+        Assert.Equal(NativeCapturePolicyDecision.Allow, context.SessionUnlocked);
+        Assert.Equal(NativeCapturePolicyDecision.Allow, context.SecureDesktopClear);
+    }
+
+    [Fact]
+    public void LockedSessionRemainsAHardCaptureGate()
+    {
+        var signals = new NativeCapturePrivacySignals(
+            NativeCapturePolicyDecision.Block,
+            NativeCapturePolicyDecision.Allow,
+            NativeCaptureConditionState.Inactive,
+            NativeCaptureConditionState.Inactive,
+            NativeCapturePolicyDecision.Allow,
+            NativeCapturePolicyDecision.Allow,
+            NativeCapturePolicyDecision.Allow,
+            new NativeCaptureIdentitySnapshot(
+                "explorer.exe",
+                packageFamilyName: null,
+                publisherCertificateSha256: null,
+                windowTitle: null));
+
+        var context = NativeCapturePrivacyPolicy.Compose(
+            CreateSettings(CaptureIntent.Recording),
+            signals,
+            runtimePolicyRevision: 7);
+
+        Assert.Equal(NativeCapturePolicyDecision.Block, context.SessionUnlocked);
+        Assert.Equal(NativeCapturePolicyDecision.Allow, context.SecureDesktopClear);
     }
 
     [Fact]

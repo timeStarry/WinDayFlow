@@ -1082,6 +1082,65 @@ bool TestBlackSurfaceFrameIsDiscardedBeforeEncoding() {
                 "black-frame health counters were not projected");
 }
 
+bool TestHealthSnapshotRemainsConsistentDuringSampling() {
+  WorkerFixture fixture(128);
+  if (!Expect(fixture.Authorize(1) && fixture.Start(),
+              "health-snapshot worker could not start") ||
+      !Expect(fixture.backend.WaitForEncodeCount(1),
+              "health-snapshot worker did not encode its first frame")) {
+    return false;
+  }
+
+  std::atomic<bool> stop_reader{false};
+  std::atomic<bool> snapshot_consistent{true};
+  std::thread reader([&]() {
+    while (!stop_reader.load(std::memory_order_acquire)) {
+      const CaptureWorkerHealthSnapshot health =
+          fixture.worker.health_snapshot();
+      const uint64_t classified = health.black_frame_count +
+                                  health.duplicate_frame_count +
+                                  health.retained_frame_count;
+      if ((health.revision & 1U) != 0 ||
+          classified > health.sampled_frame_count) {
+        snapshot_consistent.store(false, std::memory_order_release);
+        return;
+      }
+    }
+  });
+
+  bool produced_frames = true;
+  for (uint32_t frame_count = 2; frame_count <= 64; ++frame_count) {
+    const int64_t offset = static_cast<int64_t>(frame_count - 1U) * 250;
+    fixture.backend.steady_now_ms.store(1'000 + offset);
+    fixture.backend.unix_now_ms.store(1'700'000'000'000 + offset);
+    fixture.runtime.NotifyAuthorizationChanged();
+    if (!fixture.backend.WaitForEncodeCount(frame_count)) {
+      produced_frames = false;
+      break;
+    }
+  }
+
+  stop_reader.store(true, std::memory_order_release);
+  reader.join();
+  const bool stopped =
+      fixture.runtime.RequestStop() ==
+          CaptureRuntimeStopResult::kStopRequested &&
+      fixture.runtime.WaitStopped(kTestTimeoutMs) ==
+          CaptureRuntimeWaitResult::kStopped;
+  const CaptureWorkerHealthSnapshot final_health =
+      fixture.worker.health_snapshot();
+  return Expect(produced_frames && stopped,
+                "health-snapshot worker did not complete sampling") &&
+         Expect(snapshot_consistent.load(std::memory_order_acquire),
+                "health snapshot exposed torn frame counters") &&
+         Expect((final_health.revision & 1U) == 0 &&
+                    final_health.black_frame_count +
+                            final_health.duplicate_frame_count +
+                            final_health.retained_frame_count <=
+                        final_health.sampled_frame_count,
+                "final health snapshot was inconsistent");
+}
+
 bool TestFirstFramePublishesReadyExactlyOnce() {
   WorkerFixture fixture;
   CheckpointLog checkpoints;
@@ -1483,6 +1542,68 @@ bool TestAuthorizationPauseCommitsSealedPrefixAcrossGenerationChange() {
                                                 CaptureWorkerCheckpointKind::kPaused,
                                                 1},
                 "sealed-prefix worker did not remain resumable");
+}
+
+bool TestCallbackInvalidationRecoveryCommitsSealedPrefix() {
+  WorkerFixture fixture;
+  CheckpointLog checkpoints;
+  CaptureWorkerCheckpointSink sink = [&](const CaptureWorkerCheckpoint& value) {
+    return checkpoints.Push(value);
+  };
+  if (!Expect(fixture.Authorize(1) && fixture.Start(std::move(sink)),
+              "callback-recovery worker could not start") ||
+      !Expect(fixture.backend.WaitForEncodeCount(1) &&
+                  checkpoints.WaitForSize(1),
+              "callback-recovery worker did not encode its first frame")) {
+    return false;
+  }
+
+  const uint64_t sealed_generation = fixture.generation;
+  const uint64_t invalidation_epoch =
+      fixture.safety.InvalidateAuthorizationAdmission();
+  const bool pause_requested =
+      fixture.runtime.RequestPause() ==
+      CaptureRuntimePauseResult::kPauseRequested;
+
+  const auto blocked_ticket =
+      fixture.safety.BeginSealedAuthorizationUpdate();
+  const bool blocked = fixture.safety.CompleteRuntimeAuthorization(
+                           blocked_ticket,
+                           RuntimeAuthorization{BlockedPrivacy(2), std::nullopt},
+                           &fixture.generation) ==
+                       CaptureSafetyUpdateResult::kOk;
+  fixture.runtime.NotifyAuthorizationChanged();
+
+  const auto recovered_ticket =
+      fixture.safety.BeginSealedAuthorizationUpdate();
+  const bool recovered = fixture.safety.CompleteRuntimeAuthorization(
+                             recovered_ticket,
+                             AllowedAuthorization(3, fixture.target),
+                             &fixture.generation) ==
+                         CaptureSafetyUpdateResult::kOk;
+  fixture.runtime.NotifyAuthorizationChanged();
+
+  if (!Expect(invalidation_epoch != 0 && pause_requested && blocked && recovered,
+              "callback invalidation recovery did not advance authorization") ||
+      !Expect(checkpoints.WaitForSize(2) &&
+                  fixture.backend.WaitForAcknowledgeCount(1),
+              "callback invalidation recovery discarded its sealed prefix") ||
+      !Expect(fixture.runtime.RequestStop() ==
+                      CaptureRuntimeStopResult::kStopRequested &&
+                  fixture.runtime.WaitStopped(kTestTimeoutMs) ==
+                      CaptureRuntimeWaitResult::kStopped,
+              "callback-recovery worker did not stop")) {
+    return false;
+  }
+
+  const auto manifests = fixture.backend.Manifests();
+  const auto result = fixture.worker.last_result();
+  return Expect(result.reason == CaptureWorkerExitReason::kStopped &&
+                    result.committed_chunks == 1,
+                "callback recovery changed worker progress") &&
+         Expect(manifests.size() == 1 &&
+                    manifests[0].persistence_generation == sealed_generation,
+                "callback recovery lost the sealed evidence generation");
 }
 
 bool TestPauseResumeUsesFreshGeneration() {
@@ -2062,6 +2183,7 @@ int main() {
       !TestFirstSuccessfulFrameReanchorsAfterTimeouts() ||
       !TestFirstFrameFailureDoesNotPublishReady() ||
       !TestBlackSurfaceFrameIsDiscardedBeforeEncoding() ||
+      !TestHealthSnapshotRemainsConsistentDuringSampling() ||
       !TestFirstFramePublishesReadyExactlyOnce() ||
       !TestResumeWaitsForFreshFrameBeforeReady() ||
       !TestReadyCheckpointRunsAfterPermitRelease() ||
@@ -2069,6 +2191,7 @@ int main() {
       !TestDelayedPauseRecoversAuthorizationLossWithoutSealedPrefix() ||
       !TestStopCommitsValidPartialChunk() ||
       !TestAuthorizationPauseCommitsSealedPrefixAcrossGenerationChange() ||
+      !TestCallbackInvalidationRecoveryCommitsSealedPrefix() ||
       !TestPauseResumeUsesFreshGeneration() ||
       !TestImmediateResumeStillFinalizesPauseExactlyOnce() ||
       !TestMergedResumeDiscardsSupersededGeneration() ||

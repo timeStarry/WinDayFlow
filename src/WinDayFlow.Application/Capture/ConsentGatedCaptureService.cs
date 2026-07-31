@@ -34,6 +34,7 @@ public sealed class ConsentGatedCaptureService : ICaptureService, IDisposable
     private bool _startCommandAwaitingStatusObservation;
     private RuntimeRecoveryConfirmation? _runtimeRecoveryAwaitingConfirmation;
     private CancellationTokenSource? _runtimeResumeCancellation;
+    private int _backendFaultRestartConsumed;
     private bool _disposed;
 
     public ConsentGatedCaptureService(
@@ -108,6 +109,7 @@ public sealed class ConsentGatedCaptureService : ICaptureService, IDisposable
 
     public async Task StartAsync(CancellationToken cancellationToken = default)
     {
+        Interlocked.Exchange(ref _backendFaultRestartConsumed, 0);
         await _settings
             .SetCaptureIntentAsync(CaptureIntent.Recording, cancellationToken)
             .ConfigureAwait(false);
@@ -696,6 +698,10 @@ public sealed class ConsentGatedCaptureService : ICaptureService, IDisposable
             return;
         }
 
+        var isBackendFaultRestart =
+            backendStatus.State == CaptureState.Stopped
+            && backendStatus.Reason == CaptureReasonCode.BackendFault;
+
         var expectedIntentVersion = ReadUserIntentVersion();
         var ownedGeneration = Volatile.Read(ref _runtimePauseOwnedGeneration);
         var resumeCancellation = TryBeginRuntimeResume(expectedIntentVersion);
@@ -748,6 +754,15 @@ public sealed class ConsentGatedCaptureService : ICaptureService, IDisposable
                                 != _runtimeAuthorization.InvalidationGeneration
                             || GetRuntimeRecoveryOperation(_backend.CurrentStatus)
                                 != recoveryOperation)
+                        {
+                            throw new CaptureRuntimeAdmissionRejectedException();
+                        }
+
+                        if (isBackendFaultRestart
+                            && Interlocked.CompareExchange(
+                                ref _backendFaultRestartConsumed,
+                                1,
+                                0) != 0)
                         {
                             throw new CaptureRuntimeAdmissionRejectedException();
                         }
@@ -859,7 +874,12 @@ public sealed class ConsentGatedCaptureService : ICaptureService, IDisposable
 
             if (backendStatus.State == CaptureState.Stopped
                 && (_startupStartPending
-                    || IsAutomaticProtectionReason(backendStatus.Reason)))
+                    || (backendStatus.Reason == CaptureReasonCode.BackendFault
+                        && Volatile.Read(
+                            ref _backendFaultRestartConsumed) == 0)
+                    || (backendStatus.Reason != CaptureReasonCode.BackendFault
+                        && IsAutomaticProtectionReason(
+                            backendStatus.Reason))))
             {
                 return CaptureAdmissionOperation.Start;
             }
@@ -1317,7 +1337,8 @@ public sealed class ConsentGatedCaptureService : ICaptureService, IDisposable
             CaptureReasonCode.DisplayUnavailable or
             CaptureReasonCode.AccessLost or
             CaptureReasonCode.StorageConstrained or
-            CaptureReasonCode.PolicyBlocked;
+            CaptureReasonCode.PolicyBlocked or
+            CaptureReasonCode.BackendFault;
     }
 
     private bool HasCaptureAuthorization()

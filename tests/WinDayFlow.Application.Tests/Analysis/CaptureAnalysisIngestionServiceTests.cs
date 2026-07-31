@@ -58,10 +58,11 @@ public sealed class CaptureAnalysisIngestionServiceTests
             CreateChunk("chunk-b", minuteOffset: 15, durationMinutes: 15),
             CreateChunk("chunk-c", minuteOffset: 30, durationMinutes: 15),
         };
+        var scanner = new TestManifestScanner(chunks);
         var store = new TestCaptureAnalysisStore();
         using var settings = await CreateSettingsAsync(cloudEnabled: true);
         using var service = new CaptureAnalysisIngestionService(
-            new TestManifestScanner(chunks),
+            scanner,
             store,
             store,
             new TestFingerprintProvider(),
@@ -79,6 +80,7 @@ public sealed class CaptureAnalysisIngestionServiceTests
             finalWindow.Select(static member => member.Chunk.Id));
         Assert.Equal(TimeSpan.FromMinutes(45),
             finalWindow[^1].ContributionRange.End - finalWindow[0].ContributionRange.Start);
+        Assert.Equal(1, scanner.ScanCount);
     }
 
     [Fact]
@@ -336,7 +338,7 @@ public sealed class CaptureAnalysisIngestionServiceTests
     }
 
     [Fact]
-    public async Task ManifestSemanticChangeAfterHashSkipsStaleJob()
+    public async Task ReconcileUsesOneValidatedArchiveSnapshot()
     {
         var original = CreateChunk("chunk-a", minuteOffset: 0);
         var changed = CreateChunk("chunk-a", minuteOffset: 2);
@@ -354,10 +356,9 @@ public sealed class CaptureAnalysisIngestionServiceTests
 
         var result = await service.ReconcileAsync();
 
-        Assert.Equal(
-            new CaptureAnalysisIngestionResult(1, 1, 0, true, 1),
-            result);
-        Assert.Empty(store.Jobs);
+        Assert.Equal(new CaptureAnalysisIngestionResult(1, 1, 1, true), result);
+        Assert.Single(store.Jobs);
+        Assert.Equal(1, scanner.ScanCount);
     }
 
     private static CaptureChunk CreateChunk(
@@ -447,10 +448,13 @@ public sealed class CaptureAnalysisIngestionServiceTests
     private sealed class TestManifestScanner(IReadOnlyList<CaptureChunk> chunks)
         : ICaptureManifestScanner
     {
+        public int ScanCount { get; private set; }
+
         public Task<IReadOnlyList<CaptureChunk>> ScanCommittedAsync(
             CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            ScanCount++;
             return Task.FromResult(chunks);
         }
     }
@@ -506,6 +510,8 @@ public sealed class CaptureAnalysisIngestionServiceTests
         params IReadOnlyList<CaptureChunk>[] scans) : ICaptureManifestScanner
     {
         private int _index;
+
+        public int ScanCount => Volatile.Read(ref _index);
 
         public Task<IReadOnlyList<CaptureChunk>> ScanCommittedAsync(
             CancellationToken cancellationToken = default)

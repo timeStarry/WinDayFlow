@@ -21,6 +21,22 @@ public sealed class AiAnalysisContractsTests
             remote.ChatCompletionsEndpoint.AbsoluteUri);
         Assert.False(remote.IsLoopback);
         Assert.True(loopback.IsLoopback);
+        Assert.Equal(1, remote.MaximumConcurrency);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(AiProviderProfile.MaximumConcurrencyLimit + 1)]
+    public void ProviderProfileRejectsInvalidMaximumConcurrency(int maximumConcurrency)
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() => new AiProviderProfile(
+            Guid.Parse("63dbf49e-33e2-4d94-85a6-b85ce76c3cef"),
+            "Test provider",
+            AiProviderKind.OpenAiCompatible,
+            new Uri("https://api.example.com/v1"),
+            "vision-test-model",
+            TimeSpan.FromSeconds(30),
+            maximumConcurrency));
     }
 
     [Theory]

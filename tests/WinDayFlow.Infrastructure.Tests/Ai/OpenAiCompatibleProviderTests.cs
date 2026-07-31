@@ -55,6 +55,16 @@ public sealed class OpenAiCompatibleProviderTests
         var activityProperties = activitiesSchema
             .GetProperty("items")
             .GetProperty("properties");
+        Assert.Equal(0, activityProperties.GetProperty("start_offset_ms")
+            .GetProperty("minimum").GetInt64());
+        Assert.Equal(60_000, activityProperties.GetProperty("end_offset_ms")
+            .GetProperty("maximum").GetInt64());
+        Assert.Equal(0, activityProperties.GetProperty("confidence")
+            .GetProperty("minimum").GetDouble());
+        Assert.Equal(1, activityProperties.GetProperty("confidence")
+            .GetProperty("maximum").GetDouble());
+        Assert.Equal(160, activityProperties.GetProperty("title")
+            .GetProperty("maxLength").GetInt32());
         Assert.Contains(
             "focused_work",
             activityProperties.GetProperty("category").GetProperty("enum")
@@ -63,6 +73,14 @@ public sealed class OpenAiCompatibleProviderTests
             "focused",
             activityProperties.GetProperty("productivity").GetProperty("enum")
                 .EnumerateArray().Select(static item => item.GetString()));
+        Assert.Equal(
+            ["editor.exe"],
+            activityProperties.GetProperty("application_ids").GetProperty("items")
+                .GetProperty("enum").EnumerateArray().Select(static item => item.GetString()));
+        Assert.Equal(
+            ["frame-1"],
+            activityProperties.GetProperty("evidence_frame_ids").GetProperty("items")
+                .GetProperty("enum").EnumerateArray().Select(static item => item.GetString()));
         var systemPrompt = root.GetProperty("messages")[0].GetProperty("content").GetString();
         Assert.Contains("first start_offset_ms must be 0", systemPrompt, StringComparison.Ordinal);
         Assert.Contains("no time is omitted", systemPrompt, StringComparison.Ordinal);
@@ -79,6 +97,45 @@ public sealed class OpenAiCompatibleProviderTests
         Assert.Equal(AiAnalysisContract.CurrentSchemaVersion, result.SchemaVersion);
         Assert.Equal(15, result.TokenUsage?.TotalTokens);
         Assert.Equal("Implement provider adapter", Assert.Single(result.Activities).Title);
+    }
+
+    [Fact]
+    public async Task ZeroFrameRequestUsesUnknownOnlySchemaAndAcceptsEmptyFrameReferences()
+    {
+        var handler = new RecordingHandler((_, _) => Task.FromResult(
+            SuccessResponse(frameId: null, category: "unknown", productivity: "unknown")));
+        using var provider = CreateProvider(handler);
+
+        var result = await provider.AnalyzeAsync(CreateRequest(includeFrame: false));
+
+        using var body = JsonDocument.Parse(handler.Body!);
+        var activityProperties = body.RootElement
+            .GetProperty("response_format")
+            .GetProperty("json_schema")
+            .GetProperty("schema")
+            .GetProperty("properties")
+            .GetProperty("activities")
+            .GetProperty("items")
+            .GetProperty("properties");
+        Assert.Equal(
+            ["unknown"],
+            activityProperties.GetProperty("category").GetProperty("enum")
+                .EnumerateArray().Select(static item => item.GetString()));
+        Assert.Equal(
+            ["unknown"],
+            activityProperties.GetProperty("productivity").GetProperty("enum")
+                .EnumerateArray().Select(static item => item.GetString()));
+        var evidenceSchema = activityProperties.GetProperty("evidence_frame_ids");
+        Assert.Equal(0, evidenceSchema.GetProperty("minItems").GetInt32());
+        Assert.Equal(0, evidenceSchema.GetProperty("maxItems").GetInt32());
+        Assert.DoesNotContain(
+            body.RootElement.GetProperty("messages")[1].GetProperty("content")
+                .EnumerateArray(),
+            static part => part.GetProperty("type").GetString() == "image_url");
+        var activity = Assert.Single(result.Activities);
+        Assert.Empty(activity.EvidenceFrameIds);
+        Assert.Equal("unknown", activity.Category);
+        Assert.Equal("unknown", activity.Productivity);
     }
 
     [Fact]
@@ -260,6 +317,9 @@ public sealed class OpenAiCompatibleProviderTests
 
         Assert.Equal(AiProviderErrorCode.InvalidResponse, exception.ErrorCode);
         Assert.True(exception.IsRetryable);
+        Assert.Equal(
+            AiProviderResponseFailureKind.ResponseTooLarge,
+            exception.ResponseFailureKind);
     }
 
     [Fact]
@@ -281,6 +341,9 @@ public sealed class OpenAiCompatibleProviderTests
 
         Assert.Equal(AiProviderErrorCode.InvalidResponse, exception.ErrorCode);
         Assert.True(exception.IsRetryable);
+        Assert.Equal(
+            AiProviderResponseFailureKind.ResponseTooLarge,
+            exception.ResponseFailureKind);
     }
 
     [Fact]
@@ -292,6 +355,9 @@ public sealed class OpenAiCompatibleProviderTests
         var unknownProperty = await Assert.ThrowsAsync<AiProviderException>(() =>
             unknownPropertyProvider.AnalyzeAsync(CreateRequest()));
         Assert.Equal(AiProviderErrorCode.InvalidResponse, unknownProperty.ErrorCode);
+        Assert.Equal(
+            AiProviderResponseFailureKind.StructuredContentInvalid,
+            unknownProperty.ResponseFailureKind);
 
         var badReferenceHandler = new RecordingHandler((_, _) => Task.FromResult(
             SuccessResponse(frameId: "not-in-request")));
@@ -299,6 +365,9 @@ public sealed class OpenAiCompatibleProviderTests
         var badReference = await Assert.ThrowsAsync<AiProviderException>(() =>
             badReferenceProvider.AnalyzeAsync(CreateRequest()));
         Assert.Equal(AiProviderErrorCode.InvalidResponse, badReference.ErrorCode);
+        Assert.Equal(
+            AiProviderResponseFailureKind.SemanticValidationFailed,
+            badReference.ResponseFailureKind);
         Assert.DoesNotContain("not-in-request", badReference.Message, StringComparison.Ordinal);
     }
 
@@ -338,7 +407,7 @@ public sealed class OpenAiCompatibleProviderTests
             TimeSpan.FromSeconds(30));
     }
 
-    private static AiAnalysisRequest CreateRequest()
+    private static AiAnalysisRequest CreateRequest(bool includeFrame = true)
     {
         var range = new TimeRange(Start, Start.AddMinutes(1));
         return new AiAnalysisRequest(
@@ -351,17 +420,21 @@ public sealed class OpenAiCompatibleProviderTests
             "prompt-v1",
             AiAnalysisContract.CurrentSchemaVersion,
             "zh-CN",
-            [new AiEvidenceImage(
-                "frame-1",
-                Start,
-                new byte[] { 0xff, 0xd8, 0xff, 0xd9 })],
+            includeFrame
+                ? [new AiEvidenceImage(
+                    "frame-1",
+                    Start,
+                    new byte[] { 0xff, 0xd8, 0xff, 0xd9 })]
+                : [],
             [new AiAnalysisContextSlice(range, "editor.exe", "Editor")]);
     }
 
     private static HttpResponseMessage SuccessResponse(
         bool addUnknownProperty = false,
-        string frameId = "frame-1",
-        string coverage = "complete")
+        string? frameId = "frame-1",
+        string coverage = "complete",
+        string category = "focused_work",
+        string productivity = "focused")
     {
         IReadOnlyList<(long Start, long End)> intervals = coverage switch
         {
@@ -379,12 +452,14 @@ public sealed class OpenAiCompatibleProviderTests
                 ["end_offset_ms"] = interval.End,
                 ["title"] = "Implement provider adapter",
                 ["summary"] = "Build and test the OpenAI-compatible boundary.",
-                ["category"] = "focused_work",
-                ["productivity"] = "focused",
+                ["category"] = category,
+                ["productivity"] = productivity,
                 ["application_ids"] = EditorApplicationIds,
                 ["tags"] = CodingTags,
                 ["confidence"] = 0.9,
-                ["evidence_frame_ids"] = new[] { frameId },
+                ["evidence_frame_ids"] = frameId is null
+                    ? Array.Empty<string>()
+                    : new[] { frameId },
             })
             .ToArray();
         if (addUnknownProperty)

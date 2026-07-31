@@ -8,6 +8,7 @@ public enum StatisticsRange
     SevenDays = 1,
     ThirtyDays = 2,
     All = 3,
+    Custom = 4,
 }
 
 public sealed record StatisticsDurationBucket<T>(T Key, TimeSpan Duration)
@@ -70,5 +71,10 @@ public interface IStatisticsService
 {
     Task<StatisticsSnapshot> GetAsync(
         StatisticsRange range,
+        CancellationToken cancellationToken = default);
+
+    Task<StatisticsSnapshot> GetAsync(
+        DateTimeOffset rangeStart,
+        DateTimeOffset rangeEnd,
         CancellationToken cancellationToken = default);
 }

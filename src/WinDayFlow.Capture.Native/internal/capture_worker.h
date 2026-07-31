@@ -204,6 +204,9 @@ class CaptureWorker final {
     return {true, result};
   }
 
+  void BeginHealthUpdate() noexcept;
+  void EndHealthUpdate() noexcept;
+
   CaptureSafetyCore& safety_;
   CaptureEventQueue& events_;
   CaptureWorkerBackend& backend_;

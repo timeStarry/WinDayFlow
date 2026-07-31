@@ -171,7 +171,6 @@ public sealed class CaptureAnalysisIngestionService : IDisposable
             }
 
             var createdJobCount = 0;
-            var unstableChunkCount = 0;
             var fingerprints = new Dictionary<string, CaptureChunkFingerprint>(
                 persistedChunks.Count,
                 StringComparer.Ordinal);
@@ -254,22 +253,6 @@ public sealed class CaptureAnalysisIngestionService : IDisposable
                     continue;
                 }
 
-                var evidenceStable = true;
-                foreach (var member in originalWindowMembers)
-                {
-                    if (!await EvidenceStillMatchesAsync(member.Chunk, cancellationToken)
-                        .ConfigureAwait(false))
-                    {
-                        evidenceStable = false;
-                        break;
-                    }
-                }
-                if (!evidenceStable)
-                {
-                    unstableChunkCount++;
-                    continue;
-                }
-
                 if (!await RouteStillRunnableAsync(route, cancellationToken)
                     .ConfigureAwait(false))
                 {
@@ -277,8 +260,7 @@ public sealed class CaptureAnalysisIngestionService : IDisposable
                         chunks.Length,
                         createdChunkCount,
                         createdJobCount,
-                        AnalysisReady: false,
-                        unstableChunkCount);
+                        AnalysisReady: false);
                 }
 
                 var pendingJob = CreatePendingJob(chunk, route.Profile, fingerprint);
@@ -299,8 +281,7 @@ public sealed class CaptureAnalysisIngestionService : IDisposable
                 chunks.Length,
                 createdChunkCount,
                 createdJobCount,
-                AnalysisReady: true,
-                unstableChunkCount);
+                AnalysisReady: true);
         }
         finally
         {
@@ -608,34 +589,6 @@ public sealed class CaptureAnalysisIngestionService : IDisposable
         bytes[8] = (byte)((bytes[8] & 0x3f) | 0x80);
         return new Guid(bytes.AsSpan(0, 16), bigEndian: true);
     }
-
-    private async Task<bool> EvidenceStillMatchesAsync(
-        CaptureChunk expected,
-        CancellationToken cancellationToken)
-    {
-        var rescanned = ValidateAndOrder(await _manifestScanner
-            .ScanCommittedAsync(cancellationToken)
-            .ConfigureAwait(false));
-        var current = Array.Find(
-            rescanned,
-            chunk => string.Equals(chunk.Id, expected.Id, StringComparison.Ordinal));
-        return current is not null && HasSameCommittedEvidence(expected, current);
-    }
-
-    private static bool HasSameCommittedEvidence(
-        CaptureChunk expected,
-        CaptureChunk current) =>
-        string.Equals(expected.Id, current.Id, StringComparison.Ordinal)
-        && expected.ManifestPath == current.ManifestPath
-        && expected.Range == current.Range
-        && expected.CapturedFrameCount == current.CapturedFrameCount
-        && expected.FrameCount == current.FrameCount
-        && expected.FrameWidth == current.FrameWidth
-        && expected.FrameHeight == current.FrameHeight
-        && expected.FrameByteCount == current.FrameByteCount
-        && expected.PersistenceGeneration == current.PersistenceGeneration
-        && expected.TargetEpoch == current.TargetEpoch
-        && current.Availability == CaptureChunkAvailability.Available;
 
     private static CaptureChunk[] ValidateAndOrder(
         IReadOnlyList<CaptureChunk> scanned)

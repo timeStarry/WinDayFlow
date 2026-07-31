@@ -59,6 +59,46 @@ public sealed class AiAnalysisResponseValidatorTests
     }
 
     [Fact]
+    public void ValidateAcceptsUnknownActivityWithoutFrameReferencesForZeroFrameRequest()
+    {
+        var request = CreateZeroFrameRequest();
+        var candidate = CreateCandidate() with
+        {
+            Category = "unknown",
+            Productivity = "unknown",
+            EvidenceFrameIds = [],
+        };
+
+        var activity = Assert.Single(AiAnalysisResponseValidator.Validate(
+            request,
+            CreateResponse(candidate)));
+
+        Assert.Equal(ActivityCategory.Unknown, activity.Category);
+        Assert.Equal(ProductivityKind.Unknown, activity.Productivity);
+        Assert.Equal(request.Range, activity.Range);
+        Assert.Equal(request.CaptureChunkId, activity.Evidence.CaptureChunkId);
+    }
+
+    [Theory]
+    [InlineData("focused_work", "unknown")]
+    [InlineData("unknown", "focused")]
+    public void ValidateRejectsInferredClassificationForZeroFrameRequest(
+        string category,
+        string productivity)
+    {
+        var request = CreateZeroFrameRequest();
+        var candidate = CreateCandidate() with
+        {
+            Category = category,
+            Productivity = productivity,
+            EvidenceFrameIds = [],
+        };
+
+        Assert.Throws<AiAnalysisValidationException>(() =>
+            AiAnalysisResponseValidator.Validate(request, CreateResponse(candidate)));
+    }
+
+    [Fact]
     public void ValidateAcceptsContiguousCandidatesThatCoverTheEntireRange()
     {
         var request = Ai.AiAnalysisContractsTests.CreateRequest();
@@ -184,5 +224,22 @@ public sealed class AiAnalysisResponseValidatorTests
             ["coding"],
             Confidence: 0.9,
             ["frame-1"]);
+    }
+
+    private static AiAnalysisRequest CreateZeroFrameRequest()
+    {
+        var populated = Ai.AiAnalysisContractsTests.CreateRequest();
+        return new AiAnalysisRequest(
+            Guid.NewGuid(),
+            Guid.NewGuid(),
+            attempt: 1,
+            populated.EvidenceReferences,
+            populated.Range,
+            populated.PromptVersion,
+            populated.SchemaVersion,
+            populated.Locale,
+            images: [],
+            populated.Context,
+            existingEntries: []);
     }
 }

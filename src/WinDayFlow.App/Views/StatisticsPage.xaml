@@ -8,19 +8,69 @@
     Unloaded="OnUnloaded">
     <ScrollViewer Padding="{StaticResource PagePadding}" HorizontalScrollBarVisibility="Disabled">
         <StackPanel MaxWidth="1040" HorizontalAlignment="Center" Spacing="28">
-            <Grid ColumnSpacing="12">
+            <Grid Height="48" ColumnSpacing="8">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*" />
                     <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
                 </Grid.ColumnDefinitions>
-                <StackPanel Orientation="Horizontal" Spacing="16">
-                    <RadioButton x:Name="TodayRange" Content="今天" GroupName="StatisticsRange" Tag="Today" Click="OnRangeChanged" />
-                    <RadioButton Content="7 天" GroupName="StatisticsRange" Tag="SevenDays" Click="OnRangeChanged" />
-                    <RadioButton Content="30 天" GroupName="StatisticsRange" Tag="ThirtyDays" Click="OnRangeChanged" />
-                    <RadioButton Content="全部" GroupName="StatisticsRange" Tag="All" Click="OnRangeChanged" />
-                </StackPanel>
-                <Button Grid.Column="1" Click="OnRefresh" ToolTipService.ToolTip="刷新统计" AutomationProperties.Name="刷新统计">
-                    <SymbolIcon Symbol="Refresh" />
+                <SelectorBar
+                    x:Name="RangeSelector"
+                    HorizontalAlignment="Left"
+                    SelectionChanged="OnRangeChanged">
+                    <SelectorBarItem x:Name="TodayRange" Text="今天" />
+                    <SelectorBarItem x:Name="SevenDaysRange" Text="7 天" />
+                    <SelectorBarItem x:Name="ThirtyDaysRange" Text="30 天" />
+                    <SelectorBarItem x:Name="AllRange" Text="全部" />
+                    <SelectorBarItem x:Name="CustomRange" Text="自定义" />
+                </SelectorBar>
+                <Button
+                    x:Name="RangeSummaryButton"
+                    Grid.Column="1"
+                    Height="40"
+                    MinWidth="160"
+                    HorizontalAlignment="Right"
+                    ToolTipService.ToolTip="选择日期范围">
+                    <Button.Flyout>
+                        <Flyout Placement="BottomEdgeAlignedRight">
+                            <StackPanel Width="320" Spacing="16">
+                                <TextBlock Style="{StaticResource SectionTitleTextStyle}" Text="自定义日期范围" />
+                                <CalendarDatePicker
+                                    x:Name="StartDatePicker"
+                                    HorizontalAlignment="Stretch"
+                                    Header="开始日期"
+                                    PlaceholderText="选择开始日期" />
+                                <CalendarDatePicker
+                                    x:Name="EndDatePicker"
+                                    HorizontalAlignment="Stretch"
+                                    Header="结束日期"
+                                    PlaceholderText="选择结束日期" />
+                                <Button
+                                    HorizontalAlignment="Right"
+                                    Click="OnApplyDateRange"
+                                    Style="{StaticResource AccentButtonStyle}">
+                                    <StackPanel Orientation="Horizontal" Spacing="8">
+                                        <SymbolIcon Symbol="Accept" />
+                                        <TextBlock Text="应用" />
+                                    </StackPanel>
+                                </Button>
+                            </StackPanel>
+                        </Flyout>
+                    </Button.Flyout>
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <FontIcon FontSize="16" Glyph="&#xE787;" />
+                        <TextBlock x:Name="RangeSummaryText" Text="今天" />
+                    </StackPanel>
+                </Button>
+                <Button
+                    Grid.Column="2"
+                    Width="40"
+                    Height="40"
+                    Padding="0"
+                    Click="OnRefresh"
+                    ToolTipService.ToolTip="刷新统计"
+                    AutomationProperties.Name="刷新统计">
+                    <FontIcon FontSize="16" Glyph="&#xE72C;" />
                 </Button>
             </Grid>
 
@@ -113,10 +163,22 @@
                         <ColumnDefinition Width="*" />
                         <ColumnDefinition Width="*" />
                     </Grid.ColumnDefinitions>
-                    <TextBlock Text="采样  {x:Bind ViewModel.SampledCountText, Mode=OneWay}" />
-                    <TextBlock Grid.Column="1" Text="黑屏过滤  {x:Bind ViewModel.BlackFrameCountText, Mode=OneWay}" />
-                    <TextBlock Grid.Column="2" Text="重复丢弃  {x:Bind ViewModel.DuplicateFrameCountText, Mode=OneWay}" />
-                    <TextBlock Grid.Column="3" Text="保留  {x:Bind ViewModel.RetainedFrameCountText, Mode=OneWay}" />
+                    <StackPanel Orientation="Horizontal" Spacing="6">
+                        <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="采样" />
+                        <TextBlock Text="{x:Bind ViewModel.SampledCountText, Mode=OneWay}" />
+                    </StackPanel>
+                    <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="6">
+                        <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="黑屏过滤" />
+                        <TextBlock Text="{x:Bind ViewModel.BlackFrameCountText, Mode=OneWay}" />
+                    </StackPanel>
+                    <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="6">
+                        <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="重复丢弃" />
+                        <TextBlock Text="{x:Bind ViewModel.DuplicateFrameCountText, Mode=OneWay}" />
+                    </StackPanel>
+                    <StackPanel Grid.Column="3" Orientation="Horizontal" Spacing="6">
+                        <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="保留" />
+                        <TextBlock Text="{x:Bind ViewModel.RetainedFrameCountText, Mode=OneWay}" />
+                    </StackPanel>
                 </Grid>
             </StackPanel>
 
@@ -127,10 +189,38 @@
                 </Grid.ColumnDefinitions>
                 <StackPanel Spacing="12">
                     <TextBlock Style="{StaticResource SectionTitleTextStyle}" Text="分析调用" />
-                    <TextBlock Text="调用次数  {x:Bind ViewModel.InvocationCountText, Mode=OneWay}" />
-                    <TextBlock Text="成功率  {x:Bind ViewModel.InvocationSuccessRateText, Mode=OneWay}" />
-                    <TextBlock Text="平均延迟  {x:Bind ViewModel.AverageLatencyText, Mode=OneWay}" />
-                    <TextBlock Text="Token  {x:Bind ViewModel.TokenUsageText, Mode=OneWay}" />
+                    <Grid ColumnSpacing="16">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="调用次数" />
+                        <TextBlock Grid.Column="1" HorizontalAlignment="Right" Text="{x:Bind ViewModel.InvocationCountText, Mode=OneWay}" TextWrapping="Wrap" />
+                    </Grid>
+                    <Grid ColumnSpacing="16">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="成功率" />
+                        <TextBlock Grid.Column="1" HorizontalAlignment="Right" Text="{x:Bind ViewModel.InvocationSuccessRateText, Mode=OneWay}" TextWrapping="Wrap" />
+                    </Grid>
+                    <Grid ColumnSpacing="16">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="平均延迟" />
+                        <TextBlock Grid.Column="1" HorizontalAlignment="Right" Text="{x:Bind ViewModel.AverageLatencyText, Mode=OneWay}" TextWrapping="Wrap" />
+                    </Grid>
+                    <Grid ColumnSpacing="16">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="Token" />
+                        <TextBlock Grid.Column="1" HorizontalAlignment="Right" Text="{x:Bind ViewModel.TokenUsageText, Mode=OneWay}" TextWrapping="Wrap" />
+                    </Grid>
                 </StackPanel>
                 <StackPanel Grid.Column="1" Spacing="12">
                     <TextBlock Style="{StaticResource SectionTitleTextStyle}" Text="本地存储" />
@@ -148,7 +238,10 @@
                 </StackPanel>
             </Grid>
 
-            <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="首次使用  {x:Bind ViewModel.FirstStartedText, Mode=OneWay}" />
+            <StackPanel Orientation="Horizontal" Spacing="6">
+                <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="首次使用" />
+                <TextBlock Foreground="{ThemeResource TextFillColorSecondaryBrush}" Text="{x:Bind ViewModel.FirstStartedText, Mode=OneWay}" />
+            </StackPanel>
         </StackPanel>
     </ScrollViewer>
 </Page>

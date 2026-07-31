@@ -26,6 +26,7 @@ public sealed class NativeCaptureRuntimeOwner
     private EventHandler<CaptureChunkCommittedEventArgs>? _chunkCommitted;
     private Task? _terminationTask;
     private ulong _lastReconciledStoppedSequence;
+    private int _faultStopScheduled;
     private int _terminating;
 
     public NativeCaptureRuntimeOwner(
@@ -417,6 +418,58 @@ public sealed class NativeCaptureRuntimeOwner
                     signals,
                     cancellationToken))
             .ConfigureAwait(false);
+        LogPrivacyDecision(privacyObservationGeneration, applied);
+        if (applied)
+        {
+            Volatile.Write(ref _latestSignals, signals);
+            ObserveRules(signals);
+        }
+
+        return applied;
+    }
+
+    private void LogPrivacyDecision(long generation, bool applied)
+    {
+        var authorization = _coordinator.LastAppliedAuthorization;
+        var context = authorization.PrivacyContext;
+        _diagnosticLog?.Write(
+            CaptureDiagnosticEvent.PrivacyDecisionEvaluated,
+            new(CaptureDiagnosticField.Generation, generation),
+            new(CaptureDiagnosticField.Accepted, applied ? 1 : 0),
+            new(CaptureDiagnosticField.CaptureAllowed,
+                IsCaptureAuthorized ? 1 : 0),
+            new(CaptureDiagnosticField.TargetState,
+                (long)authorization.Target.State),
+            new(CaptureDiagnosticField.ConsentGranted,
+                (long)context.ConsentGranted),
+            new(CaptureDiagnosticField.SessionUnlocked,
+                (long)context.SessionUnlocked),
+            new(CaptureDiagnosticField.SecureDesktopClear,
+                (long)context.SecureDesktopClear),
+            new(CaptureDiagnosticField.RemoteSession,
+                (long)context.RemoteSessionAllowed),
+            new(CaptureDiagnosticField.PresentationMode,
+                (long)context.PresentationAllowed),
+            new(CaptureDiagnosticField.ApplicationAllowed,
+                (long)context.ApplicationAllowed),
+            new(CaptureDiagnosticField.WindowAllowed,
+                (long)context.WindowAllowed),
+            new(CaptureDiagnosticField.StorageAvailable,
+                (long)context.StorageAvailable));
+    }
+
+    public async Task<bool> TryRebindTargetAsync(
+        long privacyObservationGeneration,
+        NativeCapturePrivacySignals signals,
+        CancellationToken cancellationToken = default)
+    {
+        ThrowIfTerminating();
+        var applied = await InvokeCoordinatorAsync(
+                () => _coordinator.TryRebindTargetAsync(
+                    privacyObservationGeneration,
+                    signals,
+                    cancellationToken))
+            .ConfigureAwait(false);
         if (applied)
         {
             Volatile.Write(ref _latestSignals, signals);
@@ -730,7 +783,14 @@ public sealed class NativeCaptureRuntimeOwner
                 (long)eventArgs.Current.ErrorCode));
         if (eventArgs.Current.State == CaptureState.Faulted)
         {
-            _ = BeginTermination();
+            if (Volatile.Read(ref _terminating) == 0
+                && Interlocked.CompareExchange(
+                    ref _faultStopScheduled,
+                    1,
+                    0) == 0)
+            {
+                _ = Task.Run(StopFaultedBackendAsync);
+            }
             return;
         }
 
@@ -740,6 +800,30 @@ public sealed class NativeCaptureRuntimeOwner
         {
             _ = Task.Run(
                 () => ObserveAutomaticStopReconciliationAsync(eventArgs.Current));
+        }
+    }
+
+    private async Task StopFaultedBackendAsync()
+    {
+        try
+        {
+            await _backend.StopAsync(CancellationToken.None)
+                .ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            System.Diagnostics.Debug.WriteLine(
+                $"Stopping a faulted capture backend failed: {exception.GetType().Name}");
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _faultStopScheduled, 0);
+        }
+
+        if (_backend.CurrentStatus.State == CaptureState.Faulted
+            && Volatile.Read(ref _terminating) == 0)
+        {
+            _ = BeginTermination();
         }
     }
 
@@ -868,7 +952,8 @@ public sealed class NativeCaptureRuntimeOwner
             CaptureReasonCode.DisplayUnavailable or
             CaptureReasonCode.AccessLost or
             CaptureReasonCode.StorageConstrained or
-            CaptureReasonCode.PolicyBlocked;
+            CaptureReasonCode.PolicyBlocked or
+            CaptureReasonCode.BackendFault;
     }
 
     private void OnBackendChunkCommitted(

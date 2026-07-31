@@ -6,6 +6,12 @@
     <Platforms>x64;ARM64</Platforms>
     <Deterministic>true</Deterministic>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/timeStarry/WinDayFlow</PackageProjectUrl>
+    <RepositoryType>git</RepositoryType>
+    <RepositoryUrl>https://github.com/timeStarry/WinDayFlow.git</RepositoryUrl>
+    <VersionPrefix>0.2.0</VersionPrefix>
+    <VersionSuffix>beta.2</VersionSuffix>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <Copyright>Copyright (c) 2026 timeStarry</Copyright>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <NoWarn>$(NoWarn);CS1591</NoWarn>

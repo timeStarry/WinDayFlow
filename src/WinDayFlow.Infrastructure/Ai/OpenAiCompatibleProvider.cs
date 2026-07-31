@@ -131,12 +131,25 @@ public sealed class OpenAiCompatibleProvider
                 throw InvalidResponse(
                     request.CorrelationId,
                     providerRequestId,
+                    AiProviderResponseFailureKind.ResponseTooLarge,
                     exception);
             }
 
             try
             {
-                var responseJson = StrictUtf8.GetString(responseBytes);
+                string responseJson;
+                try
+                {
+                    responseJson = StrictUtf8.GetString(responseBytes);
+                }
+                catch (DecoderFallbackException exception)
+                {
+                    throw InvalidResponse(
+                        request.CorrelationId,
+                        providerRequestId,
+                        AiProviderResponseFailureKind.InvalidEncoding,
+                        exception);
+                }
                 return ParseSuccessfulResponse(
                     responseJson,
                     request,
@@ -147,7 +160,6 @@ public sealed class OpenAiCompatibleProvider
                 throw;
             }
             catch (Exception exception) when (exception is JsonException
-                                               or DecoderFallbackException
                                                or AiAnalysisValidationException
                                                or ArgumentException
                                                or InvalidOperationException
@@ -156,6 +168,9 @@ public sealed class OpenAiCompatibleProvider
                 throw InvalidResponse(
                     request.CorrelationId,
                     providerRequestId,
+                    exception is AiAnalysisValidationException
+                        ? AiProviderResponseFailureKind.SemanticValidationFailed
+                        : AiProviderResponseFailureKind.StructuredContentInvalid,
                     exception);
             }
             finally
@@ -233,12 +248,29 @@ public sealed class OpenAiCompatibleProvider
             }
             catch (InvalidOperationException exception)
             {
-                throw InvalidResponse(request.CorrelationId, providerRequestId, exception);
+                throw InvalidResponse(
+                    request.CorrelationId,
+                    providerRequestId,
+                    AiProviderResponseFailureKind.ResponseTooLarge,
+                    exception);
             }
             try
             {
+                string responseJson;
+                try
+                {
+                    responseJson = StrictUtf8.GetString(responseBytes);
+                }
+                catch (DecoderFallbackException exception)
+                {
+                    throw InvalidResponse(
+                        request.CorrelationId,
+                        providerRequestId,
+                        AiProviderResponseFailureKind.InvalidEncoding,
+                        exception);
+                }
                 return ParsePrivacyResponse(
-                    StrictUtf8.GetString(responseBytes),
+                    responseJson,
                     request,
                     providerRequestId);
             }
@@ -247,12 +279,15 @@ public sealed class OpenAiCompatibleProvider
                 throw;
             }
             catch (Exception exception) when (exception is JsonException
-                                               or DecoderFallbackException
                                                or ArgumentException
                                                or InvalidOperationException
                                                or OverflowException)
             {
-                throw InvalidResponse(request.CorrelationId, providerRequestId, exception);
+                throw InvalidResponse(
+                    request.CorrelationId,
+                    providerRequestId,
+                    AiProviderResponseFailureKind.StructuredContentInvalid,
+                    exception);
             }
             finally
             {
@@ -499,6 +534,10 @@ public sealed class OpenAiCompatibleProvider
                     + "of intervals marked locked. "
                     + "When evidence is insufficient for any interval, still emit an activity for it using "
                     + "the exact category and productivity label 'unknown' so that no time is omitted. "
+                    + (request.Images.Count == 0
+                        ? "This request contains no retained frame images. Every activity must use category "
+                          + "unknown and productivity unknown, and evidence_frame_ids must be empty. "
+                        : "Every activity must reference at least one supplied evidence frame id. ")
                     + "Category must be one of: unknown, focused_work, communication, meeting, planning, "
                     + "research, administration, learning, break, personal. Productivity must be one of: "
                     + "unknown, focused, neutral, distracting, break."),
@@ -510,7 +549,7 @@ public sealed class OpenAiCompatibleProvider
                 new JsonSchemaDefinition(
                     "windayflow_activity_analysis",
                     Strict: true,
-                    CreateResponseSchema())));
+                    CreateResponseSchema(request))));
     }
 
     private static string BuildContextJson(AiAnalysisRequest request)
@@ -545,18 +584,43 @@ public sealed class OpenAiCompatibleProvider
         AiAnalysisRequest request,
         string? headerRequestId)
     {
-        var envelope = JsonSerializer.Deserialize<ChatCompletionResponse>(
-                responseJson,
-                EnvelopeJsonOptions)
-            ?? throw new JsonException("The provider response envelope was empty.");
-        if (envelope.Choices is null || envelope.Choices.Count != 1)
+        ChatCompletionResponse envelope;
+        try
         {
-            throw new JsonException("The provider response must contain exactly one choice.");
+            envelope = JsonSerializer.Deserialize<ChatCompletionResponse>(
+                    responseJson,
+                    EnvelopeJsonOptions)
+                ?? throw new JsonException("The provider response envelope was empty.");
+        }
+        catch (JsonException exception)
+        {
+            throw InvalidResponse(
+                request.CorrelationId,
+                headerRequestId,
+                AiProviderResponseFailureKind.EnvelopeInvalid,
+                exception);
         }
 
-        var choice = envelope.Choices[0]
-            ?? throw new JsonException("The provider response contained a null choice.");
+        if (envelope.Choices is null || envelope.Choices.Count != 1)
+        {
+            throw InvalidResponse(
+                request.CorrelationId,
+                headerRequestId,
+                AiProviderResponseFailureKind.EnvelopeInvalid,
+                new JsonException("The provider response must contain exactly one choice."));
+        }
+
         var providerRequestId = SanitizeProviderRequestId(envelope.Id) ?? headerRequestId;
+        var choice = envelope.Choices[0];
+        if (choice is null)
+        {
+            throw InvalidResponse(
+                request.CorrelationId,
+                providerRequestId,
+                AiProviderResponseFailureKind.EnvelopeInvalid,
+                new JsonException("The provider response contained a null choice."));
+        }
+
         if (string.Equals(choice.FinishReason, "content_filter", StringComparison.Ordinal)
             || !string.IsNullOrWhiteSpace(choice.Message?.Refusal))
         {
@@ -570,48 +634,89 @@ public sealed class OpenAiCompatibleProvider
 
         if (!string.Equals(choice.FinishReason, "stop", StringComparison.Ordinal))
         {
-            throw new JsonException("The provider did not complete the structured response.");
+            throw InvalidResponse(
+                request.CorrelationId,
+                providerRequestId,
+                AiProviderResponseFailureKind.CompletionIncomplete,
+                new JsonException("The provider did not complete the structured response."));
         }
 
         var structuredJson = choice.Message?.Content;
         if (string.IsNullOrWhiteSpace(structuredJson))
         {
-            throw new JsonException("The provider returned no structured content.");
+            throw InvalidResponse(
+                request.CorrelationId,
+                providerRequestId,
+                AiProviderResponseFailureKind.CompletionIncomplete,
+                new JsonException("The provider returned no structured content."));
         }
 
-        var structured = JsonSerializer.Deserialize<StructuredAnalysisResponse>(
-                structuredJson,
-                StructuredContentJsonOptions)
-            ?? throw new JsonException("The structured provider response was empty.");
-        if (structured.Activities is null)
+        AiAnalysisResponse response;
+        try
         {
-            throw new JsonException("The structured provider response omitted activities.");
+            var structured = JsonSerializer.Deserialize<StructuredAnalysisResponse>(
+                    structuredJson,
+                    StructuredContentJsonOptions)
+                ?? throw new JsonException("The structured provider response was empty.");
+            if (structured.Activities is null)
+            {
+                throw new JsonException("The structured provider response omitted activities.");
+            }
+
+            var candidates = structured.Activities.Select(static activity =>
+                new AiActivityCandidate(
+                    activity.StartOffsetMilliseconds,
+                    activity.EndOffsetMilliseconds,
+                    activity.Title ?? throw new JsonException("An activity title was null."),
+                    activity.Summary ?? throw new JsonException("An activity summary was null."),
+                    activity.Category ?? throw new JsonException("An activity category was null."),
+                    activity.Productivity
+                        ?? throw new JsonException("An activity productivity label was null."),
+                    activity.ApplicationIds
+                        ?? throw new JsonException("Activity application identifiers were null."),
+                    activity.Tags ?? throw new JsonException("Activity tags were null."),
+                    activity.Confidence,
+                    activity.EvidenceFrameIds
+                        ?? throw new JsonException(
+                            "Activity evidence frame identifiers were null.")))
+                .ToArray();
+            var tokenUsage = CreateTokenUsage(envelope.Usage);
+            var model = NormalizeResponseModel(envelope.Model) ?? Profile.Model;
+            response = new AiAnalysisResponse(
+                providerRequestId,
+                model,
+                structured.SchemaVersion
+                    ?? throw new JsonException("The structured response schema version was null."),
+                candidates,
+                tokenUsage);
+        }
+        catch (Exception exception) when (exception is JsonException
+                                           or ArgumentException
+                                           or InvalidOperationException
+                                           or OverflowException)
+        {
+            throw InvalidResponse(
+                request.CorrelationId,
+                providerRequestId,
+                AiProviderResponseFailureKind.StructuredContentInvalid,
+                exception);
         }
 
-        var candidates = structured.Activities.Select(static activity =>
-            new AiActivityCandidate(
-                activity.StartOffsetMilliseconds,
-                activity.EndOffsetMilliseconds,
-                activity.Title ?? throw new JsonException("An activity title was null."),
-                activity.Summary ?? throw new JsonException("An activity summary was null."),
-                activity.Category ?? throw new JsonException("An activity category was null."),
-                activity.Productivity ?? throw new JsonException("An activity productivity label was null."),
-                activity.ApplicationIds ?? throw new JsonException("Activity application identifiers were null."),
-                activity.Tags ?? throw new JsonException("Activity tags were null."),
-                activity.Confidence,
-                activity.EvidenceFrameIds ?? throw new JsonException("Activity evidence frame identifiers were null.")))
-            .ToArray();
-        var tokenUsage = CreateTokenUsage(envelope.Usage);
-        var model = NormalizeResponseModel(envelope.Model) ?? Profile.Model;
-        var response = new AiAnalysisResponse(
-            providerRequestId,
-            model,
-            structured.SchemaVersion
-                ?? throw new JsonException("The structured response schema version was null."),
-            candidates,
-            tokenUsage);
+        try
+        {
+            _ = AiAnalysisResponseValidator.Validate(request, response);
+        }
+        catch (Exception exception) when (exception is AiAnalysisValidationException
+                                           or ArgumentException
+                                           or OverflowException)
+        {
+            throw InvalidResponse(
+                request.CorrelationId,
+                providerRequestId,
+                AiProviderResponseFailureKind.SemanticValidationFailed,
+                exception);
+        }
 
-        _ = AiAnalysisResponseValidator.Validate(request, response);
         return response;
     }
 
@@ -734,8 +839,11 @@ public sealed class OpenAiCompatibleProvider
         }
     }
 
-    private static Dictionary<string, object?> CreateResponseSchema()
+    private static Dictionary<string, object?> CreateResponseSchema(
+        AiAnalysisRequest request)
     {
+        var rangeDurationMilliseconds = checked(
+            (long)request.Range.Duration.TotalMilliseconds);
         return new Dictionary<string, object?>
         {
             ["type"] = "object",
@@ -753,7 +861,9 @@ public sealed class OpenAiCompatibleProvider
                     ["type"] = "array",
                     ["minItems"] = 1,
                     ["maxItems"] = AiAnalysisContract.MaximumActivities,
-                    ["items"] = CreateActivitySchema(),
+                    ["items"] = CreateActivitySchema(
+                        request,
+                        rangeDurationMilliseconds),
                 },
             },
         };
@@ -813,8 +923,20 @@ public sealed class OpenAiCompatibleProvider
         };
     }
 
-    private static Dictionary<string, object?> CreateActivitySchema()
+    private static Dictionary<string, object?> CreateActivitySchema(
+        AiAnalysisRequest request,
+        long rangeDurationMilliseconds)
     {
+        var applicationIds = request.Context
+            .Select(static slice => slice.ApplicationId)
+            .Distinct(StringComparer.Ordinal)
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+        var frameIds = request.Images
+            .Select(static image => image.FrameId)
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+        var hasFrameEvidence = frameIds.Length != 0;
         return new Dictionary<string, object?>
         {
             ["type"] = "object",
@@ -834,52 +956,88 @@ public sealed class OpenAiCompatibleProvider
             },
             ["properties"] = new Dictionary<string, object?>
             {
-                ["start_offset_ms"] = IntegerSchema(),
-                ["end_offset_ms"] = IntegerSchema(),
-                ["title"] = StringSchema(),
-                ["summary"] = StringSchema(),
-                ["category"] = EnumStringSchema(
-                    "unknown",
-                    "focused_work",
-                    "communication",
-                    "meeting",
-                    "planning",
-                    "research",
-                    "administration",
-                    "learning",
-                    "break",
-                    "personal"),
-                ["productivity"] = EnumStringSchema(
-                    "unknown",
-                    "focused",
-                    "neutral",
-                    "distracting",
-                    "break"),
-                ["application_ids"] = StringArraySchema(),
-                ["tags"] = StringArraySchema(),
+                ["start_offset_ms"] = IntegerSchema(0, rangeDurationMilliseconds),
+                ["end_offset_ms"] = IntegerSchema(0, rangeDurationMilliseconds),
+                ["title"] = StringSchema(
+                    minimumLength: 1,
+                    AiAnalysisContract.MaximumTitleLength),
+                ["summary"] = StringSchema(
+                    minimumLength: 0,
+                    AiAnalysisContract.MaximumSummaryLength),
+                ["category"] = hasFrameEvidence
+                    ? EnumStringSchema(
+                        "unknown",
+                        "focused_work",
+                        "communication",
+                        "meeting",
+                        "planning",
+                        "research",
+                        "administration",
+                        "learning",
+                        "break",
+                        "personal")
+                    : EnumStringSchema("unknown"),
+                ["productivity"] = hasFrameEvidence
+                    ? EnumStringSchema(
+                        "unknown",
+                        "focused",
+                        "neutral",
+                        "distracting",
+                        "break")
+                    : EnumStringSchema("unknown"),
+                ["application_ids"] = StringArraySchema(
+                    minimumItems: 0,
+                    maximumItems: Math.Min(
+                        AiAnalysisContract.MaximumApplications,
+                        applicationIds.Length),
+                    AiAnalysisContract.MaximumApplicationIdLength,
+                    applicationIds),
+                ["tags"] = StringArraySchema(
+                    minimumItems: 0,
+                    AiAnalysisContract.MaximumTags,
+                    AiAnalysisContract.MaximumTagLength),
                 ["confidence"] = new Dictionary<string, object?>
                 {
                     ["type"] = "number",
+                    ["minimum"] = 0,
+                    ["maximum"] = 1,
                 },
-                ["evidence_frame_ids"] = StringArraySchema(),
+                ["evidence_frame_ids"] = StringArraySchema(
+                    minimumItems: hasFrameEvidence ? 1 : 0,
+                    maximumItems: frameIds.Length,
+                    AiAnalysisContract.MaximumFrameIdLength,
+                    frameIds),
             },
         };
     }
 
-    private static Dictionary<string, object?> IntegerSchema()
+    private static Dictionary<string, object?> IntegerSchema(
+        long minimum,
+        long maximum)
     {
         return new Dictionary<string, object?>
         {
             ["type"] = "integer",
+            ["minimum"] = minimum,
+            ["maximum"] = maximum,
         };
     }
 
-    private static Dictionary<string, object?> StringSchema()
+    private static Dictionary<string, object?> StringSchema(
+        int minimumLength = 0,
+        int? maximumLength = null)
     {
-        return new Dictionary<string, object?>
+        var schema = new Dictionary<string, object?>
         {
             ["type"] = "string",
+            ["minLength"] = minimumLength,
         };
+        if (maximumLength is { } boundedMaximumLength)
+        {
+            schema["maxLength"] = boundedMaximumLength;
+        }
+
+        return schema;
     }
 
     private static Dictionary<string, object?> EnumStringSchema(params string[] values)
@@ -891,12 +1049,27 @@ public sealed class OpenAiCompatibleProvider
         };
     }
 
-    private static Dictionary<string, object?> StringArraySchema()
+    private static Dictionary<string, object?> StringArraySchema(
+        int minimumItems,
+        int maximumItems,
+        int maximumItemLength,
+        IReadOnlyList<string>? allowedValues = null)
     {
+        var itemSchema = StringSchema(
+            minimumLength: 1,
+            maximumItemLength);
+        if (allowedValues is { Count: > 0 })
+        {
+            itemSchema["enum"] = allowedValues;
+        }
+
         return new Dictionary<string, object?>
         {
             ["type"] = "array",
-            ["items"] = StringSchema(),
+            ["minItems"] = minimumItems,
+            ["maxItems"] = maximumItems,
+            ["uniqueItems"] = true,
+            ["items"] = itemSchema,
         };
     }
 
@@ -971,6 +1144,7 @@ public sealed class OpenAiCompatibleProvider
     private static AiProviderException InvalidResponse(
         Guid correlationId,
         string? providerRequestId,
+        AiProviderResponseFailureKind responseFailureKind,
         Exception innerException)
     {
         return new AiProviderException(
@@ -979,7 +1153,8 @@ public sealed class OpenAiCompatibleProvider
             correlationId,
             isRetryable: true,
             providerRequestId: providerRequestId,
-            innerException: innerException);
+            innerException: innerException,
+            responseFailureKind: responseFailureKind);
     }
 
     private static string? NormalizeApiKey(string? apiKey)

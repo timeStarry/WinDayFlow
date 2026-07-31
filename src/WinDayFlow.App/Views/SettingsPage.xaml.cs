@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Globalization;
+using System.Reflection;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
@@ -12,7 +13,7 @@ namespace WinDayFlow.App.Views;
 
 public sealed partial class SettingsPage : Page
 {
-    private const double StackedLayoutMaximumWidth = 620;
+    private const double StackedLayoutMaximumWidth = 720;
 
     private bool _dialogOpen;
     private ExclusionRuleItemViewModel? _editingExclusionRule;
@@ -31,6 +32,7 @@ public sealed partial class SettingsPage : Page
         RoutingViewModel = App.GetService<AiRoutingSettingsViewModel>();
         InitializeComponent();
         DataFolderTextBox.Text = App.DataDirectoryPath;
+        AppVersionTextBlock.Text = $"版本 {GetApplicationDisplayVersion()}";
         SettingsNavigation.SelectedItem = RecordingSettingsNavigationItem;
         ShowSettingsSection("capture");
         Loaded += OnLoaded;
@@ -302,6 +304,7 @@ public sealed partial class SettingsPage : Page
         ProviderEditorEndpointTextBox.Text = string.Empty;
         ProviderEditorModelTextBox.Text = string.Empty;
         ProviderEditorTimeoutNumberBox.Value = 60;
+        ProviderEditorConcurrencyNumberBox.Value = 1;
         ProviderEditorApiKeyPasswordBox.Password = string.Empty;
         ProviderEditorClearApiKeyCheckBox.IsChecked = false;
         ProviderEditorClearApiKeyCheckBox.Visibility = Visibility.Collapsed;
@@ -313,7 +316,7 @@ public sealed partial class SettingsPage : Page
     {
         if (_dialogOpen
             || !RoutingViewModel.CanMutate
-            || (sender as FrameworkElement)?.DataContext
+            || ResolveProviderProfile(sender)
                 is not AiProviderProfileItemViewModel profile)
         {
             return;
@@ -326,6 +329,7 @@ public sealed partial class SettingsPage : Page
         ProviderEditorEndpointTextBox.Text = profile.BaseEndpoint;
         ProviderEditorModelTextBox.Text = profile.Model;
         ProviderEditorTimeoutNumberBox.Value = profile.RequestTimeoutSeconds;
+        ProviderEditorConcurrencyNumberBox.Value = profile.MaximumConcurrency;
         ProviderEditorApiKeyPasswordBox.Password = string.Empty;
         ProviderEditorClearApiKeyCheckBox.IsChecked = false;
         ProviderEditorClearApiKeyCheckBox.Visibility = Visibility.Visible;
@@ -337,7 +341,7 @@ public sealed partial class SettingsPage : Page
     {
         if (_dialogOpen
             || !RoutingViewModel.CanMutate
-            || (sender as FrameworkElement)?.DataContext
+            || ResolveProviderProfile(sender)
                 is not AiProviderProfileItemViewModel profile)
         {
             return;
@@ -362,7 +366,7 @@ public sealed partial class SettingsPage : Page
 
     private async void OnValidateProviderPrivacy(object sender, RoutedEventArgs e)
     {
-        if ((sender as FrameworkElement)?.DataContext
+        if (ResolveProviderProfile(sender)
             is AiProviderProfileItemViewModel profile)
         {
             _ = await RoutingViewModel.ValidateStageAsync(
@@ -374,7 +378,7 @@ public sealed partial class SettingsPage : Page
 
     private async void OnValidateProviderTimeline(object sender, RoutedEventArgs e)
     {
-        if ((sender as FrameworkElement)?.DataContext
+        if (ResolveProviderProfile(sender)
             is AiProviderProfileItemViewModel profile)
         {
             _ = await RoutingViewModel.ValidateStageAsync(
@@ -430,6 +434,13 @@ public sealed partial class SettingsPage : Page
                 return;
             }
 
+            if (!TryReadProviderEditorConcurrency(out var maximumConcurrency))
+            {
+                args.Cancel = true;
+                ShowProviderEditorError("最大并发数必须是 1 到 16 之间的整数。");
+                return;
+            }
+
             ProviderEditorProgressBar.Visibility = Visibility.Visible;
             sender.IsPrimaryButtonEnabled = false;
             var saved = await RoutingViewModel.SaveProfileAsync(
@@ -439,6 +450,7 @@ public sealed partial class SettingsPage : Page
                 ProviderEditorEndpointTextBox.Text.Trim(),
                 ProviderEditorModelTextBox.Text.Trim(),
                 timeoutSeconds,
+                maximumConcurrency,
                 ProviderEditorApiKeyPasswordBox.Password,
                 ProviderEditorClearApiKeyCheckBox.IsChecked == true);
             if (!saved)
@@ -462,6 +474,14 @@ public sealed partial class SettingsPage : Page
         var value = ProviderEditorTimeoutNumberBox.Value;
         timeoutSeconds = double.IsFinite(value) ? checked((int)value) : 0;
         return value == timeoutSeconds && timeoutSeconds is >= 10 and <= 600;
+    }
+
+    private bool TryReadProviderEditorConcurrency(out int maximumConcurrency)
+    {
+        var value = ProviderEditorConcurrencyNumberBox.Value;
+        maximumConcurrency = double.IsFinite(value) ? checked((int)value) : 0;
+        return value == maximumConcurrency
+            && maximumConcurrency is >= 1 and <= AiProviderProfile.MaximumConcurrencyLimit;
     }
 
     private void ShowProviderEditorError(string message)
@@ -1232,7 +1252,10 @@ public sealed partial class SettingsPage : Page
             {
                 matchingItem = new ComboBoxItem
                 {
-                    Content = $"{ViewModel.EvidenceRetentionDays} 天",
+                    Content = ViewModel.EvidenceRetentionDays
+                        == EvidenceSettings.UnlimitedRetentionDays
+                            ? "不自动清理"
+                            : $"{ViewModel.EvidenceRetentionDays} 天",
                     Tag = retentionTag,
                 };
                 RetentionPicker.Items.Add(matchingItem);
@@ -1340,11 +1363,24 @@ public sealed partial class SettingsPage : Page
             CaptureIntervalSettingLayout,
             CaptureIntervalPicker,
             useStackedLayout);
-        UpdateSettingLayout(StorageSettingLayout, DataFolderTextBox, useStackedLayout);
+        UpdateSettingLayout(
+            StorageSettingLayout,
+            DataFolderControlLayout,
+            useStackedLayout);
         UpdateSettingLayout(RetentionSettingLayout, RetentionPicker, useStackedLayout);
+        UpdateSettingLayout(PrivacyHeaderLayout, PrivacyToggle, useStackedLayout);
+        UpdateSettingLayout(
+            PrivacyPolicyLayout,
+            PrivacyOnErrorPicker,
+            useStackedLayout);
+        UpdateSettingLayout(TimelineHeaderLayout, TimelineToggle, useStackedLayout);
         UpdateSettingLayout(
             ExclusionRulesHeaderLayout,
             AddExclusionRuleButton,
+            useStackedLayout);
+        UpdateSettingLayout(
+            ProviderHeaderLayout,
+            AddProviderButton,
             useStackedLayout);
 
         ConsentActionPanel.Orientation = useStackedLayout
@@ -1450,9 +1486,41 @@ public sealed partial class SettingsPage : Page
         Grid.SetColumnSpan(control, useStackedLayout ? 2 : 1);
         control.HorizontalAlignment = useStackedLayout
             ? HorizontalAlignment.Stretch
-            : control is ComboBox or TextBox
+            : control is ComboBox or TextBox or Grid
                 ? HorizontalAlignment.Stretch
                 : HorizontalAlignment.Right;
+    }
+
+    private AiProviderProfileItemViewModel? ResolveProviderProfile(object sender)
+    {
+        if (sender is not FrameworkElement element)
+        {
+            return null;
+        }
+
+        if (element.DataContext is AiProviderProfileItemViewModel profile)
+        {
+            return profile;
+        }
+
+        return element.Tag is Guid profileId
+            ? RoutingViewModel.Profiles.FirstOrDefault(
+                candidate => candidate.Id == profileId)
+            : null;
+    }
+
+    private static string GetApplicationDisplayVersion()
+    {
+        var assembly = typeof(SettingsPage).Assembly;
+        var informationalVersion = assembly
+            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()
+            ?.InformationalVersion;
+        if (!string.IsNullOrWhiteSpace(informationalVersion))
+        {
+            return informationalVersion.Split('+', 2)[0];
+        }
+
+        return assembly.GetName().Version?.ToString(3) ?? "0.0.0";
     }
 
     private static TextBlock CreateDialogText(string text)

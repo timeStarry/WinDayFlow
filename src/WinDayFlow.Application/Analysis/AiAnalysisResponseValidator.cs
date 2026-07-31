@@ -18,12 +18,6 @@ public sealed class AiAnalysisValidationException : Exception
 
 public static class AiAnalysisResponseValidator
 {
-    private const int MaximumTitleLength = 160;
-    private const int MaximumSummaryLength = 2_000;
-    private const int MaximumTags = 12;
-    private const int MaximumTagLength = 64;
-    private const int MaximumApplications = 16;
-
     public static IReadOnlyList<Activity> Validate(
         AiAnalysisRequest request,
         AiAnalysisResponse response)
@@ -58,6 +52,7 @@ public static class AiAnalysisResponseValidator
         var frameIds = request.Images
             .Select(static image => image.FrameId)
             .ToHashSet(StringComparer.Ordinal);
+        var hasFrameEvidence = frameIds.Count != 0;
         var contextByApplication = request.Context
             .GroupBy(static slice => slice.ApplicationId, StringComparer.Ordinal)
             .ToDictionary(static group => group.Key, StringComparer.Ordinal);
@@ -72,7 +67,8 @@ public static class AiAnalysisResponseValidator
                 index,
                 rangeDurationMilliseconds,
                 previousEndOffset,
-                frameIds);
+                frameIds,
+                hasFrameEvidence);
 
             TimeRange range;
             try
@@ -125,7 +121,8 @@ public static class AiAnalysisResponseValidator
         int index,
         long rangeDurationMilliseconds,
         long expectedStartOffset,
-        HashSet<string> frameIds)
+        HashSet<string> frameIds,
+        bool hasFrameEvidence)
     {
         if (candidate.StartOffsetMilliseconds < 0
             || candidate.EndOffsetMilliseconds <= candidate.StartOffsetMilliseconds
@@ -141,8 +138,18 @@ public static class AiAnalysisResponseValidator
                 $"Activity candidate {index} does not continuously cover the analyzed range.");
         }
 
-        ValidateText(candidate.Title, MaximumTitleLength, allowEmpty: false, index, "title");
-        ValidateText(candidate.Summary, MaximumSummaryLength, allowEmpty: true, index, "summary");
+        ValidateText(
+            candidate.Title,
+            AiAnalysisContract.MaximumTitleLength,
+            allowEmpty: false,
+            index,
+            "title");
+        ValidateText(
+            candidate.Summary,
+            AiAnalysisContract.MaximumSummaryLength,
+            allowEmpty: true,
+            index,
+            "summary");
         ValidateText(candidate.Category, 64, allowEmpty: false, index, "category");
         ValidateText(candidate.Productivity, 64, allowEmpty: false, index, "productivity");
         if (!TryMapCategory(candidate.Category, out _))
@@ -155,6 +162,13 @@ public static class AiAnalysisResponseValidator
             throw new AiAnalysisValidationException(
                 $"Activity candidate {index} contains an unsupported productivity label.");
         }
+        if (!hasFrameEvidence
+            && (!string.Equals(candidate.Category, "unknown", StringComparison.Ordinal)
+                || !string.Equals(candidate.Productivity, "unknown", StringComparison.Ordinal)))
+        {
+            throw new AiAnalysisValidationException(
+                $"Activity candidate {index} cannot infer classification without frame evidence.");
+        }
         if (candidate.Confidence is < 0 or > 1 || double.IsNaN(candidate.Confidence))
         {
             throw new AiAnalysisValidationException(
@@ -163,23 +177,23 @@ public static class AiAnalysisResponseValidator
 
         ValidateStringSet(
             candidate.Tags,
-            MaximumTags,
-            MaximumTagLength,
+            AiAnalysisContract.MaximumTags,
+            AiAnalysisContract.MaximumTagLength,
             allowEmpty: true,
             index,
             "tags");
         ValidateStringSet(
             candidate.ApplicationIds,
-            MaximumApplications,
-            256,
+            AiAnalysisContract.MaximumApplications,
+            AiAnalysisContract.MaximumApplicationIdLength,
             allowEmpty: true,
             index,
             "application identifiers");
         ValidateStringSet(
             candidate.EvidenceFrameIds,
             AiAnalysisContract.MaximumImages,
-            128,
-            allowEmpty: false,
+            AiAnalysisContract.MaximumFrameIdLength,
+            allowEmpty: !hasFrameEvidence,
             index,
             "evidence frame identifiers");
         if (candidate.EvidenceFrameIds.Any(frameId => !frameIds.Contains(frameId)))

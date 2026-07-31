@@ -319,14 +319,36 @@ CaptureWorkerRunResult CaptureWorker::last_result() const {
 }
 
 CaptureWorkerHealthSnapshot CaptureWorker::health_snapshot() const noexcept {
-  return CaptureWorkerHealthSnapshot{
-      last_successful_sample_unix_ms_.load(std::memory_order_acquire),
-      last_retained_frame_unix_ms_.load(std::memory_order_acquire),
-      sampled_frame_count_.load(std::memory_order_acquire),
-      black_frame_count_.load(std::memory_order_acquire),
-      duplicate_frame_count_.load(std::memory_order_acquire),
-      retained_frame_count_.load(std::memory_order_acquire),
-      health_revision_.load(std::memory_order_acquire)};
+  for (;;) {
+    const uint64_t revision_before =
+        health_revision_.load(std::memory_order_acquire);
+    if ((revision_before & 1U) != 0) {
+      std::this_thread::yield();
+      continue;
+    }
+
+    CaptureWorkerHealthSnapshot snapshot{
+        last_successful_sample_unix_ms_.load(std::memory_order_acquire),
+        last_retained_frame_unix_ms_.load(std::memory_order_acquire),
+        sampled_frame_count_.load(std::memory_order_acquire),
+        black_frame_count_.load(std::memory_order_acquire),
+        duplicate_frame_count_.load(std::memory_order_acquire),
+        retained_frame_count_.load(std::memory_order_acquire),
+        revision_before};
+    const uint64_t revision_after =
+        health_revision_.load(std::memory_order_acquire);
+    if (revision_before == revision_after) {
+      return snapshot;
+    }
+  }
+}
+
+void CaptureWorker::BeginHealthUpdate() noexcept {
+  health_revision_.fetch_add(1, std::memory_order_acq_rel);
+}
+
+void CaptureWorker::EndHealthUpdate() noexcept {
+  health_revision_.fetch_add(1, std::memory_order_release);
 }
 
 bool CaptureWorker::RetryPendingCompensation(uint32_t attempts) noexcept {
@@ -543,6 +565,11 @@ void CaptureWorker::Run(CaptureRuntimeOwner& runtime,
       const uint32_t actual_retained =
           static_cast<uint32_t>(manifest.frames.size());
       const uint32_t actual_duplicate = manifest.duplicate_frame_count;
+      const bool health_changed = actual_retained != chunk.retained_counted ||
+                                  actual_duplicate != chunk.duplicate_counted;
+      if (health_changed) {
+        BeginHealthUpdate();
+      }
       if (actual_retained > chunk.retained_counted) {
         retained_frame_count_.fetch_add(
             actual_retained - chunk.retained_counted,
@@ -555,9 +582,8 @@ void CaptureWorker::Run(CaptureRuntimeOwner& runtime,
             chunk.duplicate_counted - actual_duplicate,
             std::memory_order_acq_rel);
       }
-      if (actual_retained != chunk.retained_counted ||
-          actual_duplicate != chunk.duplicate_counted) {
-        health_revision_.fetch_add(1, std::memory_order_acq_rel);
+      if (health_changed) {
+        EndHealthUpdate();
       }
 
       std::string artifact_identifier;
@@ -997,10 +1023,11 @@ void CaptureWorker::Run(CaptureRuntimeOwner& runtime,
 
       const int64_t frame_steady_ms = backend_.SteadyNowMilliseconds();
       const int64_t sample_unix_ms = backend_.UnixNowMilliseconds();
+      BeginHealthUpdate();
       last_successful_sample_unix_ms_.store(sample_unix_ms,
                                             std::memory_order_release);
       sampled_frame_count_.fetch_add(1, std::memory_order_acq_rel);
-      health_revision_.fetch_add(1, std::memory_order_acq_rel);
+      EndHealthUpdate();
 
       if (chunk.writer_started && (chunk.width != transformed_frame.width ||
                                    chunk.height != transformed_frame.height)) {
@@ -1140,8 +1167,9 @@ void CaptureWorker::Run(CaptureRuntimeOwner& runtime,
       // Reject only compositor-empty frames. The context chunk remains so the
       // sampled interval and filter count are not lost.
       if (!HasMeaningfulVisualContent(transformed_frame)) {
+        BeginHealthUpdate();
         black_frame_count_.fetch_add(1, std::memory_order_acq_rel);
-        health_revision_.fetch_add(1, std::memory_order_acq_rel);
+        EndHealthUpdate();
         ++chunk.black_count;
         SecureClear(&transformed_frame);
         consecutive_topology_retries = 0;
@@ -1175,6 +1203,7 @@ void CaptureWorker::Run(CaptureRuntimeOwner& runtime,
         return;
       }
 
+      BeginHealthUpdate();
       if (disposition == CaptureFrameWriteDisposition::kRetained) {
         retained_frame_count_.fetch_add(1, std::memory_order_acq_rel);
         last_retained_frame_unix_ms_.store(sample_unix_ms,
@@ -1184,7 +1213,7 @@ void CaptureWorker::Run(CaptureRuntimeOwner& runtime,
         duplicate_frame_count_.fetch_add(1, std::memory_order_acq_rel);
         ++chunk.duplicate_counted;
       }
-      health_revision_.fetch_add(1, std::memory_order_acq_rel);
+      EndHealthUpdate();
 
       if (chunk.frame_count < std::numeric_limits<uint32_t>::max()) {
         ++chunk.frame_count;

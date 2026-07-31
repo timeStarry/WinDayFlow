@@ -258,6 +258,50 @@ public sealed class NativeCapturePrivacyCoordinatorTests
     }
 
     [Fact]
+    public async Task VerifiedDisplayRebindKeepsPrivacyGenerationAuthorized()
+    {
+        var target = new TestPrivacyTarget();
+        using var coordinator = new NativeCapturePrivacyCoordinator(
+            target,
+            NativeCapturePrivacyContext.FailClosed(runtimePolicyRevision: 1));
+        await CommitAsync(
+            coordinator,
+            AppSettings.Default,
+            CreateEnabledSettings());
+        var generation = coordinator.InvalidatePrivacyObservation();
+        await coordinator.ApplyPrivacyInvalidationAsync(generation);
+        var initialSignals = CreateAllowedSignals();
+        Assert.True(await coordinator.TryUpdateSignalsAsync(
+            generation,
+            initialSignals));
+        var invalidationCount = target.InvalidateCount;
+        target.Reset();
+        var reboundSignals = CopySignals(
+            initialSignals,
+            target: NativeCaptureTargetIdentity.Present(
+                windowHandle: 0x2345,
+                processId: 84,
+                processCreationTime100ns: 200,
+                targetEpoch: 2,
+                displayMonitorHandle: 0x6002,
+                displayDeviceKey: @"\\.\DISPLAY2"));
+
+        var applied = await coordinator.TryRebindTargetAsync(
+            generation,
+            reboundSignals);
+
+        Assert.True(applied);
+        Assert.True(coordinator.IsCaptureAuthorized);
+        Assert.Equal(generation, coordinator.PrivacyObservationGeneration);
+        Assert.Equal(invalidationCount, target.InvalidateCount);
+        var authorization = Assert.Single(target.Authorizations);
+        Assert.Equal(
+            NativeCaptureAuthorizationScope.DisplayWide,
+            authorization.Target.Scope);
+        Assert.Equal<ulong>(0x6002, authorization.Target.DisplayMonitorHandle);
+        Assert.Equal(@"\\.\DISPLAY2", authorization.Target.DisplayDeviceKey);
+    }
+    [Fact]
     public async Task MissingCaptureTargetIsATemporaryFailClosedState()
     {
         foreach (var missingTarget in new[]

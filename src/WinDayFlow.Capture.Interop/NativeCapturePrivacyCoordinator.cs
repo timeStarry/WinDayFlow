@@ -505,6 +505,79 @@ public sealed class NativeCapturePrivacyCoordinator
             .ConfigureAwait(false);
     }
 
+    public async Task<bool> TryRebindTargetAsync(
+        long privacyObservationGeneration,
+        NativeCapturePrivacySignals signals,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(signals);
+        ValidatePrivacyObservationGeneration(privacyObservationGeneration);
+        cancellationToken.ThrowIfCancellationRequested();
+        ThrowIfDisposed();
+
+        if (!IsPrivacyObservationGenerationCurrent(privacyObservationGeneration))
+        {
+            return false;
+        }
+
+        await _applyGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+        try
+        {
+            ThrowIfUsable();
+            lock (_disposeSync)
+            {
+                var current = Volatile.Read(ref _signals);
+                if (_disposed
+                    || privacyObservationGeneration != PrivacyObservationGeneration
+                    || _privacyObservationPhase != PrivacyObservationPhase.Published
+                    || Volatile.Read(ref _captureAuthorized) == 0
+                    || Volatile.Read(ref _forcedBlock) != 0
+                    || current.Target.State
+                        != NativeCaptureTargetIdentityState.Present
+                    || signals.Target.State
+                        != NativeCaptureTargetIdentityState.Present
+                    || !HasSameHardGateSignals(current, signals))
+                {
+                    return false;
+                }
+
+                Volatile.Write(ref _signals, signals);
+            }
+
+            var observation = CapturePrivacyObservation();
+            if (observation.Generation != privacyObservationGeneration
+                || observation.Signals != signals)
+            {
+                return false;
+            }
+
+            var application = await ApplyUnderGateAsync(
+                    Volatile.Read(ref _committedSettings),
+                    observation,
+                    forceBlock: false,
+                    CancellationToken.None)
+                .ConfigureAwait(false);
+            if (application.WasSuperseded
+                || !IsPrivacyObservationCurrent(observation))
+            {
+                if (application.WasCommitted
+                    && IsFullyAllowed(application.Context))
+                {
+                    await CompensateStaleAllowUnderGateAsync(
+                            application.Context)
+                        .ConfigureAwait(false);
+                }
+
+                return false;
+            }
+
+            return PublishAuthorization(application.Context, observation);
+        }
+        finally
+        {
+            _applyGate.Release();
+        }
+    }
     public long InvalidatePrivacyObservation()
     {
         InvalidOperationException? exhausted = null;
@@ -1189,6 +1262,18 @@ public sealed class NativeCapturePrivacyCoordinator
             && consent.PolicyVersion == AppSettingsService.CurrentRecordingConsentVersion;
     }
 
+    private static bool HasSameHardGateSignals(
+        NativeCapturePrivacySignals left,
+        NativeCapturePrivacySignals right)
+    {
+        return left.SessionUnlocked == right.SessionUnlocked
+            && left.SecureDesktopClear == right.SecureDesktopClear
+            && left.RemoteSession == right.RemoteSession
+            && left.PresentationMode == right.PresentationMode
+            && left.ApplicationAllowed == right.ApplicationAllowed
+            && left.WindowAllowed == right.WindowAllowed
+            && left.StorageAvailable == right.StorageAvailable;
+    }
     private static bool HasSameDecisions(
         NativeCaptureRuntimeAuthorization left,
         NativeCaptureRuntimeAuthorization right)

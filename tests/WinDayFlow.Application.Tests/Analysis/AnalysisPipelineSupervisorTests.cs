@@ -180,6 +180,78 @@ public sealed class AnalysisPipelineSupervisorTests
                 maximumJobsPerRun: 1));
     }
 
+    [Fact]
+    public async Task ParallelDrainHonorsProviderMaximumConcurrency()
+    {
+        const int jobCount = 6;
+        const int maximumConcurrency = 3;
+        var release = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var initialBatchStarted = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var callCount = 0;
+        var activeCount = 0;
+        var observedMaximum = 0;
+
+        async Task<AnalysisJobProcessResult> ProcessNextAsync(
+            CancellationToken cancellationToken)
+        {
+            var call = Interlocked.Increment(ref callCount);
+            if (call > jobCount)
+            {
+                return new AnalysisJobProcessResult(AnalysisJobProcessStatus.NoWork);
+            }
+
+            var active = Interlocked.Increment(ref activeCount);
+            UpdateMaximum(ref observedMaximum, active);
+            if (call == maximumConcurrency)
+            {
+                initialBatchStarted.TrySetResult();
+            }
+
+            try
+            {
+                await release.Task.WaitAsync(cancellationToken);
+                return new AnalysisJobProcessResult(AnalysisJobProcessStatus.Completed);
+            }
+            finally
+            {
+                Interlocked.Decrement(ref activeCount);
+            }
+        }
+
+        var drain = AnalysisPipelineSupervisor.DrainAsync(
+            ProcessNextAsync,
+            maximumJobs: 32,
+            maximumConcurrency,
+            CancellationToken.None);
+        await initialBatchStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(maximumConcurrency, Volatile.Read(ref observedMaximum));
+        release.TrySetResult();
+
+        var result = await drain;
+        Assert.Equal(jobCount, result.ProcessedJobCount);
+        Assert.Equal(jobCount, result.CompletedJobCount);
+        Assert.False(result.MoreWorkPossible);
+        Assert.InRange(Volatile.Read(ref observedMaximum), 1, maximumConcurrency);
+    }
+
+    private static void UpdateMaximum(ref int maximum, int value)
+    {
+        var current = Volatile.Read(ref maximum);
+        while (value > current)
+        {
+            var observed = Interlocked.CompareExchange(ref maximum, value, current);
+            if (observed == current)
+            {
+                return;
+            }
+
+            current = observed;
+        }
+    }
+
     private static async Task<TestHarness> CreateHarnessAsync(
         bool cloudEnabled,
         IReadOnlyList<CaptureChunk>? scannedChunks = null,

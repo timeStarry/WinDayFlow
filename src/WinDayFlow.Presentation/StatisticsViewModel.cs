@@ -10,6 +10,8 @@ public sealed partial class StatisticsViewModel : ObservableObject
 {
     private readonly IStatisticsService _service;
     private int _loadActive;
+    private DateTimeOffset _customRangeStart;
+    private DateTimeOffset _customRangeEnd;
 
     [ObservableProperty]
     private StatisticsRange _selectedRange = StatisticsRange.Today;
@@ -86,6 +88,23 @@ public sealed partial class StatisticsViewModel : ObservableObject
 
     public bool IsProductivityEmpty => !HasProductivityItems;
 
+    public bool TrySelectCustomRange(
+        DateTimeOffset rangeStart,
+        DateTimeOffset rangeEnd)
+    {
+        if (rangeEnd <= rangeStart)
+        {
+            ErrorMessage = "结束日期不能早于开始日期。";
+            return false;
+        }
+
+        _customRangeStart = rangeStart;
+        _customRangeEnd = rangeEnd;
+        SelectedRange = StatisticsRange.Custom;
+        ErrorMessage = string.Empty;
+        return true;
+    }
+
     public async Task LoadAsync(CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -98,8 +117,14 @@ public sealed partial class StatisticsViewModel : ObservableObject
         ErrorMessage = string.Empty;
         try
         {
-            var snapshot = await _service.GetAsync(SelectedRange, cancellationToken)
-                .ConfigureAwait(true);
+            var snapshot = SelectedRange == StatisticsRange.Custom
+                ? await _service.GetAsync(
+                        _customRangeStart,
+                        _customRangeEnd,
+                        cancellationToken)
+                    .ConfigureAwait(true)
+                : await _service.GetAsync(SelectedRange, cancellationToken)
+                    .ConfigureAwait(true);
             Apply(snapshot);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)

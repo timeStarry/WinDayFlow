@@ -149,6 +149,36 @@ public sealed class NativeCaptureRuntimeOwnerTests
     }
 
     [Fact]
+    public async Task FaultedBackendStopsWithoutTerminatingReusableOwner()
+    {
+        var backend = new ScriptedRuntimeBackend
+        {
+            TransitionFaultedToStoppedOnStop = true,
+        };
+        var owner = CreateOwner(backend);
+        var proof = Assert.IsAssignableFrom<
+            INativeCapturePrivacySignalSinkTermination>(owner);
+        try
+        {
+            backend.RaiseStatus(CaptureState.Faulted);
+
+            Assert.True(SpinWait.SpinUntil(
+                () => backend.StopCount == 1
+                    && backend.CurrentStatus.State == CaptureState.Stopped,
+                TimeSpan.FromSeconds(2)));
+            Assert.False(proof.IsTerminationStarted);
+            Assert.Equal(
+                CaptureReasonCode.BackendFault,
+                backend.CurrentStatus.Reason);
+            Assert.Equal(0, backend.DestroyCount);
+        }
+        finally
+        {
+            await owner.DisposeAsync();
+        }
+    }
+
+    [Fact]
     public async Task TerminalAuthorizationRaceDoesNotHideWaitFailure()
     {
         var waitFailure = new NativeCaptureException(
@@ -165,10 +195,15 @@ public sealed class NativeCaptureRuntimeOwnerTests
             WaitFailure = waitFailure,
         };
         var owner = CreateOwner(backend);
+        var proof = Assert.IsAssignableFrom<
+            INativeCapturePrivacySignalSinkTermination>(owner);
 
         backend.RaiseStatus(CaptureState.Faulted);
+        Assert.True(SpinWait.SpinUntil(
+            () => proof.IsTerminationStarted,
+            TimeSpan.FromSeconds(2)));
         var failure = await Assert.ThrowsAsync<NativeCaptureException>(
-            () => owner.Termination);
+            () => proof.Termination);
 
         Assert.Same(waitFailure, failure);
         Assert.Equal("wait_stopped", failure.Operation);
@@ -216,9 +251,14 @@ public sealed class NativeCaptureRuntimeOwnerTests
             WaitFailure = waitFailure,
         };
         var owner = CreateOwner(backend);
+        var proof = Assert.IsAssignableFrom<
+            INativeCapturePrivacySignalSinkTermination>(owner);
 
         backend.RaiseStatus(CaptureState.Faulted);
-        var automaticTermination = owner.Termination;
+        Assert.True(SpinWait.SpinUntil(
+            () => proof.IsTerminationStarted,
+            TimeSpan.FromSeconds(2)));
+        var automaticTermination = proof.Termination;
         var hostedShutdown = owner.DisposeAsync().AsTask();
 
         Assert.Same(automaticTermination, hostedShutdown);
@@ -696,6 +736,7 @@ public sealed class NativeCaptureRuntimeOwnerTests
     [Theory]
     [InlineData(CaptureReasonCode.SessionLocked)]
     [InlineData(CaptureReasonCode.PolicyBlocked)]
+    [InlineData(CaptureReasonCode.BackendFault)]
     public async Task AutomaticProtectionStopReconcilesAndAllowsFreshAdmission(
         CaptureReasonCode reason)
     {
@@ -743,7 +784,6 @@ public sealed class NativeCaptureRuntimeOwnerTests
 
     [Theory]
     [InlineData(CaptureReasonCode.UserStopped)]
-    [InlineData(CaptureReasonCode.BackendFault)]
     [InlineData(CaptureReasonCode.Shutdown)]
     public async Task NonProtectionStoppedEventsDoNotReconcileAuthorization(
         CaptureReasonCode reason)
@@ -922,6 +962,8 @@ public sealed class NativeCaptureRuntimeOwnerTests
 
         public bool RejectAdmissionIssue { get; init; }
 
+        public bool TransitionFaultedToStoppedOnStop { get; init; }
+
         public NativeCaptureResult DestroyResult { get; init; } =
             NativeCaptureResult.Ok;
 
@@ -1075,6 +1117,13 @@ public sealed class NativeCaptureRuntimeOwnerTests
         {
             cancellationToken.ThrowIfCancellationRequested();
             StopCount++;
+            if (TransitionFaultedToStoppedOnStop
+                && CurrentStatus.State == CaptureState.Faulted)
+            {
+                RaiseStatus(
+                    CaptureState.Stopped,
+                    CaptureReasonCode.BackendFault);
+            }
             return Task.CompletedTask;
         }
 

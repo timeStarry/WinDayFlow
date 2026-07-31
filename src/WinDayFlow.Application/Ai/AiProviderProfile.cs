@@ -8,6 +8,7 @@ public enum AiProviderKind
 public sealed record AiProviderProfile
 {
     public const int MaximumEndpointLength = 4096;
+    public const int MaximumConcurrencyLimit = 16;
 
     public static readonly TimeSpan MinimumRequestTimeout = TimeSpan.FromMilliseconds(100);
     public static readonly TimeSpan MaximumRequestTimeout = TimeSpan.FromMinutes(10);
@@ -18,7 +19,8 @@ public sealed record AiProviderProfile
         AiProviderKind kind,
         Uri baseEndpoint,
         string model,
-        TimeSpan requestTimeout)
+        TimeSpan requestTimeout,
+        int maximumConcurrency = 1)
     {
         if (id == Guid.Empty)
         {
@@ -64,12 +66,21 @@ public sealed record AiProviderProfile
                 $"The AI request timeout must be between {MinimumRequestTimeout} and {MaximumRequestTimeout}.");
         }
 
+        if (maximumConcurrency is < 1 or > MaximumConcurrencyLimit)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(maximumConcurrency),
+                maximumConcurrency,
+                $"The AI provider maximum concurrency must be between 1 and {MaximumConcurrencyLimit}.");
+        }
+
         Id = id;
         DisplayName = displayName;
         Kind = kind;
         BaseEndpoint = ValidateAndNormalizeEndpoint(baseEndpoint);
         Model = model;
         RequestTimeout = requestTimeout;
+        MaximumConcurrency = maximumConcurrency;
     }
 
     public Guid Id { get; }
@@ -83,6 +94,8 @@ public sealed record AiProviderProfile
     public string Model { get; }
 
     public TimeSpan RequestTimeout { get; }
+
+    public int MaximumConcurrency { get; }
 
     public bool IsLoopback => BaseEndpoint.IsLoopback;
 

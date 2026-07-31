@@ -5,7 +5,7 @@ namespace WinDayFlow.Infrastructure.Persistence;
 
 public sealed class SqliteDatabaseInitializer
 {
-    private const int LatestSchemaVersion = 13;
+    private const int LatestSchemaVersion = 15;
 
     private const string CreateMigrationTableSql = """
         CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -1261,6 +1261,20 @@ public sealed class SqliteDatabaseInitializer
         VALUES (13, 0, NULL);
         """;
 
+    private const string MigrationVersion14Sql = """
+        ALTER TABLE app_settings
+        ADD COLUMN evidence_retention_unlimited INTEGER NOT NULL DEFAULT 0 CHECK (
+            evidence_retention_unlimited IN (0, 1)
+        );
+        """;
+
+    private const string MigrationVersion15Sql = """
+        ALTER TABLE ai_provider_profiles
+        ADD COLUMN maximum_concurrency INTEGER NOT NULL DEFAULT 1 CHECK (
+            maximum_concurrency BETWEEN 1 AND 16
+        );
+        """;
+
     private static readonly IReadOnlyList<Migration> Migrations =
     [
         new(1, MigrationVersion1Sql),
@@ -1276,6 +1290,8 @@ public sealed class SqliteDatabaseInitializer
         new(11, MigrationVersion11Sql),
         new(12, MigrationVersion12Sql),
         new(13, MigrationVersion13Sql),
+        new(14, MigrationVersion14Sql),
+        new(15, MigrationVersion15Sql),
     ];
 
     private readonly SqliteConnectionFactory _connectionFactory;

@@ -776,6 +776,15 @@ CaptureInstanceController::safety_snapshot() const {
   return safety_.observable_snapshot();
 }
 
+bool CaptureInstanceController::IsSupersededPauseCheckpointAccepted(
+    uint64_t checkpoint_pause_epoch, uint64_t expected_pause_epoch,
+    wdf_capture_state state) noexcept {
+  return checkpoint_pause_epoch != 0 &&
+         checkpoint_pause_epoch < expected_pause_epoch &&
+         (state == WDF_CAPTURE_STATE_PAUSING ||
+          state == WDF_CAPTURE_STATE_PAUSED);
+}
+
 bool CaptureInstanceController::OnWorkerCheckpoint(
     uint64_t run_id, const CaptureWorkerCheckpoint& checkpoint) noexcept {
   try {
@@ -805,8 +814,14 @@ bool CaptureInstanceController::OnWorkerCheckpoint(
         {
           std::lock_guard run_lock(active_run_->mutex);
           if (checkpoint.pause_epoch == 0 ||
-              checkpoint.pause_epoch != active_run_->expected_pause_epoch) {
+              checkpoint.pause_epoch > active_run_->expected_pause_epoch) {
             return false;
+          }
+          if (IsSupersededPauseCheckpointAccepted(
+                  checkpoint.pause_epoch,
+                  active_run_->expected_pause_epoch,
+                  state_)) {
+            return true;
           }
           pause_reason = active_run_->pause_reason;
         }

@@ -190,6 +190,40 @@ public sealed class AnalysisPipelineEndToEndTests
             AnalysisStage.TimelineAnalysis));
     }
 
+    [Fact]
+    public async Task MaximumConcurrencyUpdatePreservesExistingStageValidation()
+    {
+        using var database = new TemporaryDatabase();
+        var (routing, _, providerFactory) = await CreateRoutingAsync(database);
+        var profile = await routing.CreateProfileAsync(
+            "Local compatible provider",
+            "http://127.0.0.1:11434/v1",
+            "vision-model",
+            requestTimeoutSeconds: 30,
+            apiKey: null);
+        _ = await routing.ValidateStageAsync(
+            profile.Profile.Id,
+            AnalysisStage.TimelineAnalysis);
+
+        var updated = await routing.UpdateProfileAsync(
+            profile.Profile.Id,
+            expectedRevision: profile.Revision,
+            profile.Profile.DisplayName,
+            profile.Profile.BaseEndpoint.ToString(),
+            profile.Profile.Model,
+            requestTimeoutSeconds: 30,
+            replacementApiKey: null,
+            clearApiKey: false,
+            maximumConcurrency: 4);
+
+        Assert.Equal(4, updated.Profile.MaximumConcurrency);
+        Assert.NotNull(await routing.GetStageValidationAsync(
+            updated.Profile.Id,
+            updated.Revision,
+            AnalysisStage.TimelineAnalysis));
+        Assert.Equal(1, providerFactory.Provider.TimelineCalls);
+    }
+
     private static async Task<(
         AiProviderRoutingService Routing,
         SqliteConnectionFactory ConnectionFactory,

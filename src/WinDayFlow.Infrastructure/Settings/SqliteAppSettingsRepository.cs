@@ -15,7 +15,8 @@ public sealed class SqliteAppSettingsRepository : IAppSettingsRepository
             evidence_retention_days,
             capture_privacy_revision,
             capture_interval_seconds,
-            capture_intent
+            capture_intent,
+            evidence_retention_unlimited
         FROM app_settings
         WHERE id = 1;
         """;
@@ -221,7 +222,12 @@ public sealed class SqliteAppSettingsRepository : IAppSettingsRepository
                 capture_consent_version = $capture_consent_version,
                 capture_consent_granted_at_utc = $capture_consent_granted_at_utc,
                 capture_consent_privacy_revision = NULL,
-                evidence_retention_days = $evidence_retention_days,
+                evidence_retention_days = CASE
+                    WHEN $evidence_retention_unlimited = 1
+                    THEN evidence_retention_days
+                    ELSE $evidence_retention_days
+                END,
+                evidence_retention_unlimited = $evidence_retention_unlimited,
                 exclude_sensitive_applications = 0,
                 pause_in_remote_sessions = 0,
                 pause_during_screen_sharing = 0,
@@ -245,7 +251,14 @@ public sealed class SqliteAppSettingsRepository : IAppSettingsRepository
             ?? (object)DBNull.Value);
         command.Parameters.AddWithValue(
             "$evidence_retention_days",
-            settings.Evidence.RetentionDays);
+            settings.Evidence.RetentionDays
+                == EvidenceSettings.UnlimitedRetentionDays
+                    ? EvidenceSettings.DefaultRetentionDays
+                    : settings.Evidence.RetentionDays);
+        command.Parameters.AddWithValue(
+            "$evidence_retention_unlimited",
+            settings.Evidence.RetentionDays
+                == EvidenceSettings.UnlimitedRetentionDays ? 1 : 0);
         command.Parameters.AddWithValue(
             "$rules_revision",
             settings.Evidence.RulesRevision);
@@ -437,7 +450,12 @@ public sealed class SqliteAppSettingsRepository : IAppSettingsRepository
                 theme,
                 consent,
                 new EvidenceSettings(
-                    checked((int)reader.GetInt64(3)),
+                    ReadBoolean(
+                        reader,
+                        7,
+                        "evidence_retention_unlimited")
+                            ? EvidenceSettings.UnlimitedRetentionDays
+                            : checked((int)reader.GetInt64(3)),
                     reader.GetInt64(4),
                     CaptureExclusionRuleSet.Empty),
                 checked((int)reader.GetInt64(5)),

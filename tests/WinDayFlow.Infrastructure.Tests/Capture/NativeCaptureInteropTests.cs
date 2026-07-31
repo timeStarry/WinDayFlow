@@ -471,6 +471,32 @@ public sealed class NativeCaptureInteropTests
     }
 
     [Fact]
+    public async Task InconsistentHealthCountersAreRetriedWithoutFaultingCapture()
+    {
+        using var directory = new TemporaryDirectory();
+        using var nativeApi = new FakeNativeCaptureApi
+        {
+            HealthState = CaptureState.Recording,
+            HealthLastSuccessfulSampleUnixMilliseconds = DateTimeOffset.UtcNow
+                .ToUnixTimeMilliseconds(),
+            HealthSampledFrameCount = 1,
+            HealthRetainedFrameCount = 1,
+            HealthRevision = 2,
+            InconsistentHealthSnapshotReadCount = 3,
+        };
+        using var backend = CreateBackend(directory.Path, nativeApi);
+
+        await WaitUntilAsync(
+            () => nativeApi.GetHealthSnapshotCallCount > 3,
+            TimeSpan.FromSeconds(3));
+
+        Assert.NotEqual(CaptureState.Faulted, backend.CurrentStatus.State);
+        Assert.Equal(0, nativeApi.RequestStopCallCount);
+        Assert.Equal<ulong>(1, backend.CurrentHealthSnapshot.SampledFrameCount);
+        Assert.Equal<ulong>(1, backend.CurrentHealthSnapshot.RetainedFrameCount);
+    }
+
+    [Fact]
     public async Task PrivacyUpdatesRejectStaleAndConflictingRevisions()
     {
         var probe = NativeCaptureBackend.Probe();
@@ -1519,6 +1545,55 @@ public sealed class NativeCaptureInteropTests
     }
 
     [Fact]
+    public async Task SealedChunkFromHotDisplayRebindUsesPreviousBoundary()
+    {
+        using var directory = new TemporaryDirectory();
+        using var nativeApi = new FakeNativeCaptureApi();
+        using var backend = CreateBackend(directory.Path, nativeApi);
+        var initial = CreateAllowedRuntimeAuthorization(runtimePolicyRevision: 2);
+        var previousGeneration = await backend
+            .UpdateRuntimeAuthorizationAsync(initial);
+        nativeApi.Enqueue(
+            sequence: 1,
+            NativeCaptureEventKind.StateChanged,
+            CaptureState.Recording,
+            detail: "recording");
+        await WaitUntilAsync(
+            () => backend.CurrentStatus.Sequence == 1,
+            TimeSpan.FromSeconds(2));
+        var committed = new TaskCompletionSource<NativeCaptureChunkCommitted>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        backend.ChunkCommitted += (_, eventArgs) =>
+            committed.TrySetResult(eventArgs.Chunk);
+        nativeApi.AfterRuntimeAuthorizationCommit = () => nativeApi.Enqueue(
+            sequence: 2,
+            NativeCaptureEventKind.ChunkCommitted,
+            CaptureState.Paused,
+            detail: "chunks/hot-rebind-sealed-prefix",
+            persistenceGeneration: previousGeneration,
+            targetEpoch: initial.Target.TargetEpoch);
+        var rebound = new NativeCaptureRuntimeAuthorization(
+            CopyPrivacyContext(
+                initial.PrivacyContext,
+                policyRevision: 3,
+                NativeCapturePolicyDecision.Allow),
+            NativeCaptureTargetIdentity.DisplayWide(
+                targetEpoch: 2,
+                displayMonitorHandle: 0x6002,
+                displayDeviceKey: @"\\.\DISPLAY2"));
+
+        var reboundGeneration = await backend
+            .UpdateRuntimeAuthorizationAsync(rebound);
+        var chunk = await committed.Task.WaitAsync(TimeSpan.FromSeconds(2));
+
+        Assert.True(reboundGeneration > previousGeneration);
+        Assert.Equal(previousGeneration, chunk.PersistenceGeneration);
+        Assert.Equal(initial.Target.TargetEpoch, chunk.TargetEpoch);
+        Assert.NotEqual(CaptureState.Faulted, backend.CurrentStatus.State);
+        Assert.Equal(0, nativeApi.RequestStopCallCount);
+    }
+
+    [Fact]
     public async Task SealedChunkBoundaryIsConsumedAfterOnePublication()
     {
         using var directory = new TemporaryDirectory();
@@ -2097,6 +2172,8 @@ public sealed class NativeCaptureInteropTests
 
         public ulong HealthRevision { get; set; } = 1;
 
+        public int InconsistentHealthSnapshotReadCount { get; init; }
+
         public uint LastCaptureIntervalMilliseconds { get; private set; }
 
         public uint LastChunkDurationMilliseconds { get; private set; }
@@ -2165,13 +2242,16 @@ public sealed class NativeCaptureInteropTests
             ref NativeCaptureHealthSnapshotV2 snapshot)
         {
             _ = handle;
-            Interlocked.Increment(ref _getHealthSnapshotCallCount);
+            var call = Interlocked.Increment(ref _getHealthSnapshotCallCount);
             snapshot.State = (int)HealthState;
             snapshot.Reason = (int)CaptureReasonCode.None;
             snapshot.LastSuccessfulSampleUnixMilliseconds =
                 HealthLastSuccessfulSampleUnixMilliseconds;
             snapshot.SampledFrameCount = HealthSampledFrameCount;
-            snapshot.RetainedFrameCount = HealthRetainedFrameCount;
+            snapshot.RetainedFrameCount =
+                call <= InconsistentHealthSnapshotReadCount
+                    ? HealthSampledFrameCount + 1
+                    : HealthRetainedFrameCount;
             snapshot.Revision = HealthRevision;
             return NativeCaptureResult.Ok;
         }

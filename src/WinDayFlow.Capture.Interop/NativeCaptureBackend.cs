@@ -12,6 +12,7 @@ internal sealed class NativeCaptureBackend
     private const string FoundationUnavailableDetail =
         "原生录制基础已加载；实时屏幕捕获能力尚未启用。";
     private const int MaximumEventDetailBytes = 1024 * 1024;
+    private const int HealthSnapshotConsistencyReadAttempts = 3;
     private const uint PollTimeoutMilliseconds = 250;
     private static readonly TimeSpan HealthPollInterval = TimeSpan.FromSeconds(2);
     internal const uint StopTimeoutMilliseconds = 5_000;
@@ -1102,6 +1103,22 @@ internal sealed class NativeCaptureBackend
                             .SupersededBeforeCommit);
                 }
 
+                var previousBoundary = Volatile.Read(ref _persistenceBoundary);
+                if (CurrentStatus.State is CaptureState.Starting
+                    or CaptureState.Recording
+                    or CaptureState.Pausing
+                    or CaptureState.Resuming
+                    or CaptureState.NeedsAttention)
+                {
+                    RetainSealedPersistenceBoundary(
+                        previousBoundary,
+                        expectedCallbackInvalidationGeneration);
+                }
+                else
+                {
+                    Interlocked.Exchange(ref _pendingSealedBoundary, null);
+                }
+
                 var result = _nativeApi.UpdateRuntimeAuthorization(
                     _handle,
                     ref nativeAuthorization,
@@ -1315,19 +1332,36 @@ internal sealed class NativeCaptureBackend
     private void PollHealthSnapshot(DateTimeOffset observedAt)
     {
         var native = NativeCaptureHealthSnapshotV2.Create();
-        var result = _nativeApi.GetHealthSnapshot(_handle, ref native);
-        if (result != NativeCaptureResult.Ok)
+        var hasConsistentFrameCounts = false;
+        for (var attempt = 0;
+             attempt < HealthSnapshotConsistencyReadAttempts;
+             attempt++)
         {
-            throw new NativeCaptureException(result, "get_health_snapshot");
+            native = NativeCaptureHealthSnapshotV2.Create();
+            var result = _nativeApi.GetHealthSnapshot(_handle, ref native);
+            if (result != NativeCaptureResult.Ok)
+            {
+                throw new NativeCaptureException(result, "get_health_snapshot");
+            }
+            if (native.StructSize < NativeCaptureAbiContract.HealthSnapshotStructureSize
+                || native.AbiVersion != NativeCaptureAbiContract.AbiVersion
+                || !Enum.IsDefined((CaptureState)native.State)
+                || !Enum.IsDefined((CaptureReasonCode)native.Reason))
+            {
+                throw new InvalidDataException("The native capture health snapshot is invalid.");
+            }
+            if (HasConsistentHealthFrameCounts(native))
+            {
+                hasConsistentFrameCounts = true;
+                break;
+            }
+
+            Thread.Yield();
         }
-        if (native.StructSize < NativeCaptureAbiContract.HealthSnapshotStructureSize
-            || native.AbiVersion != NativeCaptureAbiContract.AbiVersion
-            || !Enum.IsDefined((CaptureState)native.State)
-            || !Enum.IsDefined((CaptureReasonCode)native.Reason)
-            || native.BlackFrameCount + native.DuplicateFrameCount
-                + native.RetainedFrameCount > native.SampledFrameCount)
+
+        if (!hasConsistentFrameCounts)
         {
-            throw new InvalidDataException("The native capture health snapshot is invalid.");
+            return;
         }
 
         var snapshot = new CaptureHealthSnapshot(
@@ -1377,6 +1411,24 @@ internal sealed class NativeCaptureBackend
                 current.Sequence,
                 snapshot.GateReason));
         }
+    }
+
+    private static bool HasConsistentHealthFrameCounts(
+        NativeCaptureHealthSnapshotV2 snapshot)
+    {
+        if (snapshot.BlackFrameCount > snapshot.SampledFrameCount)
+        {
+            return false;
+        }
+
+        var remaining = snapshot.SampledFrameCount - snapshot.BlackFrameCount;
+        if (snapshot.DuplicateFrameCount > remaining)
+        {
+            return false;
+        }
+
+        return snapshot.RetainedFrameCount
+            <= remaining - snapshot.DuplicateFrameCount;
     }
 
     private static DateTimeOffset? FromOptionalUnixMilliseconds(long value)
@@ -2245,11 +2297,6 @@ internal sealed class NativeCaptureBackend
         NativePersistenceBoundary current,
         long callbackGeneration)
     {
-        if (callbackGeneration <= 0)
-        {
-            return;
-        }
-
         while (true)
         {
             var pending = Volatile.Read(ref _pendingSealedBoundary);

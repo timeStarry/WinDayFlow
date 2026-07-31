@@ -51,6 +51,13 @@ class CaptureInstanceControllerTestPeer {
     return controller.runtime_.ReadControlSnapshot().pause_epoch;
   }
 
+  static bool IsSupersededPauseCheckpointAccepted(
+      uint64_t checkpoint_pause_epoch, uint64_t expected_pause_epoch,
+      wdf_capture_state state) {
+    return CaptureInstanceController::IsSupersededPauseCheckpointAccepted(
+        checkpoint_pause_epoch, expected_pause_epoch, state);
+  }
+
   static uint64_t InvalidateAuthorizationWithoutPausing(
       CaptureInstanceController& controller) {
     return controller.safety_.InvalidateAuthorizationAdmission();
@@ -939,6 +946,35 @@ bool TestPausingUserReasonSurvivesAuthorizationUpdates() {
   return stopped;
 }
 
+bool TestStalePausedCheckpointIsIgnoredAfterPauseEpochAdvances() {
+  using windayflow::capture::CaptureInstanceControllerTestPeer;
+  return Expect(
+             CaptureInstanceControllerTestPeer::
+                 IsSupersededPauseCheckpointAccepted(
+                     1, 2, WDF_CAPTURE_STATE_PAUSING),
+             "superseded Paused checkpoint was rejected while PAUSING") &&
+         Expect(
+             CaptureInstanceControllerTestPeer::
+                 IsSupersededPauseCheckpointAccepted(
+                     1, 2, WDF_CAPTURE_STATE_PAUSED),
+             "superseded Paused checkpoint was rejected while PAUSED") &&
+         Expect(
+             !CaptureInstanceControllerTestPeer::
+                 IsSupersededPauseCheckpointAccepted(
+                     1, 2, WDF_CAPTURE_STATE_RECORDING),
+             "superseded Paused checkpoint escaped a non-pause state") &&
+         Expect(
+             !CaptureInstanceControllerTestPeer::
+                 IsSupersededPauseCheckpointAccepted(
+                     2, 2, WDF_CAPTURE_STATE_PAUSING),
+             "current Paused checkpoint was classified as superseded") &&
+         Expect(
+             !CaptureInstanceControllerTestPeer::
+                 IsSupersededPauseCheckpointAccepted(
+                     0, 2, WDF_CAPTURE_STATE_PAUSING),
+             "zero Paused checkpoint epoch was accepted");
+}
+
 bool TestLateReadyDoesNotEscapeAuthorizationPause() {
   auto backend_state = std::make_shared<BackendState>();
   CaptureInstanceControllerConfiguration configuration;
@@ -1431,6 +1467,7 @@ int main() {
       !TestWaitLeaderTimeoutAndFollowerTakeover() ||
       !TestPausingReasonTracksLatestBlockingAuthorization() ||
       !TestPausingUserReasonSurvivesAuthorizationUpdates() ||
+      !TestStalePausedCheckpointIsIgnoredAfterPauseEpochAdvances() ||
       !TestLateReadyDoesNotEscapeAuthorizationPause() ||
       !TestStopRevokesAuthorizationBeforeWorkerStart() ||
       !TestDestructorJoinsActiveWorker() ||

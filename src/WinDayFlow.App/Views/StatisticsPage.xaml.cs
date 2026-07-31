@@ -14,7 +14,9 @@ public sealed partial class StatisticsPage : Page, IDisposable
     {
         ViewModel = App.GetService<StatisticsViewModel>();
         InitializeComponent();
-        TodayRange.IsChecked = true;
+        RangeSelector.SelectedItem = TodayRange;
+        SetPresetDates(StatisticsRange.Today);
+        UpdateRangeSummary(StatisticsRange.Today);
     }
 
     public StatisticsViewModel ViewModel { get; }
@@ -41,17 +43,104 @@ public sealed partial class StatisticsPage : Page, IDisposable
         _lifetime = null;
     }
 
-    private async void OnRangeChanged(object sender, RoutedEventArgs e)
+    private async void OnRangeChanged(
+        SelectorBar sender,
+        SelectorBarSelectionChangedEventArgs e)
     {
-        if (sender is RadioButton { IsChecked: true, Tag: string value }
-            && Enum.TryParse<StatisticsRange>(value, out var range))
+        _ = e;
+        var range = sender.SelectedItem switch
         {
-            ViewModel.SelectedRange = range;
-            await LoadAsync();
+            var item when ReferenceEquals(item, TodayRange) => StatisticsRange.Today,
+            var item when ReferenceEquals(item, SevenDaysRange) => StatisticsRange.SevenDays,
+            var item when ReferenceEquals(item, ThirtyDaysRange) => StatisticsRange.ThirtyDays,
+            var item when ReferenceEquals(item, AllRange) => StatisticsRange.All,
+            var item when ReferenceEquals(item, CustomRange) => StatisticsRange.Custom,
+            _ => (StatisticsRange?)null,
+        };
+        if (range is null)
+        {
+            return;
         }
+
+        if (range == StatisticsRange.Custom)
+        {
+            RangeSummaryButton.Flyout.ShowAt(RangeSummaryButton);
+            return;
+        }
+
+        ViewModel.SelectedRange = range.Value;
+        ViewModel.ErrorMessage = string.Empty;
+        SetPresetDates(range.Value);
+        UpdateRangeSummary(range.Value);
+        await LoadAsync();
+    }
+
+    private async void OnApplyDateRange(object sender, RoutedEventArgs e)
+    {
+        _ = sender;
+        _ = e;
+        if (StartDatePicker.Date is not { } selectedStart
+            || EndDatePicker.Date is not { } selectedEnd)
+        {
+            ViewModel.ErrorMessage = "请选择开始日期和结束日期。";
+            return;
+        }
+
+        var start = StartOfLocalDay(selectedStart);
+        var end = StartOfLocalDay(selectedEnd).AddDays(1);
+        if (!ViewModel.TrySelectCustomRange(start, end))
+        {
+            return;
+        }
+
+        RangeSelector.SelectedItem = CustomRange;
+        UpdateRangeSummary(StatisticsRange.Custom);
+        RangeSummaryButton.Flyout.Hide();
+        await LoadAsync();
     }
 
     private async void OnRefresh(object sender, RoutedEventArgs e) => await LoadAsync();
+
+    private void SetPresetDates(StatisticsRange range)
+    {
+        var today = StartOfLocalDay(DateTimeOffset.Now);
+        EndDatePicker.Date = today;
+        StartDatePicker.Date = range switch
+        {
+            StatisticsRange.Today => today,
+            StatisticsRange.SevenDays => today.AddDays(-6),
+            StatisticsRange.ThirtyDays => today.AddDays(-29),
+            StatisticsRange.All => null,
+            _ => StartDatePicker.Date,
+        };
+    }
+
+    private void UpdateRangeSummary(StatisticsRange range)
+    {
+        RangeSummaryText.Text = range switch
+        {
+            StatisticsRange.Today => "今天",
+            StatisticsRange.SevenDays => "过去 7 天",
+            StatisticsRange.ThirtyDays => "过去 30 天",
+            StatisticsRange.All => "全部时间",
+            StatisticsRange.Custom
+                when StartDatePicker.Date is { } start
+                    && EndDatePicker.Date is { } end =>
+                $"{start:yyyy/M/d} - {end:yyyy/M/d}",
+            _ => "选择日期范围",
+        };
+    }
+
+    private static DateTimeOffset StartOfLocalDay(DateTimeOffset value)
+    {
+        var localDate = DateOnly.FromDateTime(value.LocalDateTime);
+        var localStart = DateTime.SpecifyKind(
+            localDate.ToDateTime(TimeOnly.MinValue),
+            DateTimeKind.Unspecified);
+        return new DateTimeOffset(
+            localStart,
+            TimeZoneInfo.Local.GetUtcOffset(localStart));
+    }
 
     private async Task LoadAsync()
     {

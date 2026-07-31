@@ -37,6 +37,16 @@ public enum AiProviderErrorCode
     Unknown = 255,
 }
 
+public enum AiProviderResponseFailureKind
+{
+    ResponseTooLarge = 0,
+    InvalidEncoding = 1,
+    EnvelopeInvalid = 2,
+    CompletionIncomplete = 3,
+    StructuredContentInvalid = 4,
+    SemanticValidationFailed = 5,
+}
+
 public sealed class AiProviderException : Exception
 {
     public AiProviderException(
@@ -47,7 +57,8 @@ public sealed class AiProviderException : Exception
         TimeSpan? retryAfter = null,
         int? transportStatusCode = null,
         string? providerRequestId = null,
-        Exception? innerException = null)
+        Exception? innerException = null,
+        AiProviderResponseFailureKind? responseFailureKind = null)
         : base(message, innerException)
     {
         if (!Enum.IsDefined(errorCode))
@@ -75,12 +86,23 @@ public sealed class AiProviderException : Exception
                 "The transport status code must be a valid HTTP status code.");
         }
 
+        if (responseFailureKind is { } failureKind
+            && (!Enum.IsDefined(failureKind)
+                || errorCode != AiProviderErrorCode.InvalidResponse))
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(responseFailureKind),
+                responseFailureKind,
+                "A response failure kind requires a defined invalid-response provider error.");
+        }
+
         ErrorCode = errorCode;
         CorrelationId = correlationId;
         IsRetryable = isRetryable;
         RetryAfter = retryAfter;
         TransportStatusCode = transportStatusCode;
         ProviderRequestId = NormalizeProviderRequestId(providerRequestId);
+        ResponseFailureKind = responseFailureKind;
     }
 
     public AiProviderErrorCode ErrorCode { get; }
@@ -94,6 +116,8 @@ public sealed class AiProviderException : Exception
     public int? TransportStatusCode { get; }
 
     public string? ProviderRequestId { get; }
+
+    public AiProviderResponseFailureKind? ResponseFailureKind { get; }
 
     private static string? NormalizeProviderRequestId(string? providerRequestId)
     {

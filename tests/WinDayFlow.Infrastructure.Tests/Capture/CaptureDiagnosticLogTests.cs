@@ -30,6 +30,38 @@ public sealed class CaptureDiagnosticLogTests
     }
 
     [Fact]
+    public void WritesPrivacyDecisionWithoutIdentityOrPayloadData()
+    {
+        WithTemporaryLog((log, _) =>
+        {
+            log.Write(
+                CaptureDiagnosticEvent.PrivacyDecisionEvaluated,
+                new(CaptureDiagnosticField.Generation, 9),
+                new(CaptureDiagnosticField.Accepted, 1),
+                new(CaptureDiagnosticField.CaptureAllowed, 0),
+                new(CaptureDiagnosticField.ConsentGranted, 1),
+                new(CaptureDiagnosticField.TargetState, 2));
+
+            var text = File.ReadAllText(log.FilePath);
+            using var record = JsonDocument.Parse(text);
+            var root = record.RootElement;
+            Assert.Equal(
+                "privacy_decision_evaluated",
+                root.GetProperty("event").GetString());
+            Assert.Equal(0, root.GetProperty("captureAllowed").GetInt64());
+            Assert.Equal(1, root.GetProperty("consentGranted").GetInt64());
+            Assert.DoesNotContain(
+                "windowTitle",
+                text,
+                StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain(
+                "payload",
+                text,
+                StringComparison.OrdinalIgnoreCase);
+        });
+    }
+
+    [Fact]
     public void RotatesAtTheConfiguredBoundAndRetainsOnlyRequestedBackups()
     {
         WithTemporaryLog((_, filePath) =>

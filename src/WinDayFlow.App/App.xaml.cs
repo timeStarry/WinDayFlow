@@ -155,12 +155,24 @@ public partial class App : Microsoft.UI.Xaml.Application, IDisposable
                 .InitializeAsync();
             var settings = _host.Services.GetRequiredService<AppSettingsService>();
             await settings.InitializeAsync();
+            // Subscribe to runtime authorization before hosted capture monitoring
+            // publishes its first snapshot, so persisted Recording intent is restored.
+            var captureService =
+                _host.Services.GetRequiredService<ICaptureService>();
             await _host.StartAsync();
+            var runtimeAuthorization = _host.Services
+                .GetRequiredService<ICaptureRuntimeAuthorization>();
+            if (settings.Current.CaptureIntent == CaptureIntent.Recording
+                && runtimeAuthorization.IsCaptureAuthorized
+                && captureService.CurrentStatus.State == CaptureState.Stopped)
+            {
+                await captureService.StartAsync();
+            }
             ApplyTheme(settings.Current.Theme);
             _window = _host.Services.GetRequiredService<MainWindow>();
             _appWindow = _window.AppWindow;
             _windowCloseCoordinator = new CaptureAwareWindowCloseCoordinator(
-                _host.Services.GetRequiredService<ICaptureService>().StopAsync,
+                captureService.StopAsync,
                 CompleteShutdownBeforeCloseAsync,
                 _window.Close,
                 Program.WriteShutdownFailure);

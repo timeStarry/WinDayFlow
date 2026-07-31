@@ -11,6 +11,7 @@ public sealed record EvidenceSettings(
     public const int MinimumRetentionDays = 1;
     public const int MaximumRetentionDays = 365;
     public const int DefaultRetentionDays = 30;
+    public const int UnlimitedRetentionDays = 0;
 
     public static EvidenceSettings Default { get; } = new(
         DefaultRetentionDays,
@@ -75,12 +76,13 @@ public sealed record EvidenceSettings(
 
     private static int ValidateRetentionDays(int retentionDays)
     {
-        if (retentionDays is < MinimumRetentionDays or > MaximumRetentionDays)
+        if (retentionDays != UnlimitedRetentionDays
+            && retentionDays is < MinimumRetentionDays or > MaximumRetentionDays)
         {
             throw new ArgumentOutOfRangeException(
                 nameof(retentionDays),
                 retentionDays,
-                $"Evidence retention must be between {MinimumRetentionDays} and {MaximumRetentionDays} days.");
+                $"Evidence retention must be unlimited or between {MinimumRetentionDays} and {MaximumRetentionDays} days.");
         }
 
         return retentionDays;
